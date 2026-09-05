@@ -17,12 +17,23 @@ Quick start: `uv sync`, build ArduPilot per the setup guide, then `make hub` and
 Team components:
 
 - [`platform/`](platform/) — companion software, ground station, simulator, site model, shared wire contracts, scripts, hardware documentation, and imported design assets.
-- [`argus-core/`](argus-core/) — decision and validation component maintained as a separate Python package.
-- [`contracts/`](contracts/) — the team's earlier Pydantic model contracts.
+- [`argus-core/`](argus-core/) — decision, validation, and vision component maintained as a separate Python package.
 - [`mock-drone-agent/`](mock-drone-agent/) — mock-agent scenarios, schemas, and reports.
-- [`docs/`](docs/) — cross-component architecture decisions, site policy, failure modes, and specifications.
+- [`contracts/`](contracts/) — the Hub's domain contracts (Pydantic); every model names a term from [`CONTEXT.md`](CONTEXT.md).
+- [`docs/`](docs/) — cross-component architecture decisions, site policy, and failure modes.
 - [`docs/REPOSITORY_REVIEW.md`](docs/REPOSITORY_REVIEW.md) — provenance evidence, contract discrepancies, and adapter guidance.
 - [`docs/BASIC_DEMO_PENDING.md`](docs/BASIC_DEMO_PENDING.md) — basic demo gates, teammate progress, and video evidence plan.
+
+Shared design documents for the ARGUS stack: [`ARCHITECTURE.md`](ARCHITECTURE.md)
+(build plan), [`CONTEXT.md`](CONTEXT.md) (vocabulary), and
+[`docs/specs/0001-argus-simulated-site-monitoring.md`](docs/specs/0001-argus-simulated-site-monitoring.md)
+(spec and user stories).
+
+**Two runtimes currently coexist.** The ARGUS stack above (`hub/`, `console/`,
+`sim/`, `contracts/`) and the retrofit under `platform/` both implement the same
+demo against different site models, contracts, and simulators. See
+[`docs/BASIC_DEMO_PENDING.md`](docs/BASIC_DEMO_PENDING.md) for which one the basic
+demo runs on.
 
 ## Platform commands
 

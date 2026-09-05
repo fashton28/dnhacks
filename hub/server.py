@@ -20,7 +20,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from contracts.models import DroneState, DroneStatus, FlightPlan, ManualCommand, Scenario, SceneProp, SceneState
+from contracts.models import Detection, DroneState, DroneStatus, FlightPlan, ManualCommand, Scenario, SceneProp, SceneState
 from contracts.protocol import (
     Ack,
     CaptureFrame,
@@ -41,6 +41,7 @@ from contracts.protocol import (
 )
 from contracts.site import SITE_NAME
 from hub.audit import AuditLog
+from hub.detections import DetectionStore
 from hub.manual import ManualControl
 from hub.missions import MissionPhase, MissionRunner
 from hub.registry import Registry
@@ -96,6 +97,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.audit = AuditLog(settings.audit_path)
         app.state.missions = MissionRunner(app.state.registry, app.state.audit, settings.evidence_dir, settings.speed_factor)
         app.state.manual = ManualControl()
+        app.state.detections = DetectionStore()
         app.state.settings = settings
 
         async def stale_loop() -> None:
@@ -117,6 +119,9 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
 
     def runner() -> MissionRunner:
         return app.state.missions
+
+    def dets() -> DetectionStore:
+        return app.state.detections
 
     # ---- controller protocol ------------------------------------------------------
     @app.websocket("/ws/controller")
@@ -403,6 +408,37 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             raise HTTPException(409, str(e)) from e
         app.state.audit.append("overhead_captured", ref=body.ref)
         return ov.model_dump(mode="json", exclude={"png_b64"})
+
+    # ---- Detections (wide-area layer ingress) ---------------------------------------
+    @app.post("/detections", response_model=Detection, status_code=201)
+    async def post_detection(det: Detection) -> Detection:
+        """Accept one Detection from a wide-area layer and publish it to the Console.
+
+        Storing a Detection authorises nothing. Dispatch is an Operator action through
+        `/missions/fly`, and the Safety Validator still gates every FlightPlan. Any
+        free text in `metadata` is data, never instructions.
+        """
+        dets().add(det)
+        app.state.audit.append(
+            "detection_received",
+            detection_id=det.id,
+            change_type=det.change_type.value,
+            confidence=det.confidence,
+            source=det.metadata.get("source", "unknown"),
+        )
+        reg().publish({"type": "detection", **det.model_dump(mode="json")})
+        return det
+
+    @app.get("/detections", response_model=list[Detection])
+    async def list_detections() -> list[Detection]:
+        return dets().all()
+
+    @app.get("/detections/{detection_id}", response_model=Detection)
+    async def get_detection(detection_id: str) -> Detection:
+        det = dets().get(detection_id)
+        if det is None:
+            raise HTTPException(404, f"unknown detection {detection_id}")
+        return det
 
     @app.post("/drones/{drone_id}/render")
     async def render_drone(drone_id: str) -> dict[str, Any]:
