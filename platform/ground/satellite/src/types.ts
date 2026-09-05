@@ -19,7 +19,13 @@ export interface Anomaly {
   type: string;        // anomaly kind, e.g. 'change'
   confidence: number;  // 0..1
   thumbnail: string;   // repo-relative path or data URL
-  source: 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey' | 'cctv';
+  source: 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey'
+    | 'cctv' | 'fence_sensor';
+  /** Cue-rail freshness (contract-optional). This package emits undated
+   *  satellite cues and leaves all three unset. */
+  observedAt?: number;
+  ttl_s?: number;
+  cameraId?: string;
 }
 
 /** Geographic bounding box of a tile, degrees WGS84. */

@@ -39,6 +39,15 @@ export interface BatteryState {
 }
 export interface SortieState { elapsed_s: number; cap_s: number; must_rtl_by_s: number; }
 
+/** Gimbal pitch limits, degrees. -30 looks UP, 0 is level, 90 is straight
+ *  DOWN — the same convention the ARGUS console reports (`gimbal_pitch_deg`). */
+export const GIMBAL_PITCH_MIN_DEG = -30;
+export const GIMBAL_PITCH_MAX_DEG = 90;
+
+/** Reported gimbal attitude. Optional on Telemetry: airframes without a
+ *  commandable gimbal omit it rather than reporting a fictional 0. */
+export interface GimbalState { pitchDeg: number; }
+
 export interface Telemetry {
   type: 'telemetry';
   ts: number;                       // epoch ms
@@ -59,6 +68,8 @@ export interface Telemetry {
   sortie: SortieState | null;
   home: { lat: number; lon: number; distance: number };     // distance m
   link: { rssi: number; latencyMs: number };
+  /** Present only when the airframe carries a commandable gimbal. */
+  gimbal?: GimbalState;
 }
 
 export type TrackingState = 'idle' | 'searching' | 'locked' | 'lost';
@@ -142,7 +153,11 @@ export interface FollowTool { tool: 'follow'; track_id: number; profile: Mission
 export interface OrbitTool { tool: 'orbit'; track_id: number; profile: MissionProfile; trackId?: number; }
 export interface GotoRelativeTool { tool: 'goto_relative'; dx: number; dy: number; dz: number; }
 export type PlanTool = FollowTool | OrbitTool | GotoRelativeTool | GotoGpsTool | OrbitPointTool | HoldTool | RtlTool;
-export type AnomalySource = 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey' | 'cctv';
+/** Where a cue came from. `cctv` and `fence_sensor` are the fixed-infrastructure
+ *  "cue rails": they observe continuously and their cues expire (see `ttl_s`). */
+export type AnomalySource =
+  | 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey'
+  | 'cctv' | 'fence_sensor';
 
 /** A detected site anomaly. `type` here is the anomaly KIND (e.g. 'change'),
  *  NOT a message discriminant — the wire wrapper nests the payload precisely
@@ -155,6 +170,43 @@ export interface Anomaly {
   confidence: number;  // 0..1
   thumbnail: string;   // repo-relative path or data URL
   source: AnomalySource;
+  /** Epoch ms the cue was OBSERVED — earlier than the `ts` of the wire message
+   *  that carries it. Optional while the satellite/SAR rails still emit undated
+   *  cues; the cue rails (cctv / fence_sensor) always set it. */
+  observedAt?: number;
+  /** Cue lifetime in seconds measured from `observedAt`. Past it the cue is
+   *  stale and must not be dispatched on. Optional for the same reason. */
+  ttl_s?: number;
+  /** Fixed camera that raised the cue (`site.cameras[].id`), when any. */
+  cameraId?: string;
+}
+
+/** One decision the planner made, in the order it was made. A trace is a
+ *  reason-for-record only: it never carries coordinates, tools or altitudes. */
+export interface PlanTraceEntry { rule: string; effect: string; }
+
+/** One straight segment of the flight tube a verified plan may fly inside. */
+export interface CorridorLeg {
+  from: { lat: number; lon: number };
+  to: { lat: number; lon: number };
+  lateral_tol_m: number;   // half-width of the tube about the leg, m
+}
+
+/** One orbit the flight tube permits. */
+export interface CorridorOrbit {
+  center: { lat: number; lon: number };
+  radius_m: number;
+  radial_tol_m: number;    // permitted radial error about radius_m, m
+}
+
+/** The geometric envelope a verified plan is allowed to occupy. The envelope
+ *  monitor checks the vehicle against THIS rather than re-running the planner. */
+export interface Corridor {
+  legs: CorridorLeg[];
+  orbits: CorridorOrbit[];
+  alt_band_m: { min: number; max: number };  // m AGL, relative to home
+  /** `requestId` of the MissionPlan this corridor was generated from. */
+  generated_from: string;
 }
 
 export interface MissionPlan {
@@ -163,7 +215,24 @@ export interface MissionPlan {
   tools: PlanTool[];
   profile: MissionProfile;
   rationale: string;
+  /** Ordered record of the rules that shaped this plan.
+   *  Optional for now — the planner does not emit it yet. */
+  planTrace?: PlanTraceEntry[];
+  /** Flight tube derived from `tools`. Optional for now — same reason. */
+  corridor?: Corridor;
 }
+
+/** Check names the verifier and the mirrors agree on. `VerificationCheck.name`
+ *  stays a plain `string` (the shape is unchanged) so a verifier may still
+ *  report a check this list does not know yet.
+ *    attended      — the mission's attendance mode permits this dispatch
+ *    deconfliction — no other vehicle's corridor conflicts in space and time */
+export type VerificationCheckName =
+  | 'geofence' | 'nfz' | 'altitude' | 'battery' | 'attended' | 'deconfliction';
+
+export const VERIFICATION_CHECK_NAMES: VerificationCheckName[] = [
+  'geofence', 'nfz', 'altitude', 'battery', 'attended', 'deconfliction',
+];
 
 export interface VerificationCheck {
   name: string;
@@ -177,12 +246,47 @@ export interface Verification {
   verdict: 'pass' | 'corrected' | 'rejected';
   checks: VerificationCheck[];
   correctedPlan?: MissionPlan;  // present when verdict === 'corrected'
+  /** Delayed-dispatch correction: epoch ms before which this plan must NOT be
+   *  dispatched (an attended window that has not opened, a deconfliction wait). */
+  holdUntil?: number;
 }
 
 export interface IncidentReport {
   missionId: string;
   verdict: 'false_alarm' | 'log' | 'escalate';
   markdown: string;
+}
+
+/* ---------------------------------------------------------------------------
+ * Tasking. A task says WHAT to look for and WHY — never where, how high, or
+ * with which tool. It carries no coordinates of its own: the only geometry it
+ * may reference is `anomalyId`. This is exactly the surface an LLM is allowed
+ * to emit as schema-bound JSON.
+ * ------------------------------------------------------------------------- */
+export type TaskLookFor = 'person' | 'vehicle' | 'fence_gap' | 'structure' | 'unknown';
+export type TaskUrgency = 'immediate' | 'next_sortie' | 'defer';
+export type TaskSource = 'llm' | 'operator' | 'scripted';
+
+/** Hard cap on Task.question so an operator card never has to truncate it. */
+export const TASK_QUESTION_MAX_CHARS = 120;
+
+export interface Task {
+  taskId: string;
+  anomalyId: string;
+  lookFor: TaskLookFor;
+  question: string;     // <= TASK_QUESTION_MAX_CHARS characters
+  urgency: TaskUrgency;
+  priority: number;     // 0..1
+  rationale: string;
+  source: TaskSource;
+  assignedTo?: string;  // vehicleId this task is assigned to, if any
+}
+
+export interface TaskMessage {
+  type: 'task';
+  ts: number;
+  vehicleId: string;
+  task: Task;
 }
 
 /* ---------------------------------------------------------------------------
@@ -203,7 +307,8 @@ export type CommandName =
   | 'engageTracking' | 'disengageTracking' | 'selectTarget'
   | 'setStandoff' | 'setMaxSpeed' | 'emergencyStop'
   | 'engageManual' | 'disengageManual'
-  | 'executePlan' | 'abortPlan' | 'continueMission';
+  | 'executePlan' | 'abortPlan' | 'continueMission'
+  | 'setGimbal' | 'enterUnattended' | 'exitUnattended';
 
 export interface Command {
   type: 'command';
@@ -216,6 +321,11 @@ export interface Command {
     meters?: number;       // setStandoff
     mps?: number;          // setMaxSpeed
     plan?: MissionPlan;    // executePlan: the full verified plan (abortPlan takes no params)
+    /** setGimbal, degrees, GIMBAL_PITCH_MIN_DEG..GIMBAL_PITCH_MAX_DEG. */
+    pitchDeg?: number;
+    /** enterUnattended / exitUnattended: the operator making the change.
+     *  Both travel the ordinary acked command path like every other command. */
+    operatorId?: string;
   };
 }
 
@@ -326,7 +436,7 @@ export interface PlanHeartbeatMessage { type: 'planHeartbeat'; ts: number; vehic
 export interface ReadinessMessage {
   type: 'readiness'; ts: number; vehicleId: string; ready: boolean; reasons: string[]; eta_ready_s: number;
 }
-export type HealthComponent = 'link' | 'planner' | 'gps' | 'battery' | 'wind' | 'camera' | 'thermal' | 'lidar' | 'site_model' | 'mesh' | 'sdr';
+export type HealthComponent = 'link' | 'planner' | 'gps' | 'battery' | 'wind' | 'camera' | 'thermal' | 'lidar' | 'site_model' | 'mesh' | 'sdr' | 'envelope';
 export interface HealthEventMessage {
   type: 'healthEvent'; ts: number; vehicleId: string; component: HealthComponent; state: string; detail: string;
 }
@@ -340,11 +450,100 @@ export interface SpectrumBand { name: string; floor_db: number; p95_db: number; 
 export interface SpectrumMessage {
   type: 'spectrum'; ts: number; vehicleId: string; bands: SpectrumBand[]; state: 'warming' | 'nominal' | 'degraded';
 }
+
+/* ---- Envelope monitoring, attendance mode, escalation, cue rails ---------- */
+
+export type EnvelopeState = 'in_envelope' | 'warning' | 'breach';
+
+/** Which limit the envelope report is about. Every one of these is a HARD
+ *  limit somewhere else in the system; the envelope message reports the
+ *  distance to it, it never relaxes it. */
+export type EnvelopeConstraint =
+  | 'corridor' | 'altitude' | 'geofence' | 'nfz'
+  | 'standoff' | 'sortie' | 'separation';
+
+/** What the vehicle did about the constraint. Never 'continue': a breach
+ *  resolves to hold | rtl (or an escalation), never to carrying on. */
+export type EnvelopeAction = 'none' | 'slow' | 'hold' | 'rtl';
+
+export interface EnvelopeMessage {
+  type: 'envelope';
+  ts: number;
+  vehicleId: string;
+  state: EnvelopeState;
+  constraint?: EnvelopeConstraint;
+  /** Signed metres of margin to `constraint`: positive is inside the
+   *  envelope, negative is how far past the limit the vehicle is. */
+  margin_m?: number;
+  action?: EnvelopeAction;
+}
+
+/** Whether an operator is on the loop for this vehicle. */
+export type AttendanceMode = 'attended' | 'unattended';
+
+export interface ModeMessage {
+  type: 'mode';
+  ts: number;
+  vehicleId: string;
+  mode: AttendanceMode;
+  since: number;            // epoch ms this attendance mode began
+  operatorPresent: boolean; // the liveness signal behind `mode`
+}
+
+export interface EscalationMessage {
+  type: 'escalation';
+  ts: number;
+  vehicleId: string;
+  missionId: string;
+  channel: string;                   // delivery channel id, e.g. 'console'
+  payload: Record<string, unknown>;  // channel-specific body, kept verbatim for audit
+  deliveredAt?: number;              // epoch ms the channel confirmed delivery
+}
+
+/** A fixed-camera cue. Audit/provenance ONLY: it never carries a dispatch,
+ *  a route or an altitude. The dispatchable form is an Anomaly source 'cctv'. */
+export interface CctvEventMessage {
+  type: 'cctvEvent';
+  ts: number;
+  vehicleId: string;
+  cameraId: string;    // site.cameras[].id
+  zone: string;        // site.cameras[].zones[].name
+  class?: string;
+  thumbnail?: string;
+}
+
+/** Sortie budget as the fleet view reports it. Deliberately distinct from
+ *  `SortieState`: `must_rtl_by` is an EPOCH-MS deadline. */
+export interface FleetSortie { elapsed_s: number; must_rtl_by: number; }
+
 export interface FleetVehicle {
   vehicleId: string; battery: BatteryState; controlSource: ControlSource; failsafe: FailsafeStatus;
   readiness: Omit<ReadinessMessage, 'type' | 'ts' | 'vehicleId'>;
+  position: { lat: number; lon: number; relAlt: number };
+  /** The corridor this vehicle is currently cleared to fly, when any. */
+  plannedCorridor?: Corridor;
+  sortie: FleetSortie | null;   // null when the vehicle is not on a sortie
 }
 export interface FleetMessage { type: 'fleet'; ts: number; vehicleId: string; vehicles: FleetVehicle[]; }
+
+/** The durable per-mission audit record. Carries `vehicleId` like every other
+ *  audit entry. */
+export interface MissionRecord {
+  missionId: string;
+  vehicleId: string;
+  anomalyId: string;
+  plan: MissionPlan;
+  verification: Verification;
+  report?: IncidentReport;
+  startedAt: number;
+  endedAt?: number;
+  mode: AttendanceMode;
+  task?: Task;
+  planTrace: PlanTraceEntry[];
+  corridor?: Corridor;
+  envelopeEvents: EnvelopeMessage[];
+  handoffFrom?: string;
+}
 export interface SimulationToggles {
   simulateGpsLoss: boolean; simulateRfInterference: boolean; simulateHostileDrone: boolean;
   simulateLinkLoss: boolean; simulateCameraFail: boolean; simulateCharging: boolean;
@@ -367,7 +566,8 @@ export type InboundMessage =
   | Telemetry | TrackingStatus | StatusText | CommandAck
   | AnomalyMessage | MissionPlanMessage | VerificationMessage | IncidentReportMessage
   | ObservationMessage | CapabilitiesMessage | PlanCommandAckMessage | ReadinessMessage
-  | HealthEventMessage | RfEventMessage | SpectrumMessage | FleetMessage;
+  | HealthEventMessage | RfEventMessage | SpectrumMessage | FleetMessage
+  | TaskMessage | EnvelopeMessage | ModeMessage | EscalationMessage | CctvEventMessage;
 /** Any message the ground may send to the companion over the control socket. */
 export type OutboundMessage =
   | Command | ManualInputMessage | PlanCommandMessage | PlanHeartbeatMessage | RfEventMessage;

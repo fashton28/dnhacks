@@ -25,12 +25,16 @@ import type {
   CommandAck,
   ConnectionConfig,
   ConnectionState,
+  EnvelopeMessage,
+  EscalationMessage,
   IncidentReportMessage,
   ManualInput,
   MissionPlan,
   MissionPlanMessage,
   Mode,
+  ModeMessage,
   PlanTool,
+  TaskMessage,
   StatusText,
   Telemetry,
   TrackingStatus,
@@ -131,6 +135,13 @@ export class HubDataProvider implements MissionDataSource {
   private lReport: Listeners<IncidentReportMessage> = new Set();
   private lFleet: Listeners<FleetEntry[]> = new Set();
   private lRaw: Listeners<Record<string, unknown>> = new Set();
+  /* Phase 1 channels the ARGUS Hub does not report yet: subscriptions are
+   * accepted and never emitted to (the same silent pattern as lTrack), so the
+   * dashboard behaves identically in Hub mode until the Hub gains them. */
+  private lTask: Listeners<TaskMessage> = new Set();
+  private lEnvelope: Listeners<EnvelopeMessage> = new Set();
+  private lMode: Listeners<ModeMessage> = new Set();
+  private lEscalation: Listeners<EscalationMessage> = new Set();
 
   /* ---- DataSource ------------------------------------------------------------ */
   async connect(config: ConnectionConfig): Promise<void> {
@@ -159,6 +170,10 @@ export class HubDataProvider implements MissionDataSource {
   onMissionPlan = sub(this.lPlan);
   onVerification = sub(this.lVerify);
   onIncidentReport = sub(this.lReport);
+  onTask = sub(this.lTask);
+  onEnvelope = sub(this.lEnvelope);
+  onMode = sub(this.lMode);
+  onEscalation = sub(this.lEscalation);
 
   /* ---- Fleet extension (beyond the frozen contract) ------------------------- */
   onFleet = sub(this.lFleet);
@@ -511,6 +526,12 @@ export class HubDataProvider implements MissionDataSource {
       sortie: null,
       home: { lat: home.lat, lon: home.lon, distance },
       link: { rssi: 0, latencyMs: Math.max(0, Date.now() - (Date.parse(s.ts) || Date.now())) },
+      // The Hub's gimbal_pitch_deg uses the same convention as the contract
+      // (-30 up, 0 level, 90 down), so it passes through unmapped. A state
+      // without it stays absent rather than reporting a fictional 0.
+      gimbal: typeof s.gimbal_pitch_deg === 'number'
+        ? { pitchDeg: s.gimbal_pitch_deg }
+        : undefined,
     };
   }
 
