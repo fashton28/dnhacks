@@ -46,7 +46,7 @@ import type {
   Verification,
   VerificationMessage,
 } from '@/contract';
-import { DEFAULTS, MODES } from '@/contract';
+import { DEFAULTS, GIMBAL_PITCH_MAX_DEG, GIMBAL_PITCH_MIN_DEG, MODES } from '@/contract';
 import type { MissionDataSource } from './types';
 import { hubHttpBase, hubWsBase } from './hubConfig';
 
@@ -286,6 +286,15 @@ export class HubDataProvider implements MissionDataSource {
           if (!m) return ack(false, `no paused Mission on ${id}`);
           const r = await this.post(`/missions/${m.mission_id}/resume`, {});
           return ack(r.ok, r.ok ? `Mission ${m.mission_id} resumed` : r.text);
+        }
+        case 'setGimbal': {
+          // The Hub's `look_at` uses the same convention as the contract
+          // (-30 up, 0 level, 90 down), so pitchDeg passes through unmapped.
+          const pitch = cmd.params?.pitchDeg;
+          if (pitch == null) return ack(false, 'setGimbal requires params.pitchDeg');
+          const clamped = Math.max(GIMBAL_PITCH_MIN_DEG, Math.min(GIMBAL_PITCH_MAX_DEG, pitch));
+          const [ok, msg] = await this.droneCommand(id, { type: 'look_at', pitch_deg: clamped });
+          return ack(ok, clamped === pitch ? msg : `Clamped to ${clamped}°. ${msg}`.trim());
         }
         case 'arm':
           return ack(true, 'ARGUS arms the autopilot itself when a Mission or Manual Control starts');

@@ -8,3 +8,4 @@ export * from './FailsafeModal';
 export * from './PidTuningModal';
 export { PidTuningModal as PidModal } from './PidTuningModal';
 export * from './LogBrowserModal';
+export * from './UnattendedModal';

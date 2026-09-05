@@ -15,3 +15,4 @@ export * from './AuditLogPanel';
 export * from './ObservationPanel';
 export * from './MissionStatusStrip';
 export * from './SimulationPanel';
+export * from './TaskPlanPanel';
