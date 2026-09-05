@@ -1,0 +1,49 @@
+{
+ "facility_id": "meridian-station",
+ "name": "Meridian Station (simulated)",
+ "base": {
+  "lat": 41.1992364,
+  "lon": -98.3995821
+ },
+ "geofence": [
+  [
+   41.1980237,
+   -98.4026266
+  ],
+  [
+   41.1980237,
+   -98.3973734
+  ],
+  [
+   41.2019763,
+   -98.3973734
+  ],
+  [
+   41.2019763,
+   -98.4026266
+  ]
+ ],
+ "no_fly_zones": [
+  {
+   "id": "reactor_exclusion",
+   "description": "Reactor containment exclusion zone, no overflight",
+   "center": {
+    "lat": 41.2004941,
+    "lon": -98.4
+   },
+   "radius_m": 45.0
+  }
+ ],
+ "limits": {
+  "min_alt_m": 5.0,
+  "max_alt_m": 50.0,
+  "max_waypoints": 12,
+  "max_hover_s": 60,
+  "max_mission_range_m": 1500,
+  "max_leg_m": 400,
+  "min_battery_reserve_pct": 20,
+  "cruise_speed_mps": 5.0,
+  "battery_drain_pct_per_min": 4.0,
+  "anomaly_proximity_m": 60
+ }
+}

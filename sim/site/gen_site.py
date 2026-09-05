@@ -25,7 +25,7 @@ CONSOLE_PUBLIC = ROOT / "console" / "public"
 GROUND = 600.0
 OUTER = 140.0          # outer fence half-width
 INNER = 110.0          # inner fence half-width
-GEOFENCE = 160.0       # hard flight boundary half-width (Safety Validator and ArduPilot fence)
+GEOFENCE = 220.0       # hard flight boundary half-width (Safety Validator and ArduPilot fence), 80 m beyond the outer fence
 SECTION = 10.0         # fence section length
 FENCE_H = 2.5
 GATE_X = 0.0           # gate on the south side, one section removed from each fence
@@ -126,6 +126,35 @@ def geojson(fleet: int) -> dict:
     return {"type": "FeatureCollection", "name": SITE_NAME, "anchor": {"lat": ORIGIN_LAT, "lon": ORIGIN_LON, "alt_msl": HOME_ALT_MSL}, "features": features}
 
 
+def facility(fleet: int) -> dict:
+    """The Site in the mock-drone-agent Facility format: what its verifier checks plans against."""
+    def ll(x, y):
+        lat, lon = enu_to_latlon(x, y)
+        return [round(lat, 7), round(lon, 7)]
+    pad = PADS[0]
+    return {
+        "facility_id": "meridian-station",
+        "name": f"{SITE_NAME} (simulated)",
+        "base": dict(zip(("lat", "lon"), ll(*pad))),
+        "geofence": [ll(-GEOFENCE, -GEOFENCE), ll(GEOFENCE, -GEOFENCE), ll(GEOFENCE, GEOFENCE), ll(-GEOFENCE, GEOFENCE)],
+        "no_fly_zones": [
+            {"id": "reactor_exclusion", "description": "Reactor containment exclusion zone, no overflight", "center": dict(zip(("lat", "lon"), ll(*REACTOR))), "radius_m": NO_FLY_R},
+        ],
+        "limits": {
+            "min_alt_m": ALT_FLOOR_M,
+            "max_alt_m": ALT_CEILING_M - 10.0,   # planner ceiling sits 10 m under the onboard fence so a transit overshoot never breaches it
+            "max_waypoints": 12,
+            "max_hover_s": 60,
+            "max_mission_range_m": 1500,
+            "max_leg_m": 400,
+            "min_battery_reserve_pct": 20,
+            "cruise_speed_mps": 5.0,
+            "battery_drain_pct_per_min": 4.0,
+            "anomaly_proximity_m": 60,
+        },
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fleet", type=int, default=int(os.environ.get("FLEET", "3")))
@@ -133,6 +162,7 @@ def main() -> None:
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "site.json").write_text(json.dumps(scene(fleet), indent=1) + "\n")
     (OUT / "site.geojson").write_text(json.dumps(geojson(fleet), indent=1) + "\n")
+    (OUT / "facility_meridian.json").write_text(json.dumps(facility(fleet), indent=1) + "\n")
     if CONSOLE_PUBLIC.exists():
         shutil.copy(OUT / "site.json", CONSOLE_PUBLIC / "site.json")
         shutil.copy(OUT / "site.geojson", CONSOLE_PUBLIC / "site.geojson")

@@ -73,7 +73,7 @@ class HubHandle:
 @pytest.fixture
 async def hub(tmp_path: Path):
     port = _free_port()
-    settings = HubSettings(audit_path=tmp_path / "events.jsonl", evidence_dir=tmp_path / "evidence", speed_factor=SPEED)
+    settings = HubSettings(audit_path=tmp_path / "events.jsonl", evidence_dir=tmp_path / "evidence", runs_dir=tmp_path / "runs", speed_factor=SPEED)
     app = create_app(settings)
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="websockets")
     server = uvicorn.Server(config)

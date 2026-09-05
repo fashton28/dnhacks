@@ -15,12 +15,19 @@
         <nav class="toolbar" aria-label="Actions">
           <button id="fly-square" class="btn primary" title="Fly the square fixture with the selected Drone">Fly square</button>
           <button id="capture-overhead" class="btn" title="Render a top-down overhead image for the wide-area layer">Capture overhead</button>
+          <span class="divider"></span>
+          <span class="toolbar-label">Wide-area</span>
+          <button id="baseline" class="btn" title="Capture the overhead baseline (before image)">Baseline</button>
+          <button id="detect" class="btn" title="Capture the after image and run change detection against the baseline">Detect change</button>
+          <button id="dispatch" class="btn primary" title="Hand the latest Detection to the Triage Agent: plan, verify, fly, observe, report" disabled>Dispatch</button>
           <button id="return-home" class="btn" title="Return the selected Drone to its pad (R)">Return home</button>
           <span class="divider"></span>
           <span class="toolbar-label">Scenario</span>
           <button class="btn ghost" data-scenario="intruder_vehicle">Intruder vehicle</button>
           <button class="btn ghost" data-scenario="fence_breach">Fence breach</button>
           <button class="btn ghost" data-scenario="unattended_object">Unattended object</button>
+          <button class="btn ghost" data-scenario="unattended_object_benign" title="The same crate in the service yard: should be logged, not escalated">Benign object</button>
+          <button class="btn ghost" data-scenario="authorized_activity" title="Marked maintenance vehicle during a declared window: should not dispatch">Authorized activity</button>
           <button id="reset-scene" class="btn ghost" title="Restore the Site baseline: remove Scenario props, close fences">Reset</button>
         </nav>
         <div class="status">
