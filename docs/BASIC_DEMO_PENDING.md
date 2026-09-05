@@ -53,7 +53,7 @@ These remain required by the full brief; they are sequenced after a reliable min
 
 | Discrepancy | Basic-demo decision |
 | --- | --- |
-| `CONTEXT.md` describes PX4; the platform brief specifies ArduPilot GUIDED. | Run ArduPilot. Keep teammate documents identifiable as a separate component until the team aligns the shared description. |
+| ~~`CONTEXT.md` describes PX4; the platform brief specifies ArduPilot GUIDED.~~ | **Resolved.** ArduPilot is the runtime. The pre-retrofit design documents (`ARCHITECTURE.md`, `CONTEXT.md`, root `contracts/`, `docs/specs/0001`) were deleted and `docs/adr/0001` marked superseded, so only one runtime description remains. Recover from Git history if needed. |
 | ARGUS scenarios describe Meridian; the platform stub is Komati. | Run one named Komati stub scenario. Do not combine coordinates or exclusion rules from different sites. |
 | Separate schemas use `Detection`, `MissionSpec`, `FlightPlan`, and `accept/reject`; the platform uses typed anomaly/mission/verification envelopes. | Convert explicitly at a boundary and reverify candidates with the platform's current site and live readiness. |
 | Separate manual-release and fleet concepts exceed current platform behavior. | Manual release holds. Keep the demo single-vehicle. |

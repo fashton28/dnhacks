@@ -1,6 +1,19 @@
 # 0001. Webots as the simulator, native flight controller instead of PX4
 
-Status: Accepted
+Status: **Superseded** by `docs/ADR-hackathon.md` D8 (Docker ArduPilot SITL) and
+D9 (Komati site). Retained as the record of why Webots was chosen and what that
+choice would have cost.
+
+**What actually happened.** The integrated platform under `platform/` flies
+ArduPilot SITL in Docker; no Webots code was ever written. Both consequences this
+ADR accepted were therefore reversed: the "real flight code is flying" claim is
+available again, and ArduPilot's native polygon fence returns as an independent
+firmware-level backstop beneath the ground MissionVerifier and the companion
+watchdogs (see `docs/FAILURE_MODES.md`).
+
+The design this ADR belonged to — `ARCHITECTURE.md`, `CONTEXT.md`, the root
+`contracts/` package, and `docs/specs/0001` — was removed once the platform
+retrofit landed. Recover any of it from history; no commits were rewritten.
 
 ## Context
 
