@@ -61,35 +61,38 @@ def test_stub_parses_exactly():
     assert isinstance(site, Site)
     assert site.source_path == str(STUB)
 
-    assert site.home.lat == pytest.approx(-35.363261)
-    assert site.home.lon == pytest.approx(149.16523)
-    assert site.home.alt_m == pytest.approx(584.0)
+    assert site.home.lat == pytest.approx(-26.09)
+    assert site.home.lon == pytest.approx(29.4719)
+    assert site.home.alt_m == pytest.approx(1600.0)
 
     # Perimeter: order preserved, [lat, lon] -> (lat, lon).
     assert site.perimeter == [
-        (-35.360761, 149.16223),
-        (-35.360761, 149.16823),
-        (-35.365761, 149.16823),
-        (-35.365761, 149.16223),
+        (-26.0867, 29.4672),
+        (-26.0867, 29.477),
+        (-26.094, 29.477),
+        (-26.094, 29.4672),
     ]
 
-    assert len(site.nfz) == 1
+    assert len(site.nfz) == 2
     zone = site.nfz[0]
-    assert zone.name == "switchyard"
-    assert zone.ceiling_m == pytest.approx(120.0)
+    assert zone.name == "chimney"
+    assert zone.ceiling_m == pytest.approx(80.0)
     assert zone.polygon == [
-        (-35.3616, 149.1662),
-        (-35.3616, 149.1674),
-        (-35.3624, 149.1674),
-        (-35.3624, 149.1662),
+        (-26.08815, 29.46975),
+        (-26.08815, 29.47045),
+        (-26.08885, 29.47045),
+        (-26.08885, 29.46975),
     ]
 
     assert site.alt_band.min_m == pytest.approx(20.0)
-    assert site.alt_band.max_m == pytest.approx(60.0)
+    assert site.alt_band.max_m == pytest.approx(80.0)
 
-    assert [s.id for s in site.staging] == ["stage-a", "stage-b"]
+    assert [s.id for s in site.staging] == [
+        "komati-west-service-road",
+        "komati-east-yard",
+    ]
     a, b = site.staging
-    assert (a.lat, a.lon) == (pytest.approx(-35.3648), pytest.approx(149.1669))
+    assert (a.lat, a.lon) == (pytest.approx(-26.09065), pytest.approx(29.46925))
     assert a.image == "site/staging/stage-a.png"
     assert a.truth == "vehicle"
     assert b.truth == "false_alarm"
@@ -127,7 +130,7 @@ def test_resolve_default_is_site_json_at_repo_root(monkeypatch):
 def test_load_site_from_env_uses_stub(monkeypatch):
     monkeypatch.setenv(SITE_FILE_ENV, "site/site.stub.json")
     site = load_site_from_env()
-    assert site.home.lat == pytest.approx(-35.363261)
+    assert site.home.lat == pytest.approx(-26.09)
     assert len(site.perimeter) == 4
 
 

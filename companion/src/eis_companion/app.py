@@ -62,7 +62,6 @@ from .types import (
     ControlSource,
     Limits,
     TargetObservation,
-    TrackingState,
     VehicleState,
     VelocitySetpoint,
 )

@@ -52,7 +52,6 @@ Typical output path::
 """
 
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -153,8 +152,8 @@ def main() -> None:
                 print(f"[export_tensorrt] Moved engine from {candidates[0]} to {engine_path}")
             else:
                 print(
-                    f"WARNING: Could not locate the exported engine file. "
-                    f"Check ultralytics output above.",
+                    "WARNING: Could not locate the exported engine file. "
+                    "Check ultralytics output above.",
                     file=sys.stderr,
                 )
                 sys.exit(1)
