@@ -114,8 +114,9 @@ export default function ArgusApp(): JSX.Element {
             break;
           }
           case 'validation': {
-            const r = ev.result as { verdict: 'accept' | 'reject'; violations: { rule: string; detail: string; severity: string }[]; attempt?: number; abandoned?: boolean; checks_passed?: number };
-            g.setValidation({ ...r, mission_id: String(ev.mission_id) });
+            // two producers: the agent adapter wraps the result in `result`; the Hub's Safety Validator publishes it flat
+            const r = (ev.result ?? ev) as { verdict: 'accept' | 'reject'; violations?: { rule: string; detail: string; severity: string }[]; attempt?: number; abandoned?: boolean; checks_passed?: number };
+            g.setValidation({ ...r, violations: r.violations ?? [], mission_id: String(ev.mission_id) });
             break;
           }
           case 'triage': g.setTriage({ decision: String(ev.decision), confidence: Number(ev.confidence), rationale: String(ev.rationale ?? ''), mission_id: String(ev.mission_id) }); break;
