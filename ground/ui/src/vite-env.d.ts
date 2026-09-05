@@ -36,6 +36,28 @@ export interface ElectronBridge {
     inhibit(): Promise<void>;
     release(): Promise<void>;
   };
+  /**
+   * Optional (added by the Electron shells for the mission retrofit): load the
+   * EIS_SITE_FILE-selected site JSON (default site/site.json, demo stub
+   * site/site.stub.json) from disk in the main process. The shells return the
+   * RAW JSON TEXT (site:load); the renderer accepts text or a parsed object
+   * and validates either (eis-planner validateSite) before use. Absent in the
+   * browser dev server, which fetches /site.json instead (served by the vite
+   * siteFilePlugin). Always call via `window.eis?.loadSiteFile?.()`.
+   */
+  loadSiteFile?(): Promise<unknown>;
+  /**
+   * Optional (Electron shells): baked satellite change-detection assets from
+   * ground/satellite/data — base64 PNGs + raw JSON text — or null when absent
+   * (the renderer's bundled copies are the default path and remain the
+   * fallback). Call via `window.eis?.loadSatelliteTiles?.()`.
+   */
+  loadSatelliteTiles?(): Promise<{
+    beforePng: string;
+    afterPng: string;
+    tilesJson: string;
+    anomaliesJson: string | null;
+  } | null>;
   /** Default connection config baked into the build (env/CLI overrides). */
   defaultConfig(): Promise<Partial<ConnectionConfig>>;
 }

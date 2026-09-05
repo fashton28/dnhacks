@@ -21,6 +21,18 @@ extraResources:
     to: "ui/dist"
     filter:
       - "**/*"
+  # Site model (JSON + staging stills) — read by ipc.ts 'site:load' at
+  # process.resourcesPath/site (docs/SITE_CONTRACT.md paths are repo-root-relative).
+  - from: "../../../site"
+    to: "site"
+    filter:
+      - "**/*"
+  # Baked satellite change-detection assets — 'satellite:loadTiles' reads
+  # process.resourcesPath/ground/satellite/data (same relative path as dev).
+  - from: "../../satellite/data"
+    to: "ground/satellite/data"
+    filter:
+      - "**/*"
 
 win:
   target:

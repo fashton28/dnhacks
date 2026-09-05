@@ -82,6 +82,40 @@ a bridge/IPC addition (no UI change).
 
 ---
 
+## Hackathon retrofit — site/satellite asset IPC (added to BOTH shells, in lockstep)
+
+The power-plant-security retrofit adds two read-only asset channels so packaged
+builds can load the site model and the baked satellite data without a dev
+server. Both follow the standard preload → ipc → main pattern; the inserted
+blocks are **byte-identical** in the two `src/` trees.
+
+| Channel | Shape | Resolution | Status |
+|---|---|---|---|
+| `site:load` | invoke → `Promise<string>` (raw site JSON text); exposed as `window.eis.loadSiteFile()` | `EIS_SITE_FILE` (repo-root-relative per `docs/SITE_CONTRACT.md`); unset → `site/site.json`, falling back to `site/site.stub.json` when the default is missing. An explicitly set `EIS_SITE_FILE` never silently falls back — a missing file rejects. Root = repo root in dev, `process.resourcesPath` when packaged. | ✅ added in both `src/ipc.ts` + `src/preload.ts` |
+| `satellite:loadTiles` | invoke → `Promise<{ beforePng, afterPng, tilesJson, anomaliesJson } \| null>` (PNGs base64, JSON as raw text); exposed as `window.eis.loadSatelliteTiles()` | `ground/satellite/data/{before,after}.png` + `tiles.json` (+ optional `anomalies.json`) under the same root; returns `null` when the assets are absent so the renderer falls back to a dev-server fetch. | ✅ added in both `src/ipc.ts` + `src/preload.ts` |
+
+Packaging: both `electron-builder.yml` files gain two `extraResources` entries
+so the same repo-root-relative paths resolve when packaged —
+`../../../site → site` and `../../satellite/data → ground/satellite/data`.
+
+### Surfaced renderer-touch (LINUX_PRD §1)
+The shared renderer type `ground/ui/src/vite-env.d.ts` (`ElectronBridge`) must
+gain `loadSiteFile()` / `loadSatelliteTiles()` to match the two preloads — a
+bridge-type addition implemented once in the shared renderer (same precedent as
+`power`), owned by the ground-ui workstream. Both shells implement the methods,
+so they are non-optional on the bridge (unlike `power?`).
+
+### Sync status (re-audited after the retrofit)
+- `src/recorder.ts`, `src/settingsStore.ts`, `tsconfig.json` — **IDENTICAL** (SHA256).
+- `src/main.ts` — unchanged; identical except the two `ground/app/{windows,linux}` path-comment lines.
+- `src/ipc.ts` / `src/preload.ts` — divergence is still **exactly** the Linux-only
+  `power:inhibit/release` blocks; the new site/satellite blocks are byte-identical
+  in both trees (verified by diff).
+- Typecheck: windows `npm run typecheck` ✅; linux via the documented
+  `node_modules` junction ✅ (junction removed afterwards).
+
+---
+
 ## Residual QA (cannot be verified on this Windows dev box — needs a Linux host)
 - AppImage launch on clean Ubuntu 22.04 **and** 24.04, Wayland **and** X11; fractional-scaling check of video canvas / map tiles / modals.
 - `.deb`/`.rpm` install/uninstall, desktop-entry + icon registration, udev rule install + `udevadm` replug.

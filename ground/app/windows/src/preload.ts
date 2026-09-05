@@ -58,6 +58,15 @@ interface ElectronBridge {
     platform: string;
   };
   defaultConfig(): Promise<Partial<ConnectionConfig>>;
+  /** Raw JSON text of the EIS_SITE_FILE-selected site model (docs/SITE_CONTRACT.md). */
+  loadSiteFile(): Promise<string>;
+  /** Baked satellite change-detection assets; null → fall back to dev-server fetch. */
+  loadSatelliteTiles(): Promise<{
+    beforePng: string;
+    afterPng: string;
+    tilesJson: string;
+    anomaliesJson: string | null;
+  } | null>;
 }
 
 // ── Bridge implementation ────────────────────────────────────────────────────
@@ -118,6 +127,24 @@ const bridge: ElectronBridge = {
   // ── Default connection config (env-baked) ─────────────────────────────────
   defaultConfig(): Promise<Partial<ConnectionConfig>> {
     return ipcRenderer.invoke('app:defaultConfig') as Promise<Partial<ConnectionConfig>>;
+  },
+
+  // ── Site model + baked satellite assets (hackathon retrofit) ──────────────
+  loadSiteFile(): Promise<string> {
+    return ipcRenderer.invoke('site:load') as Promise<string>;
+  },
+  loadSatelliteTiles(): Promise<{
+    beforePng: string;
+    afterPng: string;
+    tilesJson: string;
+    anomaliesJson: string | null;
+  } | null> {
+    return ipcRenderer.invoke('satellite:loadTiles') as Promise<{
+      beforePng: string;
+      afterPng: string;
+      tilesJson: string;
+      anomaliesJson: string | null;
+    } | null>;
   },
 };
 

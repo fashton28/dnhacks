@@ -3,6 +3,7 @@ export * from './TakeoffModal';
 export * from './SettingsModal';
 export * from './TrackingBanner';
 export * from './ManualBanner';
+export * from './PlannerBanner';
 export * from './FailsafeModal';
 export * from './PidTuningModal';
 export { PidTuningModal as PidModal } from './PidTuningModal';

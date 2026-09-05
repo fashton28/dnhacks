@@ -13,18 +13,22 @@
  * - setManualInput(): fire-and-forget {type:'manualInput',…,ts}.
  * ========================================================================== */
 import type {
+  AnomalyMessage,
   CommandAck,
   Command,
   ConnectionConfig,
   ConnectionState,
-  DataSource,
+  IncidentReportMessage,
   InboundMessage,
   ManualInput,
+  MissionPlanMessage,
   StatusText,
   Telemetry,
   TrackingStatus,
   Unsubscribe,
+  VerificationMessage,
 } from '@/contract';
+import type { MissionDataSource } from './types';
 
 const ACK_TIMEOUT_MS = 4000;
 const MAX_BACKOFF_MS = 15000;
@@ -42,15 +46,23 @@ interface Callbacks {
   txt: Array<(s: StatusText) => void>;
   ack: Array<(a: CommandAck) => void>;
   conn: Array<(s: ConnectionState) => void>;
+  anom: Array<(m: AnomalyMessage) => void>;
+  plan: Array<(m: MissionPlanMessage) => void>;
+  verf: Array<(m: VerificationMessage) => void>;
+  rept: Array<(m: IncidentReportMessage) => void>;
 }
 
-export class LiveDataProvider implements DataSource {
+export class LiveDataProvider implements MissionDataSource {
   private cbs: Callbacks = {
     tel: [],
     trk: [],
     txt: [],
     ack: [],
     conn: [],
+    anom: [],
+    plan: [],
+    verf: [],
+    rept: [],
   };
 
   private ws: WebSocket | null = null;
@@ -168,6 +180,18 @@ export class LiveDataProvider implements DataSource {
         this.resolvePending(msg);
         this.cbs.ack.forEach((f) => f(msg));
         break;
+      case 'anomaly':
+        this.cbs.anom.forEach((f) => f(msg));
+        break;
+      case 'missionPlan':
+        this.cbs.plan.forEach((f) => f(msg));
+        break;
+      case 'verification':
+        this.cbs.verf.forEach((f) => f(msg));
+        break;
+      case 'incidentReport':
+        this.cbs.rept.forEach((f) => f(msg));
+        break;
       default:
         break;
     }
@@ -217,6 +241,24 @@ export class LiveDataProvider implements DataSource {
     this.cbs.conn.push(cb);
     cb(this.connState);
     return () => this._off('conn', cb);
+  }
+
+  /* mission channels (MissionDataSource) */
+  onAnomaly(cb: (m: AnomalyMessage) => void): Unsubscribe {
+    this.cbs.anom.push(cb);
+    return () => this._off('anom', cb);
+  }
+  onMissionPlan(cb: (m: MissionPlanMessage) => void): Unsubscribe {
+    this.cbs.plan.push(cb);
+    return () => this._off('plan', cb);
+  }
+  onVerification(cb: (m: VerificationMessage) => void): Unsubscribe {
+    this.cbs.verf.push(cb);
+    return () => this._off('verf', cb);
+  }
+  onIncidentReport(cb: (m: IncidentReportMessage) => void): Unsubscribe {
+    this.cbs.rept.push(cb);
+    return () => this._off('rept', cb);
   }
 
   private _off<K extends keyof Callbacks>(k: K, cb: unknown): void {

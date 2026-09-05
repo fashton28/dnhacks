@@ -30,10 +30,19 @@ import type {
   ManualInput,
 } from '@/contract';
 
-import { DataSourceProvider, useDataSource, useSettings } from '@/store';
+import {
+  DataSourceProvider,
+  useDataSource,
+  useSettings,
+  useMission,
+  missionStore,
+  effectivePlan,
+} from '@/store';
+import type { PlanProposal, ReportResolution } from '@/store';
 import { dataSource } from '@/dataSource';
+import { getSiteModel } from '@/site';
 
-import { Toast } from '@/components';
+import { Toast, Tabs, Badge } from '@/components';
 import {
   StatusBar,
   ControlsPanel,
@@ -42,6 +51,11 @@ import {
   VideoPanel,
   MapPanel,
   LogConsole,
+  MissionMap,
+  SatellitePanel,
+  VerifierPanel,
+  ReportPanel,
+  AuditLogPanel,
 } from '@/panels';
 import {
   ChecklistModal,
@@ -52,10 +66,16 @@ import {
   LogBrowserModal,
   TrackingBanner,
   ManualBanner,
+  PlannerBanner,
 } from '@/views';
 
-/* The drone's home / launch point. Matches the mock scene origin. */
-const HOME = { lat: 37.7699, lon: -122.4666 };
+/* Pre-site fallback home / launch point (matches the mock scene origin before
+   the site model loads). Once the site JSON is loaded, its home is used —
+   plant geometry is never hardcoded (docs/SITE_CONTRACT.md). */
+const FALLBACK_HOME = { lat: 37.7699, lon: -122.4666 };
+
+/* Center-column view: classic flight ops vs the mission (security) workspace. */
+type CenterView = 'flight' | 'mission';
 
 /* Which modal (if any) is currently open. */
 type ModalKind =
@@ -122,6 +142,11 @@ function GroundControl(): JSX.Element {
   const [modal, setModal] = useState<ModalKind | null>(null);
   const [manualActive, setManualActive] = useState(false);
   const [controllerOn, setControllerOn] = useState(false);
+  const [centerView, setCenterView] = useState<CenterView>('flight');
+
+  /* Mission (anomaly → plan → verification → report) state + audit trail. */
+  const mission = useMission();
+  const autoSwitchedRef = useRef(false);
 
   /* Connection config is owned by SettingsStore. The host shown in the status
      bar mirrors it; SITL collapses the host label to 'sitl'. */
@@ -145,6 +170,15 @@ function GroundControl(): JSX.Element {
     else memoryRecorder.append(record);
   }, []);
 
+  /* ----- site model: load once, feed the mission store -------------------- */
+  useEffect(() => {
+    getSiteModel()
+      .then((site) => missionStore.setSite(site))
+      .catch((err: unknown) => {
+        pushToast({ severity: 'error', title: 'Site model failed to load', message: (err as Error).message });
+      });
+  }, [pushToast]);
+
   /* ----- subscriptions: connect on mount, disconnect on unmount ----------- */
   useEffect(() => {
     let cancelled = false;
@@ -153,20 +187,50 @@ function GroundControl(): JSX.Element {
     });
 
     const offC = ds.onConnectionChange(s => setConnState(s));
-    const offT = ds.onTelemetry(t => { setTel(t); appendFrame(t); });
+    const offT = ds.onTelemetry(t => {
+      setTel(t);
+      appendFrame(t);
+      missionStore.noteControlSource(t.controlSource);
+    });
     const offK = ds.onTracking(t => { setTracking(t); appendFrame(t); });
     const offTxt = ds.onStatusText(s => {
       setLogs(l => [...l.slice(-200), s]);
       appendFrame(s);
+      // While a mission executes, status lines (waypoints, observation, RTL)
+      // belong in the mission audit trail too.
+      if (missionStore.get().executing) missionStore.addAudit('status', s.text);
       if (s.severity === 'critical') pushToast({ severity: 'critical', title: s.text });
     });
     const offAck = ds.onAck((a: CommandAck) => {
       if (!a.success) pushToast({ severity: 'error', title: `${a.command} failed`, message: a.message });
     });
 
+    /* mission channels (anomaly → plan → verification → incident report) */
+    const offAn = ds.onAnomaly(m => {
+      missionStore.ingestAnomaly(m.anomaly);
+      appendFrame(m);
+      pushToast({ severity: 'warning', title: 'Satellite anomaly detected', message: m.anomaly.id });
+      if (!autoSwitchedRef.current) {
+        autoSwitchedRef.current = true;
+        setCenterView('mission');
+      }
+    });
+    const offPl = ds.onMissionPlan(m => { missionStore.ingestPlan(m.plan); appendFrame(m); });
+    const offVf = ds.onVerification(m => { missionStore.ingestVerification(m.verification); appendFrame(m); });
+    const offRp = ds.onIncidentReport(m => {
+      missionStore.ingestReport(m.report);
+      appendFrame(m);
+      pushToast({
+        severity: m.report.verdict === 'escalate' ? 'critical' : 'info',
+        title: `Incident report: ${m.report.verdict.replace('_', ' ')}`,
+        message: m.report.missionId,
+      });
+    });
+
     return () => {
       cancelled = true;
       offC(); offT(); offK(); offTxt(); offAck();
+      offAn(); offPl(); offVf(); offRp();
       ds.disconnect();
     };
     // Reconnect when the user changes connection in Settings.
@@ -227,6 +291,31 @@ function GroundControl(): JSX.Element {
   const onStandoff = (v: number) => { setStandoff(v); cmd('setStandoff', { meters: v }); };
   const onMaxSpeed = (v: number) => { setMaxSpeed(v); cmd('setMaxSpeed', { mps: v }); };
 
+  /* ----- mission flow: approve / deny / abort / report disposition -------- */
+  const doApprovePlan = (proposal: PlanProposal) => {
+    const plan = effectivePlan(proposal);
+    setManualActive(false); // exactly one controlSource — planner takes over
+    missionStore.noteApproval(proposal.plan.requestId);
+    cmd('executePlan', { plan });
+    pushToast({ severity: 'success', title: 'Mission approved', message: plan.requestId });
+  };
+  const doDenyPlan = (proposal: PlanProposal) => {
+    missionStore.noteDenial(proposal.plan.requestId);
+    pushToast({ severity: 'info', title: 'Plan denied', message: proposal.plan.requestId });
+  };
+  const doAbortPlan = () => {
+    cmd('abortPlan');
+    missionStore.noteAbort();
+    pushToast({ severity: 'warning', title: 'Plan aborted', message: 'Vehicle holding position' });
+  };
+  const doResolveReport = (r: ReportResolution) => {
+    missionStore.resolveReport(r);
+    pushToast({
+      severity: r === 'escalated' ? 'critical' : 'info',
+      title: r === 'escalated' ? 'Escalated to on-site security' : r === 'logged' ? 'Report logged for review' : 'Report dismissed',
+    });
+  };
+
   /* ----- manual (game-controller) piloting -------------------------------- */
   const doManualEngage = () => {
     cmd('engageManual');
@@ -274,6 +363,22 @@ function GroundControl(): JSX.Element {
   const trackingActive = !!tracking && tracking.state !== 'idle';
   const flying = (tel?.position?.relAlt ?? 0) > 0.5;
   const hostLabel = config.sitl ? 'sitl' : config.host;
+  const plannerActive = tel?.controlSource === 'planner';
+
+  /* Home + the plan route to draw: the approved (executing) plan wins,
+     otherwise the proposal selected in the verifier panel. */
+  const home = mission.site
+    ? { lat: mission.site.home.lat, lon: mission.site.home.lon }
+    : FALLBACK_HOME;
+  const selectedProposal =
+    mission.proposals.find(p => p.plan.requestId === mission.selectedRequestId) ??
+    mission.proposals[mission.proposals.length - 1] ?? null;
+  const executedProposal = mission.executedRequestId
+    ? mission.proposals.find(p => p.plan.requestId === mission.executedRequestId) ?? null
+    : null;
+  const routePlan = executedProposal
+    ? effectivePlan(executedProposal)
+    : selectedProposal ? effectivePlan(selectedProposal) : null;
 
   /* ----- power management (Linux only) ------------------------------------
    * Keep the display awake while the vehicle is armed or tracking/manual is
@@ -284,12 +389,12 @@ function GroundControl(): JSX.Element {
   useEffect(() => {
     const power = window.eis?.power;
     if (!power) return;
-    const shouldInhibit = !!tel?.armed || manualActive || trackingActive;
+    const shouldInhibit = !!tel?.armed || manualActive || trackingActive || plannerActive;
     if (shouldInhibit === powerInhibitedRef.current) return;
     powerInhibitedRef.current = shouldInhibit;
     if (shouldInhibit) void power.inhibit();
     else void power.release();
-  }, [tel?.armed, manualActive, trackingActive]);
+  }, [tel?.armed, manualActive, trackingActive, plannerActive]);
 
   return (
     <div
@@ -315,6 +420,7 @@ function GroundControl(): JSX.Element {
         <TrackingBanner standoff={standoff} maxSpeed={maxSpeed} onDisengage={() => cmd('disengageTracking')} />
       )}
       {manualActive && <ManualBanner onRelease={doManualRelease} />}
+      {plannerActive && <PlannerBanner requestId={mission.executedRequestId} onAbort={doAbortPlan} />}
 
       <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'var(--leftpanel-w) 1fr var(--rightpanel-w)', gap: 10, padding: 10 }}>
         {/* LEFT */}
@@ -345,31 +451,84 @@ function GroundControl(): JSX.Element {
         </div>
 
         {/* CENTER */}
-        <div style={{ display: 'grid', gridTemplateRows: '1.55fr 1fr', gap: 10, minHeight: 0 }}>
-          <div style={{ borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', minHeight: 0 }}>
-            <VideoPanel
-              tracking={tracking}
-              connState={connState}
-              standoff={standoff}
-              onSelectTarget={(id: number) => cmd('selectTarget', { targetId: id })}
-              videoUrl={ds.getVideoUrl()}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
+          {/* view switcher: classic flight ops vs the mission workspace */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flex: 'none' }}>
+            <Tabs
+              size="sm"
+              value={centerView}
+              onChange={(id) => setCenterView(id as CenterView)}
+              items={[
+                { id: 'flight', label: 'Flight ops' },
+                { id: 'mission', label: 'Mission' },
+              ]}
             />
+            {centerView === 'flight' && mission.anomalies.length > 0 && (
+              <Badge tone="caution" mono>
+                {mission.anomalies.length} ANOMAL{mission.anomalies.length === 1 ? 'Y' : 'IES'}
+              </Badge>
+            )}
+            {mission.executing && <Badge tone="accent" mono>MISSION EXECUTING</Badge>}
           </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: 10, minHeight: 0 }}>
-            <MapPanel
-              tel={tel}
-              tracking={tracking}
-              home={HOME}
-              trail={trail}
-              geofenceRadius={settings.failsafe.geofenceRadius}
-            />
-            <LogConsole
-              logs={logs}
-              recording={recording}
-              onToggleRecord={onToggleRecord}
-              onOpenBrowser={() => setModal('logbrowser')}
-            />
-          </div>
+
+          {centerView === 'flight' ? (
+            <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: '1.55fr 1fr', gap: 10 }}>
+              <div style={{ borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', minHeight: 0 }}>
+                <VideoPanel
+                  tracking={tracking}
+                  connState={connState}
+                  standoff={standoff}
+                  onSelectTarget={(id: number) => cmd('selectTarget', { targetId: id })}
+                  videoUrl={ds.getVideoUrl()}
+                />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.1fr 1fr', gap: 10, minHeight: 0 }}>
+                <MapPanel
+                  tel={tel}
+                  tracking={tracking}
+                  home={home}
+                  trail={trail}
+                  geofenceRadius={settings.failsafe.geofenceRadius}
+                />
+                <LogConsole
+                  logs={logs}
+                  recording={recording}
+                  onToggleRecord={onToggleRecord}
+                  onOpenBrowser={() => setModal('logbrowser')}
+                />
+              </div>
+            </div>
+          ) : (
+            <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: '1.25fr 1fr', gap: 10 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr', gap: 10, minHeight: 0 }}>
+                <MissionMap
+                  site={mission.site}
+                  tel={tel}
+                  trail={trail}
+                  anomalies={mission.anomalies}
+                  plan={routePlan}
+                  executing={mission.executing}
+                />
+                <SatellitePanel anomalies={mission.anomalies} />
+              </div>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr 0.9fr', gap: 10, minHeight: 0 }}>
+                <VerifierPanel
+                  proposals={mission.proposals}
+                  selectedRequestId={mission.selectedRequestId}
+                  executing={mission.executing}
+                  onSelect={(id) => missionStore.select(id)}
+                  onApprove={doApprovePlan}
+                  onDeny={doDenyPlan}
+                />
+                <ReportPanel
+                  report={mission.report}
+                  resolution={mission.reportResolution}
+                  onResolve={doResolveReport}
+                />
+                <AuditLogPanel events={mission.audit} />
+              </div>
+            </div>
+          )}
         </div>
 
         {/* RIGHT */}

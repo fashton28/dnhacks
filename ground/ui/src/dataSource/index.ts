@@ -1,5 +1,6 @@
-import type { DataSource } from '@/contract';
+import type { MissionDataSource } from './types';
 import { MockDataProvider } from './MockDataProvider';
 // import { LiveDataProvider } from './LiveDataProvider';
-export const dataSource: DataSource = new MockDataProvider();
+export type { MissionDataSource } from './types';
+export const dataSource: MissionDataSource = new MockDataProvider();
 // To go live, swap the line above for: new LiveDataProvider()

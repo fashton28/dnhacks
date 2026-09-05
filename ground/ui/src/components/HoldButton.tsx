@@ -57,7 +57,7 @@ export function HoldButton({
     if (pct >= 1) {
       setHolding(false);
       setProgress(0);
-      onConfirm && onConfirm();
+      onConfirm?.();
     } else {
       raf.current = requestAnimationFrame(tick);
     }

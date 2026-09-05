@@ -1,0 +1,255 @@
+/* VerifierPanel — mission plans and their deterministic MissionVerifier
+   outcomes. Shows the proposal history (verdict chips), the selected plan's
+   tool list + rationale, every VerificationCheck row (ok icon, reason,
+   applied edit), an original-vs-corrected diff when the verifier repaired the
+   plan, and the operator gate: hold-to-approve (sends executePlan with the
+   EFFECTIVE plan — corrected when present) or deny. */
+import React from 'react';
+import { Check, X, ShieldCheck, ShieldAlert, ShieldX } from 'lucide-react';
+import { Panel, Badge, Button, HoldButton } from '@/components';
+import type { MissionPlan, PlanTool, Verification } from '@/contract';
+import type { PlanProposal } from '@/store';
+import { effectivePlan } from '@/store';
+
+export interface VerifierPanelProps {
+  proposals: PlanProposal[];
+  selectedRequestId: string | null;
+  executing: boolean;
+  onSelect: (requestId: string) => void;
+  onApprove: (proposal: PlanProposal) => void;
+  onDeny: (proposal: PlanProposal) => void;
+}
+
+const VERDICT_TONE: Record<Verification['verdict'], 'nominal' | 'caution' | 'danger'> = {
+  pass: 'nominal',
+  corrected: 'caution',
+  rejected: 'danger',
+};
+
+function describeTool(t: PlanTool): string {
+  switch (t.tool) {
+    case 'goto_gps':
+      return `goto ${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} @ ${t.alt} m` + (t.profile ? ` [${t.profile}]` : '');
+    case 'orbit_point':
+      return `orbit ${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} r=${t.radius} m`;
+    case 'hold':
+      return t.durationS !== undefined ? `hold ${t.durationS} s` : 'hold (indefinite)';
+    case 'rtl':
+      return 'return to launch';
+  }
+}
+
+/** Human diff of one tool between original and corrected plan ('' = same). */
+function toolDiff(a: PlanTool, b: PlanTool): string {
+  if (a.tool !== b.tool) return `${a.tool} → ${b.tool}`;
+  const parts: string[] = [];
+  if (a.tool === 'goto_gps' && b.tool === 'goto_gps') {
+    if (a.alt !== b.alt) parts.push(`alt ${a.alt} → ${b.alt} m`);
+    if (a.lat !== b.lat || a.lon !== b.lon) {
+      parts.push(`pos ${a.lat.toFixed(5)},${a.lon.toFixed(5)} → ${b.lat.toFixed(5)},${b.lon.toFixed(5)}`);
+    }
+  }
+  if (a.tool === 'orbit_point' && b.tool === 'orbit_point') {
+    if (a.lat !== b.lat || a.lon !== b.lon) {
+      parts.push(`centre ${a.lat.toFixed(5)},${a.lon.toFixed(5)} → ${b.lat.toFixed(5)},${b.lon.toFixed(5)}`);
+    }
+    if (a.radius !== b.radius) parts.push(`radius ${a.radius} → ${b.radius} m`);
+  }
+  return parts.join('; ');
+}
+
+export function VerifierPanel({
+  proposals,
+  selectedRequestId,
+  executing,
+  onSelect,
+  onApprove,
+  onDeny,
+}: VerifierPanelProps): React.ReactElement {
+  const selected =
+    proposals.find((p) => p.plan.requestId === selectedRequestId) ??
+    proposals[proposals.length - 1];
+
+  const v = selected?.verification;
+  const approvable =
+    !!selected && !!v && (v.verdict === 'pass' || v.verdict === 'corrected') &&
+    !selected.approvedAt && !selected.deniedAt && !executing;
+
+  return (
+    <Panel
+      title="Mission verifier"
+      pad={false}
+      status={
+        v ? <Badge tone={VERDICT_TONE[v.verdict]} mono>{v.verdict.toUpperCase()}</Badge>
+          : selected ? <Badge tone="outline" mono>VERIFYING…</Badge>
+          : undefined
+      }
+      style={{ height: '100%' }}
+      bodyStyle={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}
+    >
+      {proposals.length === 0 ? (
+        <div style={{ padding: 14, color: 'var(--text-disabled)', fontSize: 'var(--text-sm)' }}>
+          No mission plans yet — waiting for the planner.
+        </div>
+      ) : (
+        <>
+          {/* proposal chips */}
+          <div style={{ display: 'flex', gap: 6, padding: '8px 10px', flexWrap: 'wrap', flex: 'none' }}>
+            {proposals.map((p) => {
+              const on = p.plan.requestId === selected?.plan.requestId;
+              const tone = p.verification ? VERDICT_TONE[p.verification.verdict] : 'outline';
+              return (
+                <button
+                  key={p.plan.requestId}
+                  onClick={() => onSelect(p.plan.requestId)}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 6,
+                    padding: '3px 8px',
+                    background: on ? 'var(--surface-input)' : 'transparent',
+                    border: `1px solid ${on ? 'var(--border-strong)' : 'var(--border-subtle)'}`,
+                    borderRadius: 'var(--radius-pill)',
+                    color: 'var(--text-secondary)',
+                    fontFamily: 'var(--font-mono)', fontSize: 10, cursor: 'pointer',
+                  }}
+                >
+                  {p.plan.requestId}
+                  <Badge tone={tone as 'nominal' | 'caution' | 'danger' | 'outline'} mono>
+                    {p.verification ? p.verification.verdict : '…'}
+                  </Badge>
+                </button>
+              );
+            })}
+          </div>
+
+          {/* selected proposal detail */}
+          {selected && (
+            <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: '0 12px 10px' }}>
+              <SectionLabel>Plan · profile {selected.plan.profile}</SectionLabel>
+              <ol style={{ margin: '0 0 8px', paddingLeft: 20, fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)', lineHeight: 1.7 }}>
+                {selected.plan.tools.map((t, i) => <li key={i}>{describeTool(t)}</li>)}
+              </ol>
+              <div style={{ fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5, marginBottom: 10 }}>
+                {selected.plan.rationale}
+              </div>
+
+              {v && (
+                <>
+                  <SectionLabel>Verifier checks</SectionLabel>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 10 }}>
+                    {v.checks.map((c) => (
+                      <div
+                        key={c.name}
+                        style={{
+                          display: 'flex', gap: 8, alignItems: 'flex-start',
+                          padding: '5px 8px',
+                          background: c.ok ? 'transparent' : 'var(--red-tint)',
+                          border: `1px solid ${c.ok ? 'var(--border-subtle)' : 'var(--red-line)'}`,
+                          borderRadius: 'var(--radius-sm)',
+                        }}
+                      >
+                        <span style={{ color: c.ok ? 'var(--nominal-fg)' : 'var(--danger-fg)', flex: 'none', marginTop: 1 }}>
+                          {c.ok ? <Check size={13} /> : <X size={13} />}
+                        </span>
+                        <div style={{ minWidth: 0 }}>
+                          <span style={{
+                            fontFamily: 'var(--font-mono)', fontSize: 11, fontWeight: 600,
+                            color: c.ok ? 'var(--text-secondary)' : 'var(--danger-fg)',
+                            textTransform: 'uppercase', letterSpacing: '0.05em', marginRight: 8,
+                          }}>
+                            {c.name}
+                          </span>
+                          <span style={{ fontSize: 11, color: 'var(--text-tertiary)', lineHeight: 1.5, overflowWrap: 'anywhere' }}>
+                            {c.reason}
+                          </span>
+                          {c.edit && (
+                            <div style={{ fontSize: 11, color: 'var(--caution-fg)', marginTop: 3, overflowWrap: 'anywhere' }}>
+                              ✎ {c.edit}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {v.verdict === 'corrected' && v.correctedPlan && (
+                    <>
+                      <SectionLabel>Original → corrected</SectionLabel>
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 3, marginBottom: 10 }}>
+                        {selected.plan.tools.map((t, i) => {
+                          const c = v.correctedPlan?.tools[i];
+                          const d = c ? toolDiff(t, c) : 'removed';
+                          if (!d) return null;
+                          return (
+                            <div key={i} style={{
+                              fontFamily: 'var(--font-mono)', fontSize: 11,
+                              color: 'var(--caution-fg)',
+                              background: 'var(--amber-tint)',
+                              border: '1px solid var(--amber-line)',
+                              borderRadius: 'var(--radius-sm)',
+                              padding: '4px 8px',
+                            }}>
+                              #{i} {t.tool}: {d}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                </>
+              )}
+
+              {/* operator gate */}
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 4 }}>
+                <HoldButton
+                  variant="primary"
+                  holdMs={900}
+                  disabled={!approvable}
+                  hint={
+                    selected.approvedAt ? 'Approved' :
+                    selected.deniedAt ? 'Denied' :
+                    executing ? 'Mission in progress' :
+                    !v ? 'Awaiting verification' :
+                    v.verdict === 'rejected' ? 'Rejected by verifier' :
+                    'Hold to approve'
+                  }
+                  icon={
+                    !v ? <ShieldAlert size={15} /> :
+                    v.verdict === 'rejected' ? <ShieldX size={15} /> :
+                    <ShieldCheck size={15} />
+                  }
+                  onConfirm={() => onApprove(selected)}
+                  style={{ flex: 1 }}
+                >
+                  Approve — execute {v?.verdict === 'corrected' ? 'corrected plan' : 'plan'}
+                </HoldButton>
+                <Button
+                  variant="danger-soft"
+                  disabled={!approvable}
+                  onClick={() => onDeny(selected)}
+                >
+                  Deny
+                </Button>
+              </div>
+              {v?.verdict === 'corrected' && (
+                <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 6 }}>
+                  Approving sends the verifier-corrected plan ({effectivePlan(selected).requestId}).
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+    </Panel>
+  );
+}
+
+function SectionLabel({ children }: { children: React.ReactNode }): React.ReactElement {
+  return (
+    <div style={{
+      fontSize: 'var(--text-2xs)', fontWeight: 600, color: 'var(--text-tertiary)',
+      textTransform: 'uppercase', letterSpacing: '0.07em', margin: '10px 0 5px',
+    }}>
+      {children}
+    </div>
+  );
+}

@@ -18,7 +18,12 @@
     "forceConsistentCasingInFileNames": true,
     "baseUrl": ".",
     "paths": {
-      "@/*": ["src/*"]
+      "@/*": ["src/*"],
+      "@planner/*": ["../planner/src/*"],
+      "@satellite/*": ["../satellite/src/*"],
+      "@satdata/*": ["../satellite/data/*"],
+      "fs": ["src/lib/nodeShims.ts"],
+      "path": ["src/lib/nodeShims.ts"]
     }
   },
   "include": ["src"]

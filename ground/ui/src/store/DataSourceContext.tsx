@@ -3,13 +3,16 @@
  * ----------------------------------------------------------------------------
  * Provides the single app-wide DataSource to the React tree. Mock vs Live is
  * selected in one line in dataSource/index.ts. The whole app consumes telemetry,
- * tracking, status text and commands ONLY through useDataSource().
+ * tracking, status text, mission messages and commands ONLY through
+ * useDataSource(). The context carries the UI-side MissionDataSource extension
+ * (contract DataSource + the mission subscription channels) — the frozen
+ * contract interface itself is untouched.
  * ========================================================================== */
 import React, { createContext, useContext } from 'react';
-import type { DataSource } from '@/contract';
 import { dataSource } from '@/dataSource';
+import type { MissionDataSource } from '@/dataSource';
 
-const DataSourceContext = createContext<DataSource>(dataSource);
+const DataSourceContext = createContext<MissionDataSource>(dataSource);
 
 /**
  * Provides the app-wide DataSource. Per the agreed shared API this takes only
@@ -18,7 +21,7 @@ const DataSourceContext = createContext<DataSource>(dataSource);
  */
 export function DataSourceProvider(props: {
   children: React.ReactNode;
-  source?: DataSource;
+  source?: MissionDataSource;
 }): JSX.Element {
   return (
     <DataSourceContext.Provider value={props.source ?? dataSource}>
@@ -27,6 +30,6 @@ export function DataSourceProvider(props: {
   );
 }
 
-export function useDataSource(): DataSource {
+export function useDataSource(): MissionDataSource {
   return useContext(DataSourceContext);
 }
