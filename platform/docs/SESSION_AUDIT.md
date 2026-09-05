@@ -1,6 +1,7 @@
 # Session audit — Komati safety rails
 
-Runtime paths in this audit are relative to [`platform/`](../platform/).
+Runtime paths in this audit are relative to [`platform/`](..), this file's
+parent directory.
 
 Initial baseline: clean commit `cd7e25c`
 (`chore: preserve verified ground phase 3 baseline`). The audit was read-only for
