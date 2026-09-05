@@ -33,7 +33,7 @@ export function MissionMap({ site, tel, trail, anomalies, plan, executing }: Mis
       variant="sunken"
       pad={false}
       status={executing ? <Badge tone="accent" mono>MISSION</Badge> : undefined}
-      actions={<Badge tone="outline" mono>SVG · OFFLINE</Badge>}
+      actions={<Badge tone="outline" mono>SITE MODEL</Badge>}
       style={{ height: '100%' }}
       bodyStyle={{ position: 'relative' }}
     >
@@ -290,18 +290,18 @@ function Legend({ metersAcross }: { metersAcross: number }): React.ReactElement 
   return (
     <div
       style={{
-        position: 'absolute', left: 10, bottom: 10,
-        display: 'flex', flexDirection: 'column', gap: 4,
-        padding: '7px 9px',
+        position: 'absolute', left: 8, right: 8, bottom: 8,
+        display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '4px 12px',
+        padding: '5px 8px',
         background: 'rgba(8,12,16,0.72)',
         backdropFilter: 'blur(6px)',
-        border: '1px solid var(--border-default)',
+        border: '1px solid var(--border-subtle)',
         borderRadius: 'var(--radius-sm)',
         zIndex: 5,
       }}
     >
       {rows.map(([color, label, dash]) => (
-        <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5 }}>
           <span
             style={{
               width: 12,
@@ -315,8 +315,8 @@ function Legend({ metersAcross }: { metersAcross: number }): React.ReactElement 
           <span style={{ fontSize: 10, color: 'var(--text-secondary)', fontFamily: 'var(--font-sans)' }}>{label}</span>
         </div>
       ))}
-      <div style={{ fontSize: 10, color: 'var(--text-disabled)', fontFamily: 'var(--font-mono)' }}>
-        view ≈ {Math.round(metersAcross)} m across · grid 50 m
+      <div style={{ marginLeft: 'auto', fontSize: 10, color: 'var(--text-disabled)', fontFamily: 'var(--font-mono)', fontVariantNumeric: 'tabular-nums' }}>
+        {Math.round(metersAcross)} m across · 50 m grid
       </div>
     </div>
   );

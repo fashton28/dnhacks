@@ -1,0 +1,117 @@
+/* ============================================================================
+ * ARGUS operator console: visual system.
+ * ----------------------------------------------------------------------------
+ * Four type sizes only: label 10 / body 12 / title 13 / readout 20.
+ * Geist for words, JetBrains Mono for numerals and identifiers (tabular).
+ * One card style: 1 px subtle border, no nested borders. 8 px rhythm.
+ * Status colours are the only saturated colours on the page.
+ * ========================================================================== */
+
+.argus-root {
+  --a-idle: var(--gray-8);
+  --a-mission: var(--green);
+  --a-manual: var(--amber);
+  --a-returning: var(--blue-bright);
+  --a-offline: var(--red);
+  --a-refused: var(--red-bright);
+  --a-select: var(--gray-11);
+  --a-ink: var(--gray-1);
+  font-size: 12px;
+}
+
+/* ---- type ---------------------------------------------------------------- */
+.a-label { font: 600 10px/1.2 var(--font-sans); letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-tertiary); }
+.a-title { font: 600 13px/1.25 var(--font-sans); letter-spacing: -0.005em; color: var(--text-primary); }
+.a-body  { font: 400 12px/1.5 var(--font-sans); color: var(--text-secondary); }
+.a-num   { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1, 'zero' 1; letter-spacing: 0; color: var(--text-primary); }
+.a-num-lg { font: 500 20px/1 var(--font-mono); font-variant-numeric: tabular-nums; font-feature-settings: 'tnum' 1, 'zero' 1; color: var(--text-primary); }
+.a-unit  { font: 500 10px/1 var(--font-sans); color: var(--text-tertiary); margin-left: 3px; letter-spacing: 0.02em; }
+.a-id    { font: 600 12px/1.2 var(--font-mono); letter-spacing: 0; color: var(--text-primary); }
+.a-muted { color: var(--text-tertiary); }
+
+/* ---- cards --------------------------------------------------------------- */
+.a-card {
+  position: relative; display: block; width: 100%; text-align: left; cursor: pointer;
+  padding: 8px 10px; border-radius: var(--radius-md);
+  border: 1px solid var(--border-subtle); background: var(--surface-raised); color: var(--text-primary);
+  font: inherit; transition: border-color 140ms var(--ease-out), background 140ms var(--ease-out), transform 140ms var(--ease-out);
+}
+.a-card:hover { border-color: var(--border-strong); background: var(--surface-input); }
+.a-card:active { transform: translateY(0.5px); }
+.a-card[data-selected="true"] { border-color: var(--a-select); }
+.a-card[data-selected="true"]::before {
+  content: ''; position: absolute; left: -1px; top: 8px; bottom: 8px; width: 2px; border-radius: 2px; background: var(--a-select);
+}
+.a-card:focus-visible { outline: none; box-shadow: var(--ring); }
+.a-key { display: inline-flex; align-items: center; justify-content: center; min-width: 14px; height: 14px; padding: 0 3px; border-radius: 3px; background: var(--gray-4); color: var(--text-tertiary); font: 600 9px/1 var(--font-mono); }
+
+/* ---- status dots and chips ---------------------------------------------- */
+.a-dot { display: inline-block; width: 6px; height: 6px; border-radius: 999px; background: currentColor; flex: none; }
+.a-dot[data-live="true"] { animation: a-breathe 2.4s ease-in-out infinite; }
+.a-chip { display: inline-flex; align-items: center; gap: 5px; height: 18px; padding: 0 7px; border-radius: 999px; font: 600 10px/1 var(--font-sans); letter-spacing: 0.08em; text-transform: uppercase; border: 1px solid currentColor; background: transparent; }
+.a-chip[data-fill="true"] { background: color-mix(in srgb, currentColor 14%, transparent); border-color: color-mix(in srgb, currentColor 45%, transparent); }
+
+/* ---- bars ---------------------------------------------------------------- */
+.a-bar { position: relative; height: 3px; border-radius: 2px; background: var(--gray-4); overflow: hidden; }
+.a-bar > span { display: block; height: 100%; border-radius: 2px; transition: width 400ms var(--ease-out); }
+
+/* ---- instrument cells (avionics) ----------------------------------------- */
+.a-inst { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.a-cell { padding: 7px 9px 6px; border-radius: var(--radius-sm); background: var(--bg-sunken); border: 1px solid var(--border-subtle); min-width: 0; }
+.a-cell .a-label { margin-bottom: 4px; }
+.a-cell .a-val { display: flex; align-items: baseline; gap: 2px; white-space: nowrap; overflow: hidden; }
+.a-cell[data-wide="true"] { grid-column: 1 / -1; }
+.a-cell[data-tone="warn"] .a-num-lg, .a-cell[data-tone="warn"] .a-num { color: var(--amber-bright); }
+.a-cell[data-tone="bad"] .a-num-lg, .a-cell[data-tone="bad"] .a-num { color: var(--a-refused); }
+.a-cell[data-tone="good"] .a-num-lg { color: var(--green-bright); }
+
+/* ---- empty state ---------------------------------------------------------- */
+.a-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px; height: 100%; min-height: 72px; text-align: center; color: var(--text-tertiary); padding: 12px; }
+.a-empty svg { opacity: 0.35; }
+.a-empty b { font-weight: 600; color: var(--text-secondary); }
+
+/* ---- buttons: icon + label rows ------------------------------------------- */
+.a-row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.a-section { margin: 10px 0 6px; display: flex; align-items: center; gap: 6px; }
+.a-section:first-child { margin-top: 0; }
+.a-section .a-label { flex: 1; }
+.a-section::after { content: ''; height: 1px; flex: 1; background: var(--border-subtle); }
+.a-section .a-label { flex: none; }
+
+/* ---- gimbal control -------------------------------------------------------- */
+.a-gimbal { display: grid; grid-template-columns: 26px 1fr 26px 44px; align-items: center; gap: 6px; }
+.a-gimbal input[type=range] { width: 100%; height: 18px; margin: 0; cursor: pointer; }
+.a-gimbal input[type=range]::-webkit-slider-runnable-track { height: 3px; border-radius: 2px; background: linear-gradient(90deg, var(--gray-6), var(--gray-6)); }
+.a-gimbal input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 12px; height: 12px; margin-top: -4.5px; border-radius: 999px; background: var(--text-primary); border: 2px solid var(--a-ink); box-shadow: 0 0 0 1px var(--border-strong); transition: transform 120ms var(--ease-out); }
+.a-gimbal input[type=range]:hover::-webkit-slider-thumb { transform: scale(1.15); }
+.a-icobtn { display: inline-flex; align-items: center; justify-content: center; width: 26px; height: 26px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle); background: var(--surface-input); color: var(--text-secondary); cursor: pointer; transition: background 120ms var(--ease-out), color 120ms var(--ease-out), border-color 120ms var(--ease-out); }
+.a-icobtn:hover { background: var(--surface-hover); color: var(--text-primary); border-color: var(--border-strong); }
+.a-icobtn:active { background: var(--surface-raised); }
+.a-icobtn:disabled { opacity: 0.4; cursor: default; }
+
+/* video HUD gimbal ladder */
+.a-hud-gimbal { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); width: 34px; height: 150px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0; pointer-events: auto; }
+.a-hud-gimbal .track { position: relative; width: 2px; height: 110px; background: rgba(255,255,255,0.6); border-radius: 1px; box-shadow: 0 0 2px rgba(0,0,0,0.8); }
+.a-hud-gimbal .track i { position: absolute; left: -4px; width: 10px; height: 1px; background: rgba(255,255,255,0.8); box-shadow: 0 0 2px rgba(0,0,0,0.8); }
+.a-hud-gimbal .track b { position: absolute; left: -5px; width: 12px; height: 12px; border-radius: 999px; background: var(--text-primary); border: 2px solid rgba(0,0,0,0.7); transform: translateY(-50%); transition: top 120ms var(--ease-out); }
+.a-hud-gimbal input[type=range] { position: absolute; left: 0; top: 0; width: 34px; height: 110px; margin: 0; opacity: 0; cursor: ns-resize; -webkit-appearance: slider-vertical; writing-mode: vertical-lr; direction: rtl; }
+.a-hud-gimbal .read { margin-top: 6px; font: 600 10px/1 var(--font-mono); color: #e8eef5; text-shadow: 0 1px 2px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums; }
+
+/* ---- HUD text -------------------------------------------------------------- */
+.a-hud { font: 500 11px/1 var(--font-mono); color: #e8eef5; text-shadow: 0 1px 2px rgba(0,0,0,0.9); font-variant-numeric: tabular-nums; }
+.a-hud .dim { color: rgba(232,238,245,0.6); }
+
+/* ---- motion ---------------------------------------------------------------- */
+@keyframes a-breathe { 0%, 100% { opacity: 1; transform: scale(1) } 50% { opacity: 0.45; transform: scale(0.85) } }
+@keyframes a-in { from { opacity: 0; transform: translateY(-4px) } to { opacity: 1; transform: none } }
+.a-in { animation: a-in 160ms var(--ease-out); }
+
+/* ---- shared panel tuning (scoped to the ARGUS root) ------------------------ */
+.argus-root section > header { height: 32px !important; }
+.argus-root ::-webkit-scrollbar { width: 8px; }
+
+@media (max-width: 1320px), (max-height: 760px) {
+  .argus-grid { grid-template-columns: 222px 1fr 236px !important; gap: 6px !important; padding: 6px !important; }
+  .argus-hint { display: none; }
+  .a-num-lg { font-size: 17px; }
+}

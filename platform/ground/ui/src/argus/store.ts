@@ -41,6 +41,8 @@ export interface ArgusState {
   manualActive: boolean;
   dispatching: string | null;
   sceneOpenFences: string[];
+  /** Optimistic gimbal pitch while a command is in flight; null when telemetry is authoritative. */
+  gimbalPending: number | null;
 
   setConn(c: ConnectionState): void;
   setFleet(states: HubDroneState[]): void;
@@ -62,6 +64,7 @@ export interface ArgusState {
   setManualActive(b: boolean): void;
   setDispatching(id: string | null): void;
   setOpenFences(ids: string[]): void;
+  setGimbalPending(v: number | null): void;
 }
 
 export const useArgus = create<ArgusState>((set, get) => ({
@@ -85,6 +88,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   manualActive: false,
   dispatching: null,
   sceneOpenFences: [],
+  gimbalPending: null,
 
   setConn: (conn) => set({ conn }),
   setFleet: (states) => {
@@ -122,6 +126,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   setManualActive: (manualActive) => set({ manualActive }),
   setDispatching: (dispatching) => set({ dispatching }),
   setOpenFences: (sceneOpenFences) => set({ sceneOpenFences }),
+  setGimbalPending: (gimbalPending) => set({ gimbalPending }),
 }));
 
 /** The Drone the console follows, or the first known one. */

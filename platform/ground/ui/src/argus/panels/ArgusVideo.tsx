@@ -1,38 +1,68 @@
 import React from 'react';
 import { useArgus } from '../store';
+import { ArgusMark } from '../Brand';
+import { GIMBAL_MAX, GIMBAL_MIN } from './OpsPanel';
 
-/** The selected Drone's camera as an MJPEG stream from the Hub, with an ARGUS HUD and a stale-signal notice. */
-export function ArgusVideo({ hubBase, lastFrameTs }: { hubBase: string; lastFrameTs: number }): React.ReactElement {
+/** The selected Drone's camera as an MJPEG stream from the Hub, with an avionics HUD and a gimbal ladder. */
+export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string; lastFrameTs: number; onGimbal: (pitchDeg: number) => void }): React.ReactElement {
   const selected = useArgus((s) => s.selected);
   const drone = useArgus((s) => (s.selected ? s.fleet[s.selected] : undefined));
-  const [clock, setClock] = React.useState(() => new Date().toLocaleTimeString());
+  const gimbalPending = useArgus((s) => s.gimbalPending);
   const [now, setNow] = React.useState(Date.now());
-  React.useEffect(() => { const id = setInterval(() => { setClock(new Date().toLocaleTimeString()); setNow(Date.now()); }, 1000); return () => clearInterval(id); }, []);
+  React.useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
   const stale = now - lastFrameTs > 4000;
   const url = selected ? `${hubBase}/drones/${selected}/mjpeg` : '';
+  const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 45;
+  const frac = (gimbal - GIMBAL_MIN) / (GIMBAL_MAX - GIMBAL_MIN);
   return (
-    <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000', borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)' }}>
-      {url && <img key={url} src={url} alt="Drone view" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />}
-      <div style={{ position: 'absolute', left: 10, top: 8, display: 'flex', gap: 8, alignItems: 'center', fontFamily: 'var(--font-mono)', fontSize: 11, color: '#e8eef5', textShadow: '0 1px 2px rgba(0,0,0,0.9)' }}>
-        <span style={{ fontWeight: 700 }}>{selected ?? '—'}</span>
-        <span>{(drone?.alt ?? 0).toFixed(1)} m</span>
-        <span>{(drone?.heading_deg ?? 0).toFixed(0)}°</span>
-        <span style={{ color: 'var(--text-tertiary)' }}>gimbal {drone?.gimbal_pitch_deg ?? 45}°</span>
+    <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000', overflow: 'hidden' }}>
+      {url && <img key={url} src={url} alt="" style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />}
+      {/* vignette so HUD text stays legible on bright ground */}
+      <div style={{ position: 'absolute', inset: 0, pointerEvents: 'none', background: 'linear-gradient(180deg, rgba(0,0,0,0.42) 0%, rgba(0,0,0,0) 22%, rgba(0,0,0,0) 78%, rgba(0,0,0,0.42) 100%)' }} />
+
+      {/* top-left: identity and pose */}
+      <div className="a-hud" style={{ position: 'absolute', left: 12, top: 10, display: 'flex', gap: 12, alignItems: 'baseline' }}>
+        <span style={{ fontWeight: 700, fontSize: 12 }}>{selected ?? '—'}</span>
+        <span><span className="dim">ALT </span>{(drone?.alt ?? 0).toFixed(1)} m</span>
+        <span><span className="dim">HDG </span>{String(Math.round(drone?.heading_deg ?? 0)).padStart(3, '0')}°</span>
+        <span><span className="dim">CAM </span>{gimbal}°</span>
       </div>
-      <div style={{ position: 'absolute', right: 10, top: 8, display: 'flex', gap: 8, alignItems: 'center', fontFamily: 'var(--font-mono)', fontSize: 11, color: '#e8eef5', textShadow: '0 1px 2px rgba(0,0,0,0.9)' }}>
+      {/* top-right: link state */}
+      <div className="a-hud" style={{ position: 'absolute', right: 12, top: 10, display: 'flex', gap: 10, alignItems: 'center' }}>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: stale ? 'var(--amber-bright)' : 'var(--red-bright)' }}>
-          <span style={{ width: 7, height: 7, borderRadius: 999, background: 'currentColor', animation: stale ? 'none' : 'eis-ping2 1.2s infinite' }} />{stale ? 'NO SIGNAL' : 'LIVE'}
+          <span className="a-dot" data-live={!stale} />{stale ? 'NO SIGNAL' : 'LIVE'}
         </span>
-        <span>{clock}</span>
+        <span className="dim">{drone?.mode || ''}</span>
       </div>
-      <div style={{ position: 'absolute', left: '50%', top: '50%', width: 22, height: 22, transform: 'translate(-50%,-50%)', opacity: 0.7 }}>
-        <div style={{ position: 'absolute', left: '50%', top: 0, width: 1, height: '100%', background: '#fff', transform: 'translateX(-50%)' }} />
-        <div style={{ position: 'absolute', top: '50%', left: 0, height: 1, width: '100%', background: '#fff', transform: 'translateY(-50%)' }} />
+      {/* bottom-left: mode and status */}
+      <div className="a-hud" style={{ position: 'absolute', left: 12, bottom: 10, display: 'flex', gap: 12 }}>
+        <span><span className="dim">STATUS </span>{(drone?.status ?? '—').replace('_', ' ').toUpperCase()}</span>
+        <span><span className="dim">BAT </span>{(drone?.battery_pct ?? 0).toFixed(0)}%</span>
       </div>
+      {/* reticle */}
+      <svg width="40" height="40" viewBox="-20 -20 40 40" style={{ position: 'absolute', left: '50%', top: '50%', transform: 'translate(-50%,-50%)', opacity: 0.75, pointerEvents: 'none' }}>
+        <g stroke="#fff" strokeWidth="1" fill="none">
+          <line x1="-18" y1="0" x2="-7" y2="0" /><line x1="7" y1="0" x2="18" y2="0" />
+          <line x1="0" y1="-18" x2="0" y2="-7" /><line x1="0" y1="7" x2="0" y2="18" />
+          <circle r="2" />
+        </g>
+      </svg>
+      {/* gimbal ladder: drag or scroll to aim the camera */}
+      {selected && (
+        <div className="a-hud-gimbal" title="Camera pitch: drag, or keys [ ]" onWheel={(e) => { e.preventDefault(); onGimbal(Math.max(GIMBAL_MIN, Math.min(GIMBAL_MAX, gimbal + (e.deltaY > 0 ? 5 : -5)))); }}>
+          <div className="track">
+            {[-30, 0, 30, 60, 90].map((d) => <i key={d} style={{ top: `${((d - GIMBAL_MIN) / (GIMBAL_MAX - GIMBAL_MIN)) * 100}%` }} />)}
+            <b style={{ top: `${frac * 100}%` }} />
+            <input type="range" min={GIMBAL_MIN} max={GIMBAL_MAX} step={1} value={gimbal} onChange={(e) => onGimbal(Number(e.target.value))} aria-label="Gimbal pitch" />
+          </div>
+          <span className="read">{gimbal > 0 ? `${gimbal}° ↓` : gimbal < 0 ? `${-gimbal}° ↑` : 'LEVEL'}</span>
+        </div>
+      )}
       {stale && (
         <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
-          <div style={{ padding: '8px 12px', borderRadius: 6, background: 'rgba(8,12,16,0.75)', border: '1px solid var(--border-default)', fontSize: 11.5, color: 'var(--text-secondary)', textAlign: 'center', maxWidth: 360, lineHeight: 1.5 }}>
-            No frames from the Renderer yet. The embedded World view renders this Drone's camera; if it stays dark, open the ARGUS Console in another tab.
+          <div className="a-empty" style={{ height: 'auto', padding: '10px 14px', borderRadius: 8, background: 'rgba(8,12,16,0.78)', border: '1px solid var(--border-subtle)', maxWidth: 340 }}>
+            <ArgusMark size={26} />
+            <div className="a-body"><b>No frames yet.</b><br />The World view renders this camera; if it stays dark, open the ARGUS Console in another tab.</div>
           </div>
         </div>
       )}
