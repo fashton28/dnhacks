@@ -154,6 +154,7 @@ export default function ArgusApp(): JSX.Element {
   const select = useCallback((id: string) => { hub.setVehicle(id); st.getState().select(id); st.getState().setManualActive(false); }, [st]);
 
   /* ---- actions ---- */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Hub payloads are dynamically shaped
   const post = useCallback(async (path: string, body: unknown, okMsg?: string): Promise<any> => {
     const r = await hub.postJson(path, body);
     if (!r.ok) { toast({ severity: 'error', title: 'Hub refused', message: r.text.slice(0, 160) }); log('error', `${path}: ${r.text.slice(0, 160)}`); throw new Error(r.text); }

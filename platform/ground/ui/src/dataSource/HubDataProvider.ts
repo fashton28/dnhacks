@@ -1,3 +1,7 @@
+import type {
+  CapabilitiesMessage, FailsafeState, FleetMessage, HealthEventMessage, ObservationMessage,
+  ReadinessMessage, RfEventMessage, SpectrumMessage, Unsubscribe as ContractUnsubscribe,
+} from '@/contract';
 /* ============================================================================
  * HubDataProvider — the dashboard's DataSource against the ARGUS Hub.
  * ----------------------------------------------------------------------------
@@ -95,6 +99,7 @@ const sub = <T,>(ls: Listeners<T>) => (cb: (v: T) => void): Unsubscribe => { ls.
 const KNOWN_MODES = new Set<string>(MODES);
 
 export class HubDataProvider implements MissionDataSource {
+  readonly kind = 'hub' as const;
   private http = 'http://127.0.0.1:8000';
   private ws: WebSocket | null = null;
   private wsUrl = '';
@@ -161,12 +166,36 @@ export class HubDataProvider implements MissionDataSource {
   onIncidentReport = sub(this.lReport);
 
   /* ---- Fleet extension (beyond the frozen contract) ------------------------- */
-  onFleet = sub(this.lFleet);
+  /** Hub-native fleet rows (ARGUS panels). */
+  onFleetRows = sub(this.lFleet);
+  /** Contract-shaped fleet stream, derived from the Hub rows so contract consumers keep working. */
+  onFleet(cb: (m: FleetMessage) => void): ContractUnsubscribe {
+    const inner = (rows: FleetEntry[]): void => cb({
+      type: 'fleet', ts: Date.now(), vehicleId: this.getVehicle(),
+      vehicles: rows.map((r) => ({
+        vehicleId: r.vehicleId,
+        battery: { soc_pct: r.batteryPct } as FleetMessage['vehicles'][number]['battery'],
+        controlSource: r.status === 'manual_control' ? 'manual' : r.status === 'on_mission' ? 'planner' : 'auto',
+        failsafe: { state: 'none' as FailsafeState, reason: '' },
+        readiness: { ready: r.status !== 'offline', reasons: r.status === 'offline' ? ['offline'] : [], eta_ready_s: 0 },
+      })),
+    });
+    this.lFleet.add(inner); return () => this.lFleet.delete(inner);
+  }
+  /* Channels the Hub does not carry yet: subscriptions are accepted and never fire. */
+  private static noop<T>(): (cb: (v: T) => void) => ContractUnsubscribe { return () => () => {}; }
+  onObservation = HubDataProvider.noop<ObservationMessage>();
+  onCapabilities = HubDataProvider.noop<CapabilitiesMessage>();
+  onReadiness = HubDataProvider.noop<ReadinessMessage>();
+  onHealthEvent = HubDataProvider.noop<HealthEventMessage>();
+  onRfEvent = HubDataProvider.noop<RfEventMessage>();
+  onSpectrum = HubDataProvider.noop<SpectrumMessage>();
   /** Every live Hub event, untranslated (for the ARGUS panels that speak the Hub's own vocabulary). */
   onRawEvent = sub(this.lRaw);
   /** Hub HTTP base for direct REST calls from ARGUS panels. */
   httpBase(): string { return this.http; }
   /** Fire-and-forget REST helpers for ARGUS operations. */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Hub payloads are dynamically shaped
   async postJson(path: string, body: unknown): Promise<{ ok: boolean; status: number; text: string; json?: any }> { return this.post(path, body); }
   async getJson(path: string): Promise<{ ok: boolean; json?: unknown }> { return this.get(path); }
   isManualActive(): boolean { return this.manualActive; }
@@ -469,6 +498,7 @@ export class HubDataProvider implements MissionDataSource {
     return [ack.ok, ack.detail || `${String(body.type)} accepted`];
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Hub payloads are dynamically shaped
   private async post(path: string, body: unknown): Promise<{ ok: boolean; status: number; text: string; json?: any }> {
     const res = await fetch(`${this.http}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
     const text = await res.text();

@@ -98,12 +98,12 @@ type CenterView = 'flight' | 'mission' | 'world';
 
 /** Hub-only extensions of the frozen DataSource (fleet list + vehicle selection). */
 interface FleetCapable {
-  onFleet(cb: (rows: FleetEntry[]) => void): () => void;
+  onFleetRows(cb: (rows: FleetEntry[]) => void): () => void;
   setVehicle(id: string): void;
   getVehicle(): string;
 }
 function fleetCapable(ds: unknown): ds is FleetCapable {
-  return !!ds && typeof (ds as FleetCapable).onFleet === 'function' && typeof (ds as FleetCapable).setVehicle === 'function';
+  return !!ds && typeof (ds as FleetCapable).onFleetRows === 'function' && typeof (ds as FleetCapable).setVehicle === 'function';
 }
 const DEFAULT_SIMULATION_TOGGLES: SimulationToggles = {
   simulateGpsLoss: false, simulateRfInterference: false, simulateHostileDrone: false,
@@ -124,7 +124,6 @@ function liveDemoAnomaly(site: SiteModel): Anomaly {
 }
 
 /* Center-column view: classic flight ops vs the mission (security) workspace. */
-type CenterView = 'flight' | 'mission';
 
 /* Which modal (if any) is currently open. */
 type ModalKind =
@@ -278,7 +277,7 @@ function GroundControl(): JSX.Element {
       if (!a.success) pushToast({ severity: 'error', title: `${a.command} failed`, message: a.message });
     });
     const offFleet = fleetCapable(ds)
-      ? ds.onFleet((rows) => { setFleet(rows); setVehicleId(ds.getVehicle()); })
+      ? ds.onFleetRows((rows) => { setFleet(rows); setVehicleId(ds.getVehicle()); })
       : () => {};
 
     /* mission channels (anomaly → plan → verification → incident report) */

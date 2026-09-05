@@ -26,7 +26,7 @@ import type {
 } from '@/contract';
 
 export interface MissionDataSource extends DataSource {
-  readonly kind: 'mock' | 'live';
+  readonly kind: 'mock' | 'live' | 'hub';
   onAnomaly(cb: (m: AnomalyMessage) => void): Unsubscribe;
   onMissionPlan(cb: (m: MissionPlanMessage) => void): Unsubscribe;
   onVerification(cb: (m: VerificationMessage) => void): Unsubscribe;

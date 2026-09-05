@@ -39,7 +39,7 @@ export interface StatusBarProps {
   tel: Telemetry | null;
   connState: ConnectionState;
   sitl: boolean;
-  sourceKind?: 'mock' | 'live';
+  sourceKind?: 'mock' | 'live' | 'hub';
   host?: string;
   elapsed: number;
   controllerOn: boolean;
