@@ -41,6 +41,8 @@ export default defineConfig({
   base: './',
   plugins: [react(), siteFilePlugin()],
   resolve: {
+    dedupe: ['react', 'react-dom', 'react/jsx-runtime'],
+    preserveSymlinks: true,
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
       // Cross-package source imports (plain TS packages, zero Electron deps).
