@@ -21,7 +21,18 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
 
-from contracts.models import Detection, DroneState, DroneStatus, FlightPlan, ManualCommand, Scenario, SceneProp, SceneState
+from contracts.models import (
+    Detection,
+    DroneState,
+    DroneStatus,
+    FlightPlan,
+    ManualCommand,
+    Scenario,
+    SceneProp,
+    SceneState,
+    ValidationResult,
+    Verdict,
+)
 from contracts.protocol import (
     Ack,
     CaptureFrame,
@@ -45,8 +56,10 @@ from hub.audit import AuditLog
 from hub.autonomy import Autonomy
 from hub.detections import DetectionStore
 from hub.manual import ManualControl
+from hub.safety import validate
 from hub.missions import MissionPhase, MissionRunner
 from hub.registry import Registry
+from sim.common.site_limits import SiteLimits
 
 
 class HubSettings(BaseModel):
@@ -107,6 +120,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.missions = MissionRunner(app.state.registry, app.state.audit, settings.evidence_dir, settings.speed_factor)
         app.state.manual = ManualControl()
         app.state.detections = DetectionStore()
+        app.state.limits = SiteLimits.load()
         app.state.settings = settings
         app.state.autonomy = Autonomy(app, asyncio.get_running_loop(), settings.runs_dir)
 
@@ -274,21 +288,56 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.audit.append("command", drone_id=drone_id, cmd=cmd.model_dump(mode="json"), ok=ack.ok, detail=ack.detail)
         return ack
 
+    @app.post("/missions/validate", response_model=ValidationResult)
+    async def validate_plan(body: FlyBody) -> ValidationResult:
+        """The Safety Validator's verdict on a FlightPlan, without dispatching it.
+
+        The Console calls this to show accept/reject before an Operator commits.
+        """
+        state = None
+        if (did := body.drone_id or body.plan.drone_id) and (conn := reg().drones.get(did)):
+            state = conn.state
+        result = validate(body.plan, app.state.limits, state)
+        app.state.audit.append(
+            "plan_validated",
+            mission_id=result.mission_id,
+            verdict=result.verdict.value,
+            rules=[x.rule for x in result.violations],
+        )
+        reg().publish({"type": "validation", **result.model_dump(mode="json")})
+        return result
+
     @app.post("/missions/fly")
     async def fly(body: FlyBody) -> dict[str, Any]:
         drone_id = body.drone_id or body.plan.drone_id
         if drone_id is None:
             idle = [s for s in reg().states() if s.status == DroneStatus.idle]
-            if not idle:
-                raise HTTPException(409, "no idle drone available")
-            drone_id = max(idle, key=lambda s: s.battery_pct).drone_id
-        conn = reg().drones.get(drone_id)
+            drone_id = max(idle, key=lambda s: s.battery_pct).drone_id if idle else None
+        conn = reg().drones.get(drone_id) if drone_id else None
+
+        # The Safety Validator gates dispatch, and it runs BEFORE the fleet checks: an
+        # unsafe plan is refused by rule regardless of whether a Drone happens to be free,
+        # so "no idle drone" can never mask a geofence or no-fly violation.
+        result = validate(body.plan, app.state.limits, conn.state if conn else None)
+        app.state.audit.append(
+            "plan_validated",
+            mission_id=result.mission_id,
+            verdict=result.verdict.value,
+            rules=[x.rule for x in result.violations],
+        )
+        reg().publish({"type": "validation", **result.model_dump(mode="json")})
+        if result.verdict is Verdict.reject:
+            raise HTTPException(409, detail=result.model_dump(mode="json"))
+
+        if drone_id is None:
+            raise HTTPException(409, "no idle drone available")
         if conn is None or conn.ws is None or conn.state is None:
             raise HTTPException(404, f"unknown or offline drone {drone_id}")
         if runner().active_for(drone_id) is not None:
             raise HTTPException(409, f"{drone_id} already has an active mission")
         if body.plan.mission_id in runner().missions:
             raise HTTPException(409, f"mission {body.plan.mission_id} already exists")
+
         m = runner().start(body.plan, drone_id)
         return m.model_dump(mode="json")
 
