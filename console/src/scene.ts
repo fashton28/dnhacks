@@ -3,6 +3,7 @@
 import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { RGBELoader } from "three/examples/jsm/loaders/RGBELoader.js";
+import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
@@ -78,7 +79,7 @@ const mat = {
   skin: new THREE.MeshStandardMaterial({ color: 0xc9967a, roughness: 0.7 }),
   tree: new THREE.MeshStandardMaterial({ color: 0x2c5a2a, roughness: 1.0 }),
   trunk: new THREE.MeshStandardMaterial({ color: 0x4a3524, roughness: 1.0 }),
-  padPaint: new THREE.MeshStandardMaterial({ color: 0xe8e2d0, roughness: 0.9 }),
+  padPaint: new THREE.MeshStandardMaterial({ color: 0xb9b3a4, roughness: 1.0, metalness: 0 }),
   roof: new THREE.MeshStandardMaterial({ color: 0x8c8f93, roughness: 0.75, metalness: 0.4 }),
 };
 
@@ -394,7 +395,8 @@ export class SiteScene {
   }
 
   /** Per-frame animation hook (plumes, water). Called by the main loop with elapsed seconds. */
-  update(elapsedSeconds: number): void {
+  update(elapsedSeconds: number, cameraPosition?: THREE.Vector3): void {
+    this.animateDrones(elapsedSeconds, cameraPosition);
     for (const a of this.animated) a.update(elapsedSeconds);
   }
 
@@ -433,33 +435,91 @@ export class SiteScene {
 
   // ---- live state --------------------------------------------------------------------------
   private droneModel(id: string): THREE.Group {
+    // A mission quadcopter (Matrice class, ~0.9 m span): rounded carbon body, folding arms, brushless motors with
+    // two-blade props, landing skids, nose gimbal with a lens, nav lights (red front, green rear) and a strobe.
+    const carbon = new THREE.MeshPhysicalMaterial({ color: 0x1b1d21, roughness: 0.35, metalness: 0.2, clearcoat: 0.6, clearcoatRoughness: 0.25 });
+    const shell = new THREE.MeshPhysicalMaterial({ color: 0x3a3d43, roughness: 0.45, metalness: 0.1, clearcoat: 0.3 });
+    const alu = new THREE.MeshStandardMaterial({ color: 0x9aa0a8, roughness: 0.35, metalness: 0.9 });
+    const black = new THREE.MeshStandardMaterial({ color: 0x0c0d10, roughness: 0.6, metalness: 0.3 });
+    const lens = new THREE.MeshPhysicalMaterial({ color: 0x06111c, roughness: 0.05, metalness: 0.1, clearcoat: 1, clearcoatRoughness: 0.02 });
+    const blade = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.5, metalness: 0.2 });
+    const disc = new THREE.MeshBasicMaterial({ color: 0x9aa4b0, transparent: true, opacity: 0.16, side: THREE.DoubleSide, depthWrite: false });
     const g = new THREE.Group();
-    const body = new THREE.Mesh(new THREE.BoxGeometry(0.32, 0.09, 0.36), mat.drone);
-    body.castShadow = true;
-    g.add(body);
-    for (const [dx, dz] of [[0.34, 0.34], [-0.34, 0.34], [0.34, -0.34], [-0.34, -0.34]]) {
-      const arm = new THREE.Mesh(new THREE.BoxGeometry(0.48, 0.035, 0.05), mat.drone);
-      arm.position.set(dx / 2, 0, dz / 2); arm.rotation.y = Math.atan2(-dz, dx);
-      g.add(arm);
-      const rotor = new THREE.Mesh(new THREE.CylinderGeometry(0.23, 0.23, 0.008, 24), mat.rotor);
-      rotor.position.set(dx, 0.045, dz);
-      g.add(rotor);
+    const body = new THREE.Mesh(new RoundedBoxGeometry(0.30, 0.11, 0.40, 4, 0.03), carbon);
+    body.castShadow = true; g.add(body);
+    const top = new THREE.Mesh(new RoundedBoxGeometry(0.22, 0.06, 0.26, 4, 0.02), shell); top.position.set(0, 0.075, -0.02); top.castShadow = true; g.add(top);
+    const battery = new THREE.Mesh(new RoundedBoxGeometry(0.16, 0.05, 0.12, 3, 0.015), black); battery.position.set(0, 0.125, 0.03); g.add(battery);
+    const gpsPuck = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.012, 20), shell); gpsPuck.position.set(0, 0.16, -0.06); g.add(gpsPuck);
+    // arms + motors + props
+    const rotors: THREE.Object3D[] = [];
+    const armLen = 0.32;
+    for (const [sx, sz] of [[1, -1], [-1, -1], [1, 1], [-1, 1]] as const) {
+      const ang = Math.atan2(sz, sx);
+      const arm = new THREE.Mesh(new THREE.CylinderGeometry(0.014, 0.017, armLen, 12), carbon);
+      arm.rotation.z = Math.PI / 2; arm.rotation.y = -ang;
+      arm.position.set(Math.cos(ang) * (0.13 + armLen / 2), 0.02, Math.sin(ang) * (0.13 + armLen / 2));
+      arm.castShadow = true; g.add(arm);
+      const ex = Math.cos(ang) * (0.13 + armLen), ez = Math.sin(ang) * (0.13 + armLen);
+      const mount = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.035, 0.04, 16), shell); mount.position.set(ex, 0.03, ez); g.add(mount);
+      const motor = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.026, 0.035, 20), alu); motor.position.set(ex, 0.067, ez); g.add(motor);
+      const hub = new THREE.Group(); hub.position.set(ex, 0.09, ez);
+      for (const k of [0, 1]) { const b = new THREE.Mesh(new THREE.BoxGeometry(0.30, 0.004, 0.028), blade); b.rotation.y = k * Math.PI / 2; b.rotation.x = 0.12; hub.add(b); }
+      const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.012, 12), black); hub.add(cap);
+      const d = new THREE.Mesh(new THREE.CircleGeometry(0.155, 32), disc); d.rotation.x = -Math.PI / 2; d.visible = false; hub.add(d);
+      (hub.userData as any).disc = d;
+      g.add(hub); rotors.push(hub);
+      // nav light: red on the front arms (-z is the nose), green on the rear
+      const led = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8), new THREE.MeshStandardMaterial({ color: sz < 0 ? 0xff2a2a : 0x2aff5a, emissive: sz < 0 ? 0xff2a2a : 0x2aff5a, emissiveIntensity: 2.5 }));
+      led.position.set(ex, 0.008, ez); g.add(led);
     }
-    const gimbal = new THREE.Mesh(new THREE.SphereGeometry(0.06, 12, 8), mat.glass);
-    gimbal.position.set(0, -0.07, -0.16);
+    // skids
+    for (const sx of [-1, 1]) {
+      const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.16, 8), carbon); leg.position.set(sx * 0.11, -0.12, 0); leg.rotation.z = sx * 0.25; g.add(leg);
+      const skid = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, 0.34, 8), carbon); skid.rotation.x = Math.PI / 2; skid.position.set(sx * 0.13, -0.2, 0); g.add(skid);
+    }
+    // nose gimbal: yaw ring under the nose, pitch cradle, camera housing with lens
+    const gimbal = new THREE.Group(); gimbal.position.set(0, -0.06, -0.19);
+    const ring = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.02, 20), alu); gimbal.add(ring);
+    const pitch = new THREE.Group(); pitch.position.set(0, -0.045, 0); gimbal.add(pitch);
+    const housing = new THREE.Mesh(new RoundedBoxGeometry(0.07, 0.055, 0.07, 3, 0.012), shell); housing.castShadow = true; pitch.add(housing);
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, 0.03, 20), black); barrel.rotation.x = Math.PI / 2; barrel.position.set(0, 0, -0.045); pitch.add(barrel);
+    const glass = new THREE.Mesh(new THREE.CircleGeometry(0.016, 20), lens); glass.position.set(0, 0, -0.061); pitch.add(glass);
     g.add(gimbal);
-    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: textLabel(id), depthTest: false, transparent: true }));
-    label.scale.set(6, 1.5, 1); label.position.y = 1.4;
+    // strobe
+    const strobe = new THREE.Mesh(new THREE.SphereGeometry(0.012, 10, 8), new THREE.MeshStandardMaterial({ color: 0xffffff, emissive: 0xffffff, emissiveIntensity: 0 }));
+    strobe.position.set(0, 0.17, 0.03); g.add(strobe);
+    const label = new THREE.Sprite(new THREE.SpriteMaterial({ map: textLabel(id), depthTest: false, transparent: true, opacity: 0.9 }));
+    label.scale.set(2.2, 0.55, 1); label.position.y = 0.75;
     g.add(label);
     g.name = id;
+    g.userData.label = label;
+    g.userData.rotors = rotors; g.userData.gimbalPitch = pitch; g.userData.strobe = strobe;
     return g;
+  }
+
+  /** Spin rotors of airborne Drones, pulse strobes, and tilt each gimbal to its reported pitch. */
+  animateDrones(t: number, cameraPosition?: THREE.Vector3): void {
+    for (const g of this.drones.values()) {
+      const label = g.userData.label as THREE.Sprite | undefined;
+      if (label && cameraPosition) { const d = cameraPosition.distanceTo(g.position); label.visible = d > 12; (label.material as THREE.SpriteMaterial).opacity = Math.min(0.9, (d - 12) / 20); }
+      const s = (g.userData as any).state as DroneState | undefined;
+      const flying = !!s && (s.armed || s.alt > 0.15);
+      for (const r of (g.userData.rotors as THREE.Object3D[])) {
+        if (flying) { r.rotation.y += 0.9; (r.userData.disc as THREE.Mesh).visible = true; } else { (r.userData.disc as THREE.Mesh).visible = false; }
+      }
+      const strobe = g.userData.strobe as THREE.Mesh;
+      (strobe.material as THREE.MeshStandardMaterial).emissiveIntensity = flying ? (Math.sin(t * 6) > 0.85 ? 6 : 0.2) : 0;
+      const pitch = g.userData.gimbalPitch as THREE.Group;
+      const target = -(s?.gimbal_pitch_deg ?? 45) * Math.PI / 180;
+      pitch.rotation.x += (target - pitch.rotation.x) * 0.2;
+    }
   }
 
   updateDrone(s: DroneState): void {
     let g = this.drones.get(s.drone_id);
     if (!g) { g = this.droneModel(s.drone_id); this.drones.set(s.drone_id, g); this.scene.add(g); }
     const [x, y] = latlonToEnu(this.anchor, s.lat, s.lon);
-    g.position.copy(enuToThree(x, y, Math.max(0.12, s.alt + 0.12)));
+    g.position.copy(enuToThree(x, y, Math.max(0.21, s.alt + 0.21)));  // skids rest on the pad
     g.rotation.y = headingToYaw(s.heading_deg);
     (g.userData as any).state = s;
   }
@@ -509,7 +569,7 @@ export class SiteScene {
   /** Place a camera at a Drone's pose with the gimbal pitch (0 level, 90 straight down). */
   aimDroneCamera(cam: THREE.PerspectiveCamera, s: DroneState): void {
     const [x, y] = latlonToEnu(this.anchor, s.lat, s.lon);
-    cam.position.copy(enuToThree(x, y, s.alt + 0.25));  // gimbal sits on the body, which rests 25 cm above the pad
+    cam.position.copy(enuToThree(x, y, s.alt + 0.15));  // gimbal lens sits under the nose, ~15 cm above the skids on the pad
     const yaw = headingToYaw(s.heading_deg);
     const pitch = -s.gimbal_pitch_deg * Math.PI / 180;
     cam.rotation.set(0, 0, 0);
@@ -519,10 +579,10 @@ export class SiteScene {
 }
 
 function textLabel(text: string): THREE.CanvasTexture {
-  const c = document.createElement("canvas"); c.width = 256; c.height = 64;
+  const c = document.createElement("canvas"); c.width = 512; c.height = 128;
   const ctx = c.getContext("2d")!;
-  ctx.fillStyle = "rgba(0,0,0,0.55)"; ctx.fillRect(0, 0, 256, 64);
-  ctx.fillStyle = "#e6edf3"; ctx.font = "bold 34px -apple-system, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
-  ctx.fillText(text, 128, 34);
+  ctx.fillStyle = "rgba(8,10,14,0.72)"; ctx.beginPath(); ctx.roundRect(8, 16, 496, 96, 24); ctx.fill();
+  ctx.fillStyle = "#e6edf3"; ctx.font = "600 56px -apple-system, Inter, sans-serif"; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(text, 256, 66);
   const t = new THREE.CanvasTexture(c); t.needsUpdate = true; return t;
 }

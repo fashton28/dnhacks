@@ -39,7 +39,7 @@ const worldCam = new THREE.PerspectiveCamera(50, 1, 0.5, 3000);
 const controls = new OrbitControls(worldCam, worldCanvas);
 controls.target.copy(enuToThree(0, 0, 5));
 controls.maxPolarAngle = Math.PI / 2 - 0.03;
-controls.minDistance = 8;
+controls.minDistance = 1.2;
 controls.maxDistance = 1200;
 worldCam.position.copy(enuToThree(-230, -290, 150));
 controls.update();
@@ -221,7 +221,7 @@ function onDrone(s: DroneState): void {
   if (selected === null && s.status !== "offline" && (storedSelection === null || storedSelection === s.drone_id)) select(s.drone_id, { quiet: true });
   if (selected === null && !selectFallback) selectFallback = window.setTimeout(() => { if (selected === null && drones.size) select(sortedDrones()[0].drone_id, { quiet: true }); }, 2500);
   if (performance.now() - lastFleetRefresh > 200 || (prev && prev.status !== s.status)) { lastFleetRefresh = performance.now(); refreshFleet(); }
-  if (s.drone_id === selected) refreshSelected();
+  if (s.drone_id === selected) { refreshSelected(); syncGimbal(s); }
 }
 
 function onMission(m: Mission): void {
@@ -316,7 +316,34 @@ async function manualEnd(action: "resume" | "abort" | "hover"): Promise<void> {
   $("manual-banner").hidden = true;
   try { await api(`/drones/${id}/manual/end`, { action }); log(`${id}: handed back (${action})`, "good"); } catch (err) { log(String(err), "bad"); }
 }
+// ---- Camera gimbal: slider and [ ] keys send look_at; telemetry drives the readout unless the operator is dragging ----
+const gimbalInput = $<HTMLInputElement>("gimbal");
+let gimbalDragging = false, gimbalTimer: number | null = null, gimbalPending: number | null = null;
+function sendGimbal(pitch: number): void {
+  if (!selected) return;
+  gimbalPending = pitch;
+  if (gimbalTimer !== null) return;
+  gimbalTimer = window.setTimeout(() => {
+    gimbalTimer = null;
+    const p = gimbalPending; gimbalPending = null;
+    if (p !== null && selected) api(`/drones/${selected}/command`, { type: "look_at", pitch_deg: p }).catch((err) => log(String(err), "bad"));
+  }, 100);
+}
+gimbalInput.addEventListener("pointerdown", () => { gimbalDragging = true; });
+gimbalInput.addEventListener("pointerup", () => { gimbalDragging = false; });
+gimbalInput.addEventListener("input", () => { const v = Number(gimbalInput.value); $("gimbal-value").textContent = `${v}°`; sendGimbal(v); });
+function syncGimbal(s: DroneState): void {
+  if (gimbalDragging || gimbalTimer !== null) return;
+  gimbalInput.value = String(Math.round(s.gimbal_pitch_deg));
+  $("gimbal-value").textContent = `${Math.round(s.gimbal_pitch_deg)}°`;
+}
+function nudgeGimbal(delta: number): void {
+  const v = Math.max(-30, Math.min(90, Number(gimbalInput.value) + delta));
+  gimbalInput.value = String(v); $("gimbal-value").textContent = `${v}°`; sendGimbal(v);
+}
+
 window.addEventListener("keydown", (e) => {
+  if (e.key === "[" || e.key === "]") { if (!(e.target as HTMLElement).matches("input,textarea")) { e.preventDefault(); nudgeGimbal(e.key === "[" ? -5 : 5); } return; }
   if ((e.target as HTMLElement).tagName === "INPUT" || e.metaKey || e.ctrlKey) return;
   if (e.key === "?") { e.preventDefault(); toggleHelp(); return; }
   if (help?.open) { if (e.key === "Escape") help.close(); return; }
@@ -470,7 +497,7 @@ function loop(now: number): void {
     worldCam.position.add(delta);
   }
   controls.update();
-  stage("world", () => { world.update(now / 1000); world.renderWorld(renderer, worldCam); });
+  stage("world", () => { world.update(now / 1000, worldCam.position); world.renderWorld(renderer, worldCam); });
   if (selected && drones.has(selected)) {
     const s = drones.get(selected)!;
     // the Drone view is a camera feed: 15 Hz is plenty and frees the GPU for the World view

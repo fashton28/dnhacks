@@ -203,3 +203,9 @@ body.embed #app { grid-template-rows: 1fr !important; }
 body.embed main { grid-row: 1 / -1 !important; }
 body.embed main { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; padding: 0 !important; gap: 0 !important; }
 body.embed #world { grid-column: 1 / -1 !important; grid-row: 1 / -1 !important; border-radius: 0 !important; border: 0 !important; }
+
+/* Camera gimbal control in the Drone view header */
+.gimbal { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; color: var(--muted); }
+.gimbal-label { font-size: 10px; letter-spacing: 0.1em; }
+.gimbal input[type="range"] { width: 96px; accent-color: var(--accent, #3fb950); }
+#gimbal-value { min-width: 34px; text-align: right; font-size: 12px; color: var(--fg); }

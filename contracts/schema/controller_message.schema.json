@@ -83,9 +83,9 @@
         },
         "gimbal_pitch_deg": {
           "default": 45.0,
-          "description": "0 level, 90 straight down; drawn by the Renderer",
+          "description": "camera pitch: -30 looks up, 0 level, 90 straight down; drawn by the Renderer",
           "maximum": 90,
-          "minimum": 0,
+          "minimum": -30,
           "title": "Gimbal Pitch Deg",
           "type": "number"
         },

@@ -91,7 +91,7 @@ class SetVelocity(Command):
 
 class LookAt(Command):
     type: Literal["look_at"] = "look_at"
-    pitch_deg: float = Field(description="0 is level, 90 is straight down")
+    pitch_deg: float = Field(ge=-30, le=90, description="-30 looks up, 0 is level, 90 is straight down")
 
 
 class CaptureFrame(Command):

@@ -126,7 +126,9 @@
           "type": "string"
         },
         "pitch_deg": {
-          "description": "0 is level, 90 is straight down",
+          "description": "-30 looks up, 0 is level, 90 is straight down",
+          "maximum": 90,
+          "minimum": -30,
           "title": "Pitch Deg",
           "type": "number"
         }

@@ -129,7 +129,7 @@ class FakeDrone:
             self.status = DroneStatus.manual_control
             return Ack(cmd_id=cmd.cmd_id, ok=True)
         if isinstance(cmd, LookAt):
-            self.gimbal_pitch = max(0.0, min(90.0, cmd.pitch_deg))
+            self.gimbal_pitch = max(-30.0, min(90.0, cmd.pitch_deg))
             return Ack(cmd_id=cmd.cmd_id, ok=True)
         if isinstance(cmd, ReturnHome):
             self.mode = "rth"
