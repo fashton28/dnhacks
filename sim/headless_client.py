@@ -41,7 +41,7 @@ import contextlib
 import json
 import time
 from collections import deque
-from typing import Any, Awaitable, Callable, Deque, Optional
+from typing import Any, Callable, Deque, Optional
 
 try:
     import websockets

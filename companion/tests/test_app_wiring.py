@@ -43,8 +43,8 @@ from eis_companion.types import ControlSource, Limits, TargetObservation, Vehicl
 
 # Stub site geometry (site/site.stub.json -- resolved from the repo root).
 STUB_SITE = "site/site.stub.json"
-HOME_LAT, HOME_LON = -35.363261, 149.16523
-FAR_LAT, FAR_LON = -35.3648, 149.1669  # stage-a, ~200 m from home
+HOME_LAT, HOME_LON = -26.0900, 29.4719
+FAR_LAT, FAR_LON = -26.09065, 29.46925  # west service-road staging point
 
 
 # ==========================================================================
@@ -483,12 +483,15 @@ def test_staging_observer_built_from_loaded_site():
     c = make_companion()
     obs = c.staging_observer
     assert obs is not None, "StagingObserver failed to build from the loaded Site"
-    assert [p.id for p in obs.points] == ["stage-a", "stage-b"]
+    assert [p.id for p in obs.points] == [
+        "komati-west-service-road",
+        "komati-east-yard",
+    ]
 
-    # End-to-end through the real observer: arriving at stage-a (truth
+    # End-to-end through the real observer: arriving at the west point (truth
     # 'vehicle') emits one high-confidence stub observation (ultralytics is
     # absent in the test env, so the deterministic truth-keyed backend runs).
-    out = obs.observe(FAR_LAT, FAR_LON)   # FAR_* == stage-a coordinates
+    out = obs.observe(FAR_LAT, FAR_LON)
     assert len(out) == 1
     assert out[0].conf == pytest.approx(0.91)
 

@@ -17,8 +17,8 @@ import pytest
 
 np = pytest.importorskip("numpy")
 
-from eis_companion.control.tracker import Tracker, iou
-from eis_companion.types import TargetObservation, TrackingState
+from eis_companion.control.tracker import Tracker, iou  # noqa: E402
+from eis_companion.types import TargetObservation, TrackingState  # noqa: E402
 
 
 def obs(x, y, w, h, conf=0.9, ts=0.0) -> TargetObservation:

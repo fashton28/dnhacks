@@ -15,15 +15,14 @@ Pure stdlib + numpy (for the dummy frame). No hardware, no ultralytics.
 """
 from __future__ import annotations
 
-import math
 
 import pytest
 
 np = pytest.importorskip("numpy")
 
-import eis_companion.vision.staging as staging
-from eis_companion.types import TargetObservation
-from eis_companion.vision.staging import (
+import eis_companion.vision.staging as staging  # noqa: E402
+from eis_companion.types import TargetObservation  # noqa: E402
+from eis_companion.vision.staging import (  # noqa: E402
     DEFAULT_ARRIVAL_RADIUS_M,
     StagingObserver,
     StagingPoint,

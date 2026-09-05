@@ -13,12 +13,11 @@ numpy + stdlib only (no hardware, no FC).
 """
 from __future__ import annotations
 
-import math
 
 import pytest
 
 from eis_companion.control.guidance import Guidance
-from eis_companion.types import Limits, TrackingState, VelocitySetpoint
+from eis_companion.types import Limits, TrackingState
 
 
 def _centered_bbox(h: float = 0.2) -> tuple:

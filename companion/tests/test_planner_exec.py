@@ -32,7 +32,6 @@ from eis_companion.control.planner_exec import (
     GotoTarget,
     PlanOutputKind,
     PlannerExecutor,
-    PlannerOutput,
     _bearing_deg,
     _haversine_m,
 )
