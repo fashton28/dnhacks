@@ -1,0 +1,48 @@
+<!-- @dsCard group="Slides" viewport="1280x720" name="Content slide" subtitle="Two-column: explainer + product panel mock" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  html,body{margin:0}
+  .slide{width:1280px;height:720px;background:var(--bg-app);position:relative;overflow:hidden;font-family:var(--font-sans);color:var(--text-primary);padding:84px 96px;box-sizing:border-box;display:grid;grid-template-columns:1fr 1fr;gap:64px;align-items:center}
+  .kick{font-family:var(--font-mono);font-size:13px;letter-spacing:.22em;color:var(--accent-text);text-transform:uppercase}
+  h2{margin:14px 0 22px;font-size:42px;font-weight:700;letter-spacing:-.015em;line-height:1.1}
+  .item{display:flex;gap:14px;padding:15px 0;border-top:1px solid var(--border-subtle)}
+  .item:last-child{border-bottom:1px solid var(--border-subtle)}
+  .ico{width:30px;height:30px;flex:none;border-radius:7px;background:var(--accent-subtle);border:1px solid var(--accent-border);display:flex;align-items:center;justify-content:center;color:var(--accent-text)}
+  .it{font-size:16px;font-weight:600;margin:0}
+  .id{font-size:14px;color:var(--text-secondary);margin:3px 0 0;line-height:1.45}
+  /* right: mock panel */
+  .panel{background:var(--surface-panel);border:1px solid var(--border-default);border-radius:14px;overflow:hidden}
+  .ph{height:34px;display:flex;align-items:center;gap:8px;padding:0 12px;border-bottom:1px solid var(--border-subtle);font-size:10px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:var(--text-tertiary)}
+  .pb{padding:18px;display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  .ro{display:flex;flex-direction:column;gap:5px}
+  .rl{font-size:10px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--text-tertiary)}
+  .rv{font-family:var(--font-mono);font-size:30px;font-variant-numeric:tabular-nums}
+  .pill{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+</style></head>
+<body>
+<div class="slide">
+  <div>
+    <span class="kick">Operator workflow</span>
+    <h2>Three deliberate steps to autonomous follow</h2>
+    <div class="item"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span><div><p class="it">Arm behind a checklist</p><p class="id">GPS, battery, props and geofence must all be confirmed.</p></div></div>
+    <div class="item"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 20V8M6 14l6-6 6 6"/></svg></span><div><p class="it">Take off, hold to confirm</p><p class="id">Climb to a set altitude in GUIDED — never a single misclick.</p></div></div>
+    <div class="item"><span class="ico"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></svg></span><div><p class="it">Engage tracking</p><p class="id">Lock a target and hold standoff; stopping is always one tap.</p></div></div>
+  </div>
+  <div class="panel">
+    <div class="ph"><span style="width:7px;height:7px;border-radius:50%;background:var(--amber)"></span>Tracking · Locked</div>
+    <div class="pb">
+      <div class="ro"><span class="rl">Distance</span><span class="rv" style="color:var(--amber-bright)">6.4<span style="font-size:14px;color:var(--text-tertiary)"> m</span></span></div>
+      <div class="ro"><span class="rl">Standoff</span><span class="rv">4.0<span style="font-size:14px;color:var(--text-tertiary)"> m</span></span></div>
+      <div class="ro"><span class="rl">Rel Alt</span><span class="rv">12.0<span style="font-size:14px;color:var(--text-tertiary)"> m</span></span></div>
+      <div class="ro"><span class="rl">Battery</span><span class="rv" style="color:var(--nominal-fg)">72<span style="font-size:14px;color:var(--text-tertiary)"> %</span></span></div>
+    </div>
+    <div style="padding:0 18px 18px;display:flex;gap:8px">
+      <span class="pill" style="background:var(--amber-tint);color:var(--amber-bright);border:1px solid var(--amber-line)">● Tracking</span>
+      <span class="pill" style="background:var(--nominal-bg);color:var(--nominal-fg);border:1px solid var(--green-line)">● Armed</span>
+      <span class="pill" style="background:rgba(255,255,255,.05);color:var(--text-secondary);border:1px solid var(--border-default)">GUIDED</span>
+    </div>
+  </div>
+</div>
+</body></html>

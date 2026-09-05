@@ -1,0 +1,38 @@
+{
+  "home": { "lat": -35.363261, "lon": 149.16523, "alt_m": 584.0 },
+  "perimeter": [
+    [-35.360761, 149.16223],
+    [-35.360761, 149.16823],
+    [-35.365761, 149.16823],
+    [-35.365761, 149.16223]
+  ],
+  "nfz": [
+    {
+      "name": "switchyard",
+      "polygon": [
+        [-35.3616, 149.1662],
+        [-35.3616, 149.1674],
+        [-35.3624, 149.1674],
+        [-35.3624, 149.1662]
+      ],
+      "ceiling_m": 120
+    }
+  ],
+  "alt_band_m": { "min": 20, "max": 60 },
+  "staging": [
+    {
+      "id": "stage-a",
+      "lat": -35.3648,
+      "lon": 149.1669,
+      "image": "site/staging/stage-a.png",
+      "truth": "vehicle"
+    },
+    {
+      "id": "stage-b",
+      "lat": -35.362,
+      "lon": 149.1632,
+      "image": "site/staging/stage-b.png",
+      "truth": "false_alarm"
+    }
+  ]
+}

@@ -1,0 +1,86 @@
+appId: com.eyeinthesky.gcs
+productName: Eye in the Sky
+copyright: Copyright © 2024 Eye in the Sky
+
+# Where electron-builder finds the compiled main/preload and writes installers
+directories:
+  output: dist-installer
+  buildResources: build-resources
+
+# Files included in the final package (paths relative to ground/app/linux)
+files:
+  - dist-electron/**/*
+  - "!../../ui/node_modules"
+  - "!../../ui/src"
+  - "!../../ui/.git"
+
+# The built React UI is bundled as an extra resource so main.ts can reference it
+# at runtime regardless of asar packing. Shared with the Windows shell (one UI).
+extraResources:
+  - from: "../../ui/dist"
+    to: "ui/dist"
+    filter:
+      - "**/*"
+  # Site model (JSON + staging stills) — read by ipc.ts 'site:load' at
+  # process.resourcesPath/site (docs/SITE_CONTRACT.md paths are repo-root-relative).
+  - from: "../../../site"
+    to: "site"
+    filter:
+      - "**/*"
+  # Baked satellite change-detection assets — 'satellite:loadTiles' reads
+  # process.resourcesPath/ground/satellite/data (same relative path as dev).
+  - from: "../../satellite/data"
+    to: "ground/satellite/data"
+    filter:
+      - "**/*"
+
+linux:
+  # AppImage is the primary (portable, no install); deb + rpm for managed installs.
+  target:
+    - AppImage
+    - deb
+    - rpm
+  # freedesktop main category; the full list lives in `desktop.Categories` below.
+  category: Utility
+  icon: build-resources/icon.png        # 512×512; see build-resources/make-icons.sh
+  synopsis: Ground control center for the Eye in the Sky person-following drone
+  description: >-
+    Desktop ground control station for the Eye in the Sky autonomous
+    person-following drone. Monitors live telemetry, video and tracking, and
+    commands the vehicle (arm/takeoff/track/manual/RTL) over the companion's
+    WebSocket contract — identically against SITL or a real drone.
+  # Merged into the generated .desktop file. (electron-builder 24.x flat form.)
+  desktop:
+    Name: Eye in the Sky
+    GenericName: Drone Ground Control
+    Categories: Utility;Science;
+    Keywords: drone;gcs;mavlink;ardupilot;tracking;
+    StartupWMClass: Eye in the Sky
+
+# .deb runtime deps (LINUX_PRD §4) + gamepad udev rule install (§5)
+deb:
+  depends:
+    - libgtk-3-0
+    - libnotify4
+    - libnss3
+    - libxss1
+    - libasound2
+  afterInstall: build-resources/postinstall.sh
+  afterRemove: build-resources/postremove.sh
+
+# .rpm equivalents (Fedora/openSUSE package names)
+rpm:
+  depends:
+    - gtk3
+    - libnotify
+    - nss
+    - libXScrnSaver
+    - alsa-lib
+  afterInstall: build-resources/postinstall.sh
+  afterRemove: build-resources/postremove.sh
+
+appImage:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+# Keep the build matrix arch-parameterized (LINUX_PRD §2): x86_64 by default;
+# aarch64 is a `--arm64` flip for a Jetson-as-GCS / ARM-laptop build.
