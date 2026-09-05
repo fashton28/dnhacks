@@ -63,7 +63,7 @@
       "lat": -26.09065,
       "lon": 29.46925,
       "image": "site/staging/stage-a.png",
-      "thermal_image": "site/staging/stage-a.png",
+      "thermal_image": "site/staging/stage-a-thermal.png",
       "image_kind": "scripted_placeholder",
       "required_sensors": ["rgb", "thermal", "lidar"],
       "truth": "vehicle"
@@ -73,7 +73,7 @@
       "lat": -26.0891,
       "lon": 29.47515,
       "image": "site/staging/stage-b.png",
-      "thermal_image": "site/staging/stage-b.png",
+      "thermal_image": "site/staging/stage-b-thermal.png",
       "image_kind": "scripted_placeholder",
       "required_sensors": ["rgb", "thermal", "lidar"],
       "truth": "false_alarm"

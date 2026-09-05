@@ -30,6 +30,7 @@ import * as path from 'path';
 import { ipcMain, app, powerSaveBlocker } from 'electron';
 import { settingsStore } from './settingsStore';
 import { recorder } from './recorder';
+import { registerPhase3Handlers } from './phase3Host';
 
 /** Subset of ConnectionConfig — only what the main process provides as defaults */
 interface DefaultConnectionConfig {
@@ -69,6 +70,7 @@ function resolveAsset(p: string): string {
 }
 
 export function registerIpcHandlers(): void {
+  registerPhase3Handlers(assetRoot());
   // ── Settings ──────────────────────────────────────────────────────────────
   ipcMain.handle('settings:get', (_event, key: string) => {
     return settingsStore.get(key);
@@ -140,6 +142,17 @@ export function registerIpcHandlers(): void {
       return fs.readFileSync(primary, 'utf8');
     }
     return fs.readFileSync(resolveAsset('site/site.stub.json'), 'utf8');
+  });
+  ipcMain.handle('site:resolveAsset', (_event, requested: string): string | null => {
+    if (typeof requested !== 'string' || requested.includes('\0')) return null;
+    const envFile = process.env['EIS_SITE_FILE'];
+    const siteDir = envFile ? path.dirname(resolveAsset(envFile)) : resolveAsset('site');
+    const relative = requested.replace(/\\/g, '/').replace(/^site\//, '');
+    const resolved = path.resolve(siteDir, relative);
+    if (!resolved.startsWith(path.resolve(siteDir) + path.sep) || !/\.(png|jpe?g|webp)$/i.test(resolved) || !fs.existsSync(resolved)) return null;
+    const ext = path.extname(resolved).toLowerCase();
+    const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
+    return `data:${mime};base64,${fs.readFileSync(resolved).toString('base64')}`;
   });
 
   // Baked before/after change-detection PNGs + metadata from

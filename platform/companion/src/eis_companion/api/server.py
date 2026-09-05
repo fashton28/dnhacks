@@ -36,6 +36,7 @@ import asyncio
 import json
 import logging
 import time
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Set, Union
 
 import websockets
@@ -50,6 +51,8 @@ CommandHandler = Callable[[Dict[str, Any]], Union[Dict[str, Any], Awaitable[Dict
 ManualHandler = Callable[[Dict[str, Any]], Union[None, Awaitable[None]]]
 # Heartbeat callback: called (with the inbound ms timestamp) on every frame.
 HeartbeatHook = Callable[[float], None]
+MessageHandler = Callable[[Dict[str, Any]], Union[None, Dict[str, Any], Awaitable[Any]]]
+ConnectMessages = Callable[[], Union[list[Dict[str, Any]], Awaitable[list[Dict[str, Any]]]]]
 
 
 def _now_ms() -> int:
@@ -67,6 +70,12 @@ class ApiServer:
         command_handler: Optional[CommandHandler] = None,
         manual_handler: Optional[ManualHandler] = None,
         heartbeat_hook: Optional[HeartbeatHook] = None,
+        plan_command_handler: Optional[MessageHandler] = None,
+        plan_heartbeat_handler: Optional[MessageHandler] = None,
+        rf_event_handler: Optional[MessageHandler] = None,
+        connect_messages: Optional[ConnectMessages] = None,
+        vehicle_id: str = "eis-1",
+        audit_path: Optional[str] = None,
         max_queue: int = 32,
     ) -> None:
         """
@@ -86,6 +95,14 @@ class ApiServer:
         self._command_handler = command_handler
         self._manual_handler = manual_handler
         self._heartbeat_hook = heartbeat_hook
+        self._plan_command_handler = plan_command_handler
+        self._plan_heartbeat_handler = plan_heartbeat_handler
+        self._rf_event_handler = rf_event_handler
+        self._connect_messages = connect_messages
+        self.vehicle_id = str(vehicle_id).strip() or "eis-1"
+        self._audit_path = Path(audit_path) if audit_path else None
+        self._audit_events: list[Dict[str, Any]] = []
+        self._load_audit()
         self._max_queue = max_queue
 
         self._clients: Set[WebSocketServerProtocol] = set()
@@ -157,6 +174,7 @@ class ApiServer:
         self._clients.add(ws)
         log.info("ground client connected: %s (clients=%d)", peer, len(self._clients))
         try:
+            await self._send_initial(ws)
             async for raw in ws:
                 await self._on_message(ws, raw)
         except websockets.ConnectionClosed:
@@ -168,7 +186,27 @@ class ApiServer:
             log.info("ground client disconnected: %s (clients=%d)", peer, len(self._clients))
 
     async def _on_message(self, ws: WebSocketServerProtocol, raw: Any) -> None:
-        # Any inbound frame counts as a ground heartbeat for the deadman.
+        try:
+            msg = json.loads(raw)
+        except (ValueError, TypeError):
+            await self._send(ws, _status_text("warning", "ignored malformed JSON frame", self.vehicle_id))
+            return
+        if not isinstance(msg, dict):
+            await self._send(ws, _status_text("warning", "ignored non-object frame", self.vehicle_id))
+            return
+
+        if msg.get("vehicleId") != self.vehicle_id:
+            await self._send(
+                ws,
+                _status_text(
+                    "warning",
+                    "ignored frame with missing or mismatched vehicleId",
+                    self.vehicle_id,
+                ),
+            )
+            return
+
+        # Only a validated frame for this vehicle counts as ground liveness.
         ts = _now_ms()
         self._last_inbound_ms = ts
         if self._heartbeat_hook is not None:
@@ -177,20 +215,17 @@ class ApiServer:
             except Exception:
                 log.exception("heartbeat hook failed")
 
-        try:
-            msg = json.loads(raw)
-        except (ValueError, TypeError):
-            await self._send(ws, _status_text("warning", "ignored malformed JSON frame"))
-            return
-        if not isinstance(msg, dict):
-            await self._send(ws, _status_text("warning", "ignored non-object frame"))
-            return
-
         mtype = msg.get("type")
         if mtype == "command":
             await self._dispatch_command(msg)
         elif mtype == "manualInput":
             await self._dispatch_manual(msg)
+        elif mtype == "planCommand":
+            await self._dispatch_message(self._plan_command_handler, msg, ack_type="planCommandAck")
+        elif mtype == "planHeartbeat":
+            await self._dispatch_message(self._plan_heartbeat_handler, msg)
+        elif mtype == "rfEvent":
+            await self._dispatch_message(self._rf_event_handler, msg)
         else:
             # Unknown / ping / heartbeat frames: counted for liveness, ignored.
             log.debug("ignoring inbound frame type=%r", mtype)
@@ -200,17 +235,17 @@ class ApiServer:
         handler = self._command_handler
         cmd_name = msg.get("command", "")
         if handler is None:
-            ack = _ack(cmd_name, False, "no command handler registered")
+            ack = _ack(cmd_name, False, "no command handler registered", self.vehicle_id)
             await self.push_ack(ack)
             return
         try:
             result = handler(msg)
             if asyncio.iscoroutine(result):
                 result = await result
-            ack = result if isinstance(result, dict) else _ack(cmd_name, False, "handler returned no ack")
+            ack = result if isinstance(result, dict) else _ack(cmd_name, False, "handler returned no ack", self.vehicle_id)
         except Exception as exc:  # safe default: report failure, never crash
             log.exception("command handler raised for %r", cmd_name)
-            ack = _ack(cmd_name, False, f"command failed: {exc}")
+            ack = _ack(cmd_name, False, f"command failed: {exc}", self.vehicle_id)
         await self.push_ack(ack)
 
     async def _dispatch_manual(self, msg: Dict[str, Any]) -> None:
@@ -225,9 +260,49 @@ class ApiServer:
         except Exception:  # a bad stick frame must never disrupt the link
             log.exception("manual handler raised")
 
+    async def _dispatch_message(
+        self,
+        handler: Optional[MessageHandler],
+        msg: Dict[str, Any],
+        *,
+        ack_type: str = "",
+    ) -> None:
+        if handler is None:
+            if ack_type:
+                await self.broadcast({
+                    "type": ack_type,
+                    "ts": _now_ms(),
+                    "vehicleId": self.vehicle_id,
+                    "requestId": str(msg.get("requestId", "")),
+                    "status": "rejected",
+                    "reason": "no handler registered",
+                })
+            return
+        try:
+            result = handler(msg)
+            if asyncio.iscoroutine(result):
+                result = await result
+            if ack_type and isinstance(result, dict):
+                await self.broadcast(result)
+        except Exception as exc:
+            log.exception("%s handler raised", msg.get("type"))
+            if ack_type:
+                await self.broadcast({
+                    "type": ack_type,
+                    "ts": _now_ms(),
+                    "vehicleId": self.vehicle_id,
+                    "requestId": str(msg.get("requestId", "")),
+                    "status": "rejected",
+                    "reason": str(exc),
+                })
+
     # ---- outbound broadcast helpers --------------------------------------
     async def broadcast(self, message: Dict[str, Any]) -> None:
         """Send one JSON message to every connected client (best-effort)."""
+        message.setdefault("vehicleId", self.vehicle_id)
+        message.setdefault("ts", _now_ms())
+        if message.get("type") == "healthEvent":
+            self._persist_audit(message)
         if not self._clients:
             return
         data = json.dumps(message, separators=(",", ":"))
@@ -266,7 +341,7 @@ class ApiServer:
 
     async def push_status(self, severity: str, text: str) -> None:
         """Broadcast a contract ``statusText`` message."""
-        await self.broadcast(_status_text(severity, text))
+        await self.broadcast(_status_text(severity, text, self.vehicle_id))
 
     async def push_ack(self, ack: Dict[str, Any]) -> None:
         """Broadcast a contract ``ack`` message (ensures type+ts)."""
@@ -274,24 +349,62 @@ class ApiServer:
         ack.setdefault("ts", _now_ms())
         await self.broadcast(ack)
 
+    async def _send_initial(self, ws: WebSocketServerProtocol) -> None:
+        for event in self._audit_events[-100:]:
+            await self._send(ws, dict(event))
+        if self._connect_messages is None:
+            return
+        result = self._connect_messages()
+        if asyncio.iscoroutine(result):
+            result = await result
+        for message in result or []:
+            message.setdefault("vehicleId", self.vehicle_id)
+            message.setdefault("ts", _now_ms())
+            await self._send(ws, message)
+
+    def _load_audit(self) -> None:
+        if self._audit_path is None or not self._audit_path.exists():
+            return
+        try:
+            for line in self._audit_path.read_text(encoding="utf-8").splitlines()[-100:]:
+                item = json.loads(line)
+                if isinstance(item, dict) and item.get("type") == "healthEvent":
+                    self._audit_events.append(item)
+        except Exception:
+            log.exception("could not load local health-event audit")
+
+    def _persist_audit(self, event: Dict[str, Any]) -> None:
+        self._audit_events.append(dict(event))
+        self._audit_events = self._audit_events[-1000:]
+        if self._audit_path is None:
+            return
+        try:
+            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
+            with self._audit_path.open("a", encoding="utf-8") as handle:
+                handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+        except Exception:
+            log.exception("could not persist health-event audit")
+
 
 # ==========================================================================
 # Small contract-shape builders
 # ==========================================================================
-def _ack(command: str, success: bool, message: str) -> Dict[str, Any]:
+def _ack(command: str, success: bool, message: str, vehicle_id: str = "eis-1") -> Dict[str, Any]:
     return {
         "type": "ack",
         "ts": _now_ms(),
+        "vehicleId": vehicle_id,
         "command": command,
         "success": bool(success),
         "message": str(message),
     }
 
 
-def _status_text(severity: str, text: str) -> Dict[str, Any]:
+def _status_text(severity: str, text: str, vehicle_id: str = "eis-1") -> Dict[str, Any]:
     return {
         "type": "statusText",
         "ts": _now_ms(),
+        "vehicleId": vehicle_id,
         "severity": severity,
         "text": str(text),
     }

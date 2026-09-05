@@ -1,0 +1,60 @@
+{
+  "id": "V16",
+  "scenario": "lidar_clutter",
+  "description": "The route crosses the boiler-house clutter below clear_altitude_m with LiDAR failed, so obstacle avoidance is unavailable where it is required. Correction inserts a climb to 45 m clear altitude OUTSIDE the clutter before the transit, rather than refusing.",
+  "covers": [
+    "LiDAR/clutter policy",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V16",
+    "anomalyId": "fixture-south-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0935932,
+        "lon": 29.4719,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "sensors": {
+      "lidar": "failed"
+    },
+    "anomaly": {
+      "id": "fixture-south-anomaly",
+      "lat": -26.0935932,
+      "lon": 29.4719,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "readiness"
+    ],
+    "editedChecks": [
+      "readiness"
+    ],
+    "reasonContains": {
+      "readiness": [
+        "clutter transit requires healthy LiDAR or altitude >= 45 m"
+      ]
+    },
+    "editContains": {
+      "readiness": [
+        "inserted a vertical climb outside clutter before tool 0"
+      ]
+    }
+  }
+}

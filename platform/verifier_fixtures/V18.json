@@ -1,0 +1,61 @@
+{
+  "id": "V18",
+  "scenario": "bad_coordinate",
+  "description": "Malformed tool argument: latitude 91 is not a coordinate. Rejected at schema before any geometry runs.",
+  "covers": [
+    "malformed-tool rejection",
+    "fail-closed blocking"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V18",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": 91,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "schema",
+      "nav_source",
+      "readiness",
+      "wind",
+      "rf_environment",
+      "airspace",
+      "anomaly_proximity",
+      "altitude",
+      "speed",
+      "standoff",
+      "geofence",
+      "nfz_transit",
+      "nfz_orbit",
+      "terminal",
+      "loiter",
+      "range",
+      "sortie"
+    ],
+    "reasonContains": {
+      "schema": [
+        "tools[0] (goto_gps) requires numeric lat, lon, alt_m"
+      ],
+      "altitude": [
+        "not evaluated",
+        "tools[0] (goto_gps) requires numeric lat, lon, alt_m"
+      ]
+    }
+  }
+}

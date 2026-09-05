@@ -1,6 +1,23 @@
 /// <reference types="vite/client" />
 
-import type { ConnectionConfig } from './contract';
+import type {
+  Anomaly, CapabilitiesMessage, ConnectionConfig, HealthEventMessage,
+  IncidentReport, MissionPlan, RfEventMessage, SpectrumMessage, Telemetry,
+  Verification,
+} from './contract';
+import type { VerificationContext } from '@planner/verifier';
+import type { ObservationSummary } from '@planner/report';
+
+export interface PlannerProposeResult {
+  vehicleId: string;
+  plan: MissionPlan;
+  effectivePlan?: MissionPlan;
+  verification: Verification;
+  source: 'scripted' | 'live';
+  attempts: 1 | 2;
+  fallbackReason?: string;
+  escalationReason?: string;
+}
 
 /**
  * The secure bridge exposed by the Electron preload script (ground/app).
@@ -58,6 +75,26 @@ export interface ElectronBridge {
     tilesJson: string;
     anomaliesJson: string | null;
   } | null>;
+  /** Constrained image resolver for paths declared by the selected site file. */
+  resolveSiteAsset?(path: string): Promise<string | null>;
+  plannerPropose?(input: {
+    vehicleId: string;
+    anomaly: Anomaly;
+    telemetry?: Telemetry;
+    capabilities?: CapabilitiesMessage;
+    context: VerificationContext;
+  }): Promise<PlannerProposeResult>;
+  plannerReport?(input: {
+    vehicleId: string;
+    anomaly: Anomaly;
+    plan: MissionPlan;
+    observation: ObservationSummary;
+  }): Promise<IncidentReport>;
+  onPlannerEvent?(cb: (event: unknown) => void): () => void;
+  sdrStart?(input?: { mode?: 'scripted' | 'live'; vehicleId?: string; scenario?: string }): Promise<unknown>;
+  sdrStop?(): Promise<unknown>;
+  sdrStatus?(): Promise<unknown>;
+  onSdrEvent?(cb: (event: SpectrumMessage | RfEventMessage | HealthEventMessage) => void): () => void;
   /** Default connection config baked into the build (env/CLI overrides). */
   defaultConfig(): Promise<Partial<ConnectionConfig>>;
 }

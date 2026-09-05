@@ -83,21 +83,35 @@ class AltBand:
 
 @dataclass
 class StagingPoint:
-    """A pre-surveyed observation point with its still image + truth label."""
+    """A pre-surveyed point with paired scripted sensor fixtures."""
     id: str
     lat: float
     lon: float
-    image: str                   # repo-root-relative path to the still
+    image: str                   # repo-root-relative RGB still
     truth: str                   # one of TRUTH_LABELS
+    thermal_image: str = ""     # repo-root-relative thermal still
+    image_kind: str = "scripted_placeholder"
+    required_sensors: Tuple[str, ...] = ("rgb", "thermal", "lidar")
+
+
+@dataclass
+class ClutterArea:
+    """Polygon in which dispatch requires healthy LiDAR."""
+    name: str
+    polygon: List[LatLon]
 
 
 @dataclass
 class Site:
     """The full parsed site model (docs/SITE_CONTRACT.md schema)."""
     home: Home
-    perimeter: List[LatLon]      # outer geofence, open ring of (lat, lon)
+    perimeter: List[LatLon]      # surveyed physical containment boundary
+    geofence: List[LatLon]       # operational ArduPilot inclusion fence
+    nfz_buffer_m: float = 25.0
     nfz: List[NoFlyZone] = field(default_factory=list)
     alt_band: AltBand = field(default_factory=lambda: AltBand(0.0, 0.0))
+    clear_altitude_m: float = 0.0
+    clutter: List[ClutterArea] = field(default_factory=list)
     staging: List[StagingPoint] = field(default_factory=list)
     source_path: Optional[str] = None   # where this model was loaded from
 
@@ -147,15 +161,32 @@ def load_site(path: "str | os.PathLike[str]") -> Site:
 
     home = _parse_home(raw.get("home"))
     perimeter = _parse_polygon(raw.get("perimeter"), "perimeter")
+    geofence = _parse_polygon(raw.get("geofence", raw.get("perimeter")), "geofence")
+    for i, point in enumerate(geofence):
+        if not _point_in_polygon(point, perimeter):
+            raise ValueError(f"site: geofence[{i}] lies outside perimeter")
+    nfz_buffer_m = _num(raw.get("nfz_buffer_m", 25.0), "nfz_buffer_m")
+    if nfz_buffer_m < 0.0:
+        raise ValueError("site: nfz_buffer_m must be >= 0")
     nfz = _parse_nfz(raw.get("nfz"))
     alt_band = _parse_alt_band(raw.get("alt_band_m"))
+    clear_altitude_m = _num(
+        raw.get("clear_altitude_m", alt_band.min_m), "clear_altitude_m"
+    )
+    if not alt_band.min_m <= clear_altitude_m <= alt_band.max_m:
+        raise ValueError("site: clear_altitude_m must be inside alt_band_m")
+    clutter = _parse_clutter(raw.get("clutter"))
     staging = _parse_staging(raw.get("staging"))
 
     return Site(
         home=home,
         perimeter=perimeter,
+        geofence=geofence,
+        nfz_buffer_m=nfz_buffer_m,
         nfz=nfz,
         alt_band=alt_band,
+        clear_altitude_m=clear_altitude_m,
+        clutter=clutter,
         staging=staging,
         source_path=str(p),
     )
@@ -269,14 +300,71 @@ def _parse_staging(raw: Any) -> List[StagingPoint]:
         image = s.get("image")
         if not isinstance(image, str) or not image:
             raise ValueError(f"site: staging[{i}].image must be a non-empty path")
+        thermal_image = s.get("thermal_image", image)
+        if not isinstance(thermal_image, str) or not thermal_image:
+            raise ValueError(
+                f"site: staging[{i}].thermal_image must be a non-empty path"
+            )
+        image_kind = s.get("image_kind", "scripted_placeholder")
+        if not isinstance(image_kind, str) or not image_kind:
+            raise ValueError(f"site: staging[{i}].image_kind must be a string")
+        required = s.get("required_sensors", ["rgb", "thermal", "lidar"])
+        if not isinstance(required, list) or not required:
+            raise ValueError(f"site: staging[{i}].required_sensors must be a list")
+        if any(sensor not in {"rgb", "thermal", "lidar"} for sensor in required):
+            raise ValueError(f"site: staging[{i}].required_sensors contains unknown rail")
         truth = s.get("truth")
         if truth not in TRUTH_LABELS:
             raise ValueError(
                 f"site: staging[{i}].truth must be one of {TRUTH_LABELS}, "
                 f"got {truth!r}"
             )
-        points.append(StagingPoint(id=sid, lat=lat, lon=lon, image=image, truth=truth))
+        points.append(StagingPoint(
+            id=sid,
+            lat=lat,
+            lon=lon,
+            image=image,
+            thermal_image=thermal_image,
+            image_kind=image_kind,
+            required_sensors=tuple(required),
+            truth=truth,
+        ))
     return points
+
+
+def _parse_clutter(raw: Any) -> List[ClutterArea]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        raise ValueError("site: 'clutter' must be a list")
+    result: List[ClutterArea] = []
+    for i, entry in enumerate(raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f"site: clutter[{i}] must be an object")
+        name = entry.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"site: clutter[{i}].name must be a non-empty string")
+        result.append(ClutterArea(
+            name=name,
+            polygon=_parse_polygon(entry.get("polygon"), f"clutter[{i}].polygon"),
+        ))
+    return result
+
+
+def _point_in_polygon(point: LatLon, polygon: List[LatLon]) -> bool:
+    """Boundary-inclusive ray cast in [lat, lon] order."""
+    y, x = point
+    inside = False
+    for i, (y1, x1) in enumerate(polygon):
+        y2, x2 = polygon[(i + 1) % len(polygon)]
+        cross = (x - x1) * (y2 - y1) - (y - y1) * (x2 - x1)
+        if abs(cross) < 1e-12 and min(x1, x2) <= x <= max(x1, x2) and min(y1, y2) <= y <= max(y1, y2):
+            return True
+        if (y1 > y) != (y2 > y):
+            at_x = (x2 - x1) * (y - y1) / (y2 - y1) + x1
+            if x < at_x:
+                inside = not inside
+    return inside
 
 
 __all__ = [
@@ -287,6 +375,7 @@ __all__ = [
     "NoFlyZone",
     "AltBand",
     "StagingPoint",
+    "ClutterArea",
     "Site",
     "resolve_site_path",
     "load_site",

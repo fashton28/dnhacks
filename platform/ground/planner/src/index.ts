@@ -6,6 +6,9 @@ export * from './verifier';
 export * from './scripted';
 export * from './report';
 export * from './validate';
+export * from './policy';
+export * from './rf_adapter';
+export * from './service';
 export {
   LlmPlanner,
   createLlmPlanner,

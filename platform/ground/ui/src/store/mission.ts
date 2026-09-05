@@ -20,7 +20,7 @@ import type { SiteModel } from '@/site';
 
 export type AuditKind =
   | 'anomaly' | 'plan' | 'verification' | 'approval' | 'denial'
-  | 'execution' | 'observation' | 'report' | 'operator' | 'status' | 'abort';
+  | 'execution' | 'observation' | 'report' | 'operator' | 'status' | 'abort' | 'health' | 'rf';
 
 export interface AuditEvent {
   ts: number;

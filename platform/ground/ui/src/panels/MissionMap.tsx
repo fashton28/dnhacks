@@ -7,7 +7,7 @@
    nothing is hardcoded. */
 import React from 'react';
 import { Panel, Badge } from '@/components';
-import type { Anomaly, MissionPlan, Telemetry } from '@/contract';
+import type { Anomaly, MissionPlan, ObservationMessage, RfEventMessage, Telemetry } from '@/contract';
 import type { SiteModel } from '@/site';
 
 const M_PER_DEG_LAT = 111320;
@@ -22,10 +22,12 @@ export interface MissionMapProps {
   /** The plan whose route to draw (the effective/corrected plan). */
   plan: MissionPlan | null;
   executing?: boolean;
+  observation?: ObservationMessage | null;
+  rfEvents?: RfEventMessage[];
 }
 
-export function MissionMap({ site, tel, trail, anomalies, plan, executing }: MissionMapProps): React.ReactElement {
-  const view = React.useMemo(() => (site ? computeView(site, anomalies) : null), [site, anomalies]);
+export function MissionMap({ site, tel, trail, anomalies, plan, executing, observation = null, rfEvents = [] }: MissionMapProps): React.ReactElement {
+  const view = React.useMemo(() => (site ? computeView(site, anomalies, observation, rfEvents) : null), [site, anomalies, observation, rfEvents]);
 
   return (
     <Panel
@@ -49,7 +51,7 @@ export function MissionMap({ site, tel, trail, anomalies, plan, executing }: Mis
             Loading site model…
           </div>
         ) : (
-          <MapSvg site={site} view={view} tel={tel} trail={trail} anomalies={anomalies} plan={plan} />
+          <MapSvg site={site} view={view} tel={tel} trail={trail} anomalies={anomalies} plan={plan} observation={observation} rfEvents={rfEvents} />
         )}
         {site && view && <Legend metersAcross={view.w} />}
       </div>
@@ -68,7 +70,7 @@ interface View {
   h: number;
 }
 
-function computeView(site: SiteModel, anomalies: Anomaly[]): View {
+function computeView(site: SiteModel, anomalies: Anomaly[], observation: ObservationMessage | null, rfEvents: RfEventMessage[]): View {
   const home = site.home;
   const cosLat = Math.cos((home.lat * Math.PI) / 180);
   const pts: XY[] = [];
@@ -82,6 +84,12 @@ function computeView(site: SiteModel, anomalies: Anomaly[]): View {
   site.perimeter.forEach((p) => push(p.lat, p.lon));
   site.staging.forEach((p) => push(p.lat, p.lon));
   anomalies.forEach((a) => push(a.lat, a.lon));
+  observation?.geometry.fence_gaps.forEach((p) => push(p.lat, p.lon));
+  observation?.geometry.new_structures.forEach((p) => push(p.lat, p.lon));
+  rfEvents.forEach((event) => {
+    if (event.lat !== undefined && event.lon !== undefined) push(event.lat, event.lon);
+    if (event.pilot_lat !== undefined && event.pilot_lon !== undefined) push(event.pilot_lat, event.pilot_lon);
+  });
   const xs = pts.map((p) => p.x);
   const ys = pts.map((p) => p.y);
   const margin = 45; // m
@@ -108,9 +116,11 @@ interface MapSvgProps {
   trail: { lat: number; lon: number }[];
   anomalies: Anomaly[];
   plan: MissionPlan | null;
+  observation: ObservationMessage | null;
+  rfEvents: RfEventMessage[];
 }
 
-function MapSvg({ site, view, tel, trail, anomalies, plan }: MapSvgProps): React.ReactElement {
+function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents }: MapSvgProps): React.ReactElement {
   const fs = Math.max(6, view.w / 55); // svg-unit font size (meters)
   const pj = (lat: number, lon: number): XY => project(view, lat, lon);
   const ring = (poly: { lat: number; lon: number }[]): string =>
@@ -183,6 +193,11 @@ function MapSvg({ site, view, tel, trail, anomalies, plan }: MapSvgProps): React
         );
       })}
 
+      {/* LiDAR-known clutter volumes */}
+      {site.clutter.map((item) => (
+        <polygon key={item.name} points={ring(item.polygon)} fill="rgba(170,118,255,0.10)" stroke="rgba(170,118,255,0.55)" strokeWidth={1} strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />
+      ))}
+
       {/* planned route */}
       {route.length > 1 && (
         <polyline
@@ -226,20 +241,43 @@ function MapSvg({ site, view, tel, trail, anomalies, plan }: MapSvgProps): React
       {/* anomaly pins */}
       {anomalies.map((a) => {
         const q = pj(a.lat, a.lon);
+        const pin = a.source === 'sdr' ? '#ff6b66' : a.source === 'rf_drone' ? '#c47dff' : a.source === 'drone_survey' ? '#58d68d' : '#ffc24b';
         return (
           <g key={a.id}>
-            <circle cx={q.x} cy={q.y} r={fs * 1.15} fill="none" stroke="#ffc24b" strokeWidth={1.2}
+            <circle cx={q.x} cy={q.y} r={fs * 1.15} fill="none" stroke={pin} strokeWidth={1.2}
               vectorEffect="non-scaling-stroke" opacity={0.85}>
               <animate attributeName="r" values={`${fs * 0.7};${fs * 1.5};${fs * 0.7}`} dur="2.2s" repeatCount="indefinite" />
               <animate attributeName="opacity" values="0.9;0.25;0.9" dur="2.2s" repeatCount="indefinite" />
             </circle>
-            <circle cx={q.x} cy={q.y} r={fs * 0.4} fill="#f5a623" stroke="#0b0d11" strokeWidth={0.6} />
+            <circle cx={q.x} cy={q.y} r={fs * 0.4} fill={pin} stroke="#0b0d11" strokeWidth={0.6} />
             <text x={q.x + fs * 0.9} y={q.y - fs * 0.6} fontSize={fs * 0.8}
-              fill="#ffc24b" fontFamily="var(--font-mono)">
-              {a.id}
+              fill={pin} fontFamily="var(--font-mono)">
+              {a.source ?? 'unknown'} · {a.id}
             </text>
           </g>
         );
+      })}
+
+      {/* LiDAR-derived geometry claims */}
+      {observation?.geometry.fence_gaps.map((gap, i) => {
+        const q = pj(gap.lat, gap.lon);
+        return <g key={`gap-${i}`}><circle cx={q.x} cy={q.y} r={fs * 0.7} fill="none" stroke="#ff6b66" strokeWidth={2} vectorEffect="non-scaling-stroke" /><text x={q.x + fs} y={q.y} fontSize={fs * 0.75} fill="#ff6b66">FENCE GAP {gap.width_m}m</text></g>;
+      })}
+      {observation?.geometry.new_structures.map((structure, i) => {
+        const q = pj(structure.lat, structure.lon);
+        const r = Math.max(fs * 0.6, Math.sqrt(structure.footprint_m2));
+        return <g key={`structure-${i}`}><rect x={q.x - r / 2} y={q.y - r / 2} width={r} height={r} fill="rgba(255,194,75,0.25)" stroke="#ffc24b" vectorEffect="non-scaling-stroke" /><text x={q.x + r} y={q.y} fontSize={fs * 0.75} fill="#ffc24b">NEW STRUCTURE</text></g>;
+      })}
+
+      {/* Passive RF-drone marker and inferred pilot location */}
+      {rfEvents.filter((event) => event.kind === 'hostile_drone').map((event, i) => {
+        const drone = event.lat !== undefined && event.lon !== undefined ? pj(event.lat, event.lon) : null;
+        const pilot = event.pilot_lat !== undefined && event.pilot_lon !== undefined ? pj(event.pilot_lat, event.pilot_lon) : null;
+        return <g key={`hostile-${i}`}>
+          {drone && pilot && <line x1={drone.x} y1={drone.y} x2={pilot.x} y2={pilot.y} stroke="#ff6b66" strokeDasharray="3 3" vectorEffect="non-scaling-stroke" />}
+          {drone && <><path d={`M${drone.x} ${drone.y - fs} L${drone.x + fs} ${drone.y} L${drone.x} ${drone.y + fs} L${drone.x - fs} ${drone.y} Z`} fill="#ff3b30" stroke="#fff" strokeWidth={0.5} /><text x={drone.x + fs * 1.3} y={drone.y} fontSize={fs * 0.8} fill="#ff6b66">HOSTILE</text></>}
+          {pilot && <><circle cx={pilot.x} cy={pilot.y} r={fs * 0.55} fill="#ff6b66" /><text x={pilot.x + fs} y={pilot.y} fontSize={fs * 0.8} fill="#ff6b66">PILOT</text></>}
+        </g>;
       })}
 
       {/* breadcrumb trail */}
@@ -286,6 +324,8 @@ function Legend({ metersAcross }: { metersAcross: number }): React.ReactElement 
     ['rgba(240,68,56,0.8)', 'No-fly zone', false],
     ['rgba(90,160,255,0.9)', 'Planned route', true],
     ['rgba(196,204,214,0.9)', 'Staging point', false],
+    ['rgba(170,118,255,0.8)', 'Clutter / LiDAR', true],
+    ['#ff3b30', 'Hostile RF / pilot', false],
   ];
   return (
     <div

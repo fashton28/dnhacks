@@ -1,0 +1,64 @@
+{
+  "id": "V06",
+  "scenario": "high_altitude",
+  "description": "Target altitude 60 m is inside the 20-80 m site band but above the 45 m inspect-profile ceiling, and the orbit inherits that altitude from the walk. Correction clamps the goto; the orbit altitude follows and is rechecked. Uses the `standard` alias to prove it resolves to the same policy as `inspect`.",
+  "covers": [
+    "altitude band upper edge",
+    "corrected plan",
+    "profile alias"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V06",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "standard",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 60
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "altitude"
+    ],
+    "editedChecks": [
+      "altitude"
+    ],
+    "reasonContains": {
+      "altitude": [
+        "tool 0 altitude 60 m is outside [20, 45] m",
+        "tool 1 altitude 60 m is outside [20, 45] m"
+      ]
+    },
+    "editContains": {
+      "altitude": [
+        "clamped tool 0 altitude to 45 m"
+      ]
+    }
+  }
+}

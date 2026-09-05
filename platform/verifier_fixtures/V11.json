@@ -1,0 +1,66 @@
+{
+  "id": "V11",
+  "scenario": "nfz_orbit",
+  "description": "The orbit centre is 50 m from the ash-dam and the 40 m circle stops 10 m short of the polygon, so no point of the route is inside the NFZ - but the circumference is inside the 25 m buffer, at the ceiling. Buffer clearance is required for the whole circumference, not just the centre.",
+  "covers": [
+    "NFZ orbit buffer",
+    "NFZ at ceiling",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V11",
+    "anomalyId": "fixture-dam-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0898203,
+        "lon": 29.4719,
+        "alt": 30
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0891017,
+        "lon": 29.4719,
+        "radius": 40,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 30,
+    "anomaly": {
+      "id": "fixture-dam-anomaly",
+      "lat": -26.0891017,
+      "lon": 29.4719,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "nfz_orbit"
+    ],
+    "editedChecks": [
+      "nfz_orbit"
+    ],
+    "reasonContains": {
+      "nfz_orbit": [
+        "tool 1 orbit intersects buffered NFZ \"ash-dam\""
+      ]
+    },
+    "editContains": {
+      "nfz_orbit": [
+        "moved tool 1 clear of buffered NFZ \"ash-dam\""
+      ]
+    }
+  }
+}

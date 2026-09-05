@@ -1,6 +1,4 @@
-###############################################################################
-# Drone Safety Platform -- COMPANION SITL configuration (SIMULATION / dev box).
-#
+################################################################################ Drone Safety Platform -- COMPANION SITL configuration (SIMULATION / dev box).#
 # For the SITL-first acceptance demo (PRD 10/13): ArduPilot SITL over UDP + a
 # synthetic 'sim' camera source feeding the tracking/guidance loop, so the whole
 # stack runs with ZERO hardware and no camera.
@@ -13,6 +11,7 @@
 
 # This IS simulation.
 sitl: true
+vehicle_id: eis-1
 
 # --- Hard safety + tuning envelope (same conservative limits as real) ------
 limits:
@@ -20,7 +19,7 @@ limits:
   min_speed:            0.5
   max_climb_rate:       1.5
   max_yaw_rate:         45.0
-  max_altitude:         30.0
+  max_altitude:         80.0
   standoff:             5.0
   min_standoff:         3.0
   deadzone:             0.09
@@ -80,13 +79,26 @@ safety:
   min_battery_remaining:  20.0
   rc_override_primacy:    true
 
+battery:
+  nominal_endurance_s:    1500
+  reserve_pct:            25
+  max_sortie_s:           480
+  dispatch_min_soc_pct:   80
+  cell_imbalance_max_v:   0.10
+  batt_temp_max_c:        60
+  capacity_mah:           5000
+  cell_count:             3
+  demo_charge_scale_s:    30
+  estimated_return_s:     30
+
 # --- Mission planner (power-plant security retrofit) ------------------------
 # NOTE: emitted plan speeds are additionally capped at limits.max_speed (2.0
 # above) and goto altitudes at limits.max_altitude (30.0) -- raise those YAML
 # values (still under the hard 8 m/s cap) if the demo should fly profiles at
 # full speed / the full site altitude band.
 planner:
-  profile_speed_mps: { slow: 2.0, standard: 4.0, fast: 6.0 }
+  profile_speed_mps: { follow: 2.0, inspect: 4.0, survey: 6.0, slow: 2.0, standard: 4.0, fast: 6.0 }
   site_file: ""                   # "" -> EIS_SITE_FILE env, else site/site.json
   arrival_radius_m: 2.0
   staging_arrival_radius_m: 15.0
+  heartbeat_timeout_ms: 2000

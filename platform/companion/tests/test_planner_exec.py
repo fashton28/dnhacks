@@ -563,3 +563,30 @@ def test_geo_helpers_sanity():
     assert _bearing_deg(CENTER_LAT, CENTER_LON, lat2, lon2) == pytest.approx(0.0, abs=0.5)
     lat3, lon3 = _offset(CENTER_LAT, CENTER_LON, 0.0, 100.0)
     assert _bearing_deg(CENTER_LAT, CENTER_LON, lat3, lon3) == pytest.approx(90.0, abs=0.5)
+
+
+def test_canonical_aliases_are_consumed_and_conflicts_rejected():
+    ex = _executor()
+    ok, _ = ex.load_plan(_plan(
+        {"tool": "goto_gps", "lat": CENTER_LAT + 0.001, "lon": CENTER_LON, "alt_m": 12.0},
+        {"tool": "hold", "duration_s": 1.0},
+    ))
+    assert ok
+    assert ex.plan_summary()[0]["alt"] == 12.0
+    assert ex.plan_summary()[1]["durationS"] == 1.0
+    ok, message = ex.load_plan(_plan({
+        "tool": "goto_gps", "lat": CENTER_LAT, "lon": CENTER_LON,
+        "alt": 10.0, "alt_m": 11.0,
+    }))
+    assert not ok
+    assert "conflicting" in message
+
+
+def test_orbit_consumes_per_tool_laps():
+    ex = _executor()
+    ok, _ = ex.load_plan(_plan({
+        "tool": "orbit_point", "lat": CENTER_LAT, "lon": CENTER_LON,
+        "radius_m": 8.0, "laps": 0.5,
+    }))
+    assert ok
+    assert ex.plan_summary()[0]["laps"] == 0.5

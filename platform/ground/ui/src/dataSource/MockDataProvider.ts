@@ -25,22 +25,32 @@
 import type {
   Anomaly,
   AnomalyMessage,
+  CapabilitiesMessage,
   CommandAck,
   Command,
   ConnectionConfig,
   ConnectionState,
   DetectedTarget,
+  FleetMessage,
+  HealthEventMessage,
   IncidentReportMessage,
   ManualInput,
   MissionPlan,
   MissionPlanMessage,
   Mode,
+  ObservationMessage,
+  ReadinessMessage,
+  RfEventMessage,
+  SensorHealth,
   StatusText,
+  SpectrumMessage,
   SimulationToggles,
+  TestFaultName,
   Telemetry,
   TrackingState,
   TrackingStatus,
   Unsubscribe,
+  Verification,
   VerificationMessage,
 } from '@/contract';
 import { PROFILE_SPEED_MPS } from '@/contract';
@@ -51,6 +61,7 @@ import { getSiteModel } from '@/site';
 import type { SiteModel, SiteStagingPoint } from '@/site';
 import { ScriptedPlanner } from '@planner/scripted';
 import { verifyMission } from '@planner/verifier';
+import type { VerificationContext } from '@planner/verifier';
 import { writeIncidentReport } from '@planner/report';
 import type { ObservationSummary } from '@planner/report';
 import { haversineMeters, pointInPolygon } from '@planner/site';
@@ -165,9 +176,17 @@ interface Callbacks {
   plan: Array<(m: MissionPlanMessage) => void>;
   verf: Array<(m: VerificationMessage) => void>;
   rept: Array<(m: IncidentReportMessage) => void>;
+  obs: Array<(m: ObservationMessage) => void>;
+  caps: Array<(m: CapabilitiesMessage) => void>;
+  ready: Array<(m: ReadinessMessage) => void>;
+  health: Array<(m: HealthEventMessage) => void>;
+  rf: Array<(m: RfEventMessage) => void>;
+  spectrum: Array<(m: SpectrumMessage) => void>;
+  fleet: Array<(m: FleetMessage) => void>;
 }
 
 export class MockDataProvider implements MissionDataSource {
+  readonly kind = 'mock' as const;
   private cbs: Callbacks = {
     tel: [],
     trk: [],
@@ -178,6 +197,13 @@ export class MockDataProvider implements MissionDataSource {
     plan: [],
     verf: [],
     rept: [],
+    obs: [],
+    caps: [],
+    ready: [],
+    health: [],
+    rf: [],
+    spectrum: [],
+    fleet: [],
   };
 
   private connState: ConnectionState = 'connected';
@@ -244,12 +270,17 @@ export class MockDataProvider implements MissionDataSource {
   private _scnAnomaly: Anomaly | null = null;
   private _scnFailing: MissionPlan | null = null;
   private _scnPassing: MissionPlan | null = null;
+  private _scnPassingVerification: Verification | null = null;
   private planner = new ScriptedPlanner();
 
   private _searchT = 0;
   private _lostStart = 0;
   private _warn30 = false;
   private _warn15 = false;
+  private hostileOverride = false;
+  private lastAuxEmit = 0;
+  private lastHealthSignature = '';
+  private lastReadinessSignature = '';
 
   private _tel: ReturnType<typeof setInterval> | null = null;
   private _trk: ReturnType<typeof setInterval> | null = null;
@@ -272,7 +303,13 @@ export class MockDataProvider implements MissionDataSource {
 
   /** Phase 3 drives the fault scenarios through this stable mock API. */
   setSimulationToggles(next: Partial<SimulationToggles>): void {
+    if (next.simulateCharging && !this.simulationToggles.simulateCharging && !this.s.armed) {
+      this.s.battery = Math.min(this.s.battery, 68);
+    }
+    if (next.simulateHostileDrone === false) this.hostileOverride = false;
     Object.assign(this.simulationToggles, next);
+    this.lastAuxEmit = 0;
+    this.log('warning', `Simulation rails updated: ${Object.entries(next).filter(([, on]) => on).map(([name]) => name).join(', ') || 'nominal'}`);
   }
 
   getSimulationToggles(): Readonly<SimulationToggles> {
@@ -323,6 +360,36 @@ export class MockDataProvider implements MissionDataSource {
     this.cbs.rept.push(cb);
     return () => this._off('rept', cb);
   }
+  onObservation(cb: (m: ObservationMessage) => void): Unsubscribe {
+    this.cbs.obs.push(cb);
+    return () => this._off('obs', cb);
+  }
+  onCapabilities(cb: (m: CapabilitiesMessage) => void): Unsubscribe {
+    this.cbs.caps.push(cb);
+    cb(this.capabilitiesMessage());
+    return () => this._off('caps', cb);
+  }
+  onReadiness(cb: (m: ReadinessMessage) => void): Unsubscribe {
+    this.cbs.ready.push(cb);
+    cb(this.readinessMessage());
+    return () => this._off('ready', cb);
+  }
+  onHealthEvent(cb: (m: HealthEventMessage) => void): Unsubscribe {
+    this.cbs.health.push(cb);
+    return () => this._off('health', cb);
+  }
+  onRfEvent(cb: (m: RfEventMessage) => void): Unsubscribe {
+    this.cbs.rf.push(cb);
+    return () => this._off('rf', cb);
+  }
+  onSpectrum(cb: (m: SpectrumMessage) => void): Unsubscribe {
+    this.cbs.spectrum.push(cb);
+    return () => this._off('spectrum', cb);
+  }
+  onFleet(cb: (m: FleetMessage) => void): Unsubscribe {
+    this.cbs.fleet.push(cb);
+    return () => this._off('fleet', cb);
+  }
   getVideoUrl(): string {
     return '';
   }
@@ -341,6 +408,13 @@ export class MockDataProvider implements MissionDataSource {
   private _emit(k: 'plan', msg: MissionPlanMessage): void;
   private _emit(k: 'verf', msg: VerificationMessage): void;
   private _emit(k: 'rept', msg: IncidentReportMessage): void;
+  private _emit(k: 'obs', msg: ObservationMessage): void;
+  private _emit(k: 'caps', msg: CapabilitiesMessage): void;
+  private _emit(k: 'ready', msg: ReadinessMessage): void;
+  private _emit(k: 'health', msg: HealthEventMessage): void;
+  private _emit(k: 'rf', msg: RfEventMessage): void;
+  private _emit(k: 'spectrum', msg: SpectrumMessage): void;
+  private _emit(k: 'fleet', msg: FleetMessage): void;
   private _emit(k: keyof Callbacks, msg: unknown): void {
     const list = this.cbs[k] as Array<(m: unknown) => void>;
     list.forEach((f) => f(msg));
@@ -349,6 +423,174 @@ export class MockDataProvider implements MissionDataSource {
   private log(severity: Severity, text: string): void {
     this._emit('txt', {
       type: 'statusText', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, severity, text,
+    });
+  }
+
+  private sensorHealth(): ObservationMessage['sensors'] {
+    return {
+      rgb: this.simulationToggles.simulateCameraFail ? 'failed' : 'ok',
+      thermal: this.simulationToggles.simulateThermalFail ? 'failed' : 'ok',
+      lidar: this.simulationToggles.simulateLidarFail ? 'failed' : 'ok',
+    };
+  }
+
+  private batteryState(): Telemetry['battery'] {
+    const t = this.simulationToggles;
+    const charging = t.simulateCharging && !this.s.armed && this.s.battery < 99.5;
+    const fault = t.simulateBatteryFault ? 'cell imbalance latched' : undefined;
+    return {
+      soc_pct: this.s.battery,
+      voltage_v: this.s.voltage,
+      current_a: charging ? -7.2 : this.s.current,
+      cell_delta_v: t.simulateBatteryFault ? 0.18 : 0.018,
+      temp_c: t.simulateBatteryFault ? 67 : 31,
+      remaining_s: Math.max(0, Math.round((this.s.battery / 100) * 1500)),
+      charge_state: fault ? 'fault' : charging ? 'charging' : this.s.armed ? 'discharging' : 'charged',
+      ...(fault ? { fault } : {}),
+      voltage: this.s.voltage,
+      current: charging ? -7.2 : this.s.current,
+      remaining: this.s.battery,
+    };
+  }
+
+  private readinessMessage(): ReadinessMessage {
+    const battery = this.batteryState();
+    const sensors = this.sensorHealth();
+    const reasons: string[] = [];
+    if (battery.charge_state !== 'charged') reasons.push(`pack is ${battery.charge_state}`);
+    if (battery.soc_pct < 80) reasons.push(`SoC ${battery.soc_pct.toFixed(0)}% is below 80% dispatch minimum`);
+    if (battery.fault) reasons.push(battery.fault);
+    if (this.simulationToggles.simulateNight && sensors.thermal !== 'ok') reasons.push('night mission requires healthy thermal');
+    if (sensors.lidar !== 'ok') reasons.push('LiDAR unavailable: clutter routes require clear-band correction');
+    if (this.simulationToggles.simulateGpsLoss) reasons.push('GPS denied: new missions refused');
+    if (this.simulationToggles.simulateHostileDrone && !this.hostileOverride) reasons.push('hostile drone conflicts with site airspace');
+    const eta = battery.charge_state === 'charging' ? Math.ceil(Math.max(0, 100 - battery.soc_pct) / 0.8) : 0;
+    return {
+      type: 'readiness', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
+      ready: reasons.length === 0, reasons, eta_ready_s: eta,
+    };
+  }
+
+  private capabilitiesMessage(): CapabilitiesMessage {
+    return {
+      type: 'capabilities', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
+      profiles: [
+        { profile: 'follow', min_standoff_m: 3, max_standoff_m: 15, max_speed_mps: 2, max_altitude_m: 45 },
+        { profile: 'inspect', min_standoff_m: 4, max_standoff_m: 15, max_speed_mps: 4, max_altitude_m: 60 },
+        { profile: 'survey', min_standoff_m: 5, max_standoff_m: 15, max_speed_mps: 6, max_altitude_m: 80 },
+      ],
+      sensors: ['rgb', 'thermal', 'lidar'], night_capable: true,
+      max_sortie_s: 480, dispatch_min_soc_pct: 80,
+    };
+  }
+
+  private currentRfEvents(): RfEventMessage[] {
+    const t = this.simulationToggles;
+    const events: RfEventMessage[] = [];
+    if (t.simulateRfInterference) events.push({
+      type: 'rfEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
+      source: 'sdr', kind: 'gnss_interference', band: 'L1', power_delta_db: 8.4,
+      confidence: 0.94,
+    });
+    if (t.simulateHostileDrone) {
+      const hostile = this.site?.staging[1] ?? this.site?.staging[0];
+      const pilot = this.site?.staging[0] ?? this.site?.home;
+      events.push({
+        type: 'rfEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
+        source: 'rf_drone', kind: 'hostile_drone', band: '2.4 GHz',
+        ...(hostile ? { lat: hostile.lat, lon: hostile.lon } : {}),
+        ...(pilot ? { pilot_lat: pilot.lat, pilot_lon: pilot.lon } : {}),
+        confidence: 0.91,
+      });
+    }
+    return events;
+  }
+
+  private verifierContext(anomaly: Anomaly): VerificationContext {
+    return {
+      telemetry: {
+        battery: this.batteryState(), navSource: this.simulationToggles.simulateGpsLoss ? 'optflow' : 'gps',
+        position: { lat: this.s.lat, lon: this.s.lon, relAlt: this.s.relAlt },
+      },
+      battery: this.batteryState(),
+      navSource: this.simulationToggles.simulateGpsLoss ? 'optflow' : 'gps',
+      currentPosition: { lat: this.s.lat, lon: this.s.lon }, currentAltitudeM: this.s.relAlt,
+      readiness: this.readinessMessage(), windMps: 4.2, anomaly,
+      rfEvents: this.currentRfEvents(),
+      sdrState: this.simulationToggles.simulateRfInterference ? 'degraded' : 'nominal',
+      sensors: this.sensorHealth(), isNight: this.simulationToggles.simulateNight,
+      maxSortieS: 480, dispatchMinSocPct: 80,
+    };
+  }
+
+  private failureStatus(): { state: Telemetry['failsafeState']; reason: string } {
+    const t = this.simulationToggles;
+    if (this.s.phase === 'rtl' || this.s.phase === 'landing') {
+      return {
+        state: 'rtl',
+        reason: t.simulateHostileDrone
+          ? 'returning to launch; RTL supersedes hostile-drone hold'
+          : 'return to launch active',
+      };
+    }
+    if (t.simulateBatteryFault) return { state: this.s.armed ? 'rtl' : 'refuse', reason: 'battery pack fault' };
+    if (t.simulateSortieExpiry) return { state: 'rtl', reason: 'sortie return deadline reached' };
+    if (t.simulateGpsLoss && t.simulateRfInterference) return { state: 'escalate', reason: 'probable GNSS interference' };
+    if (t.simulateHostileDrone && !this.hostileOverride) return {
+      state: this.s.armed ? 'hold' : 'refuse', reason: 'hostile drone detected inside geofence',
+    };
+    if (t.simulateGpsLoss) return {
+      state: this.s.armed ? 'hold' : 'refuse', reason: 'GPS denied; navigation source switched to optflow',
+    };
+    if (t.simulateLinkLoss) return { state: 'hold', reason: 'vehicle datalink lost' };
+    if (t.simulateNight && t.simulateThermalFail && !this.s.armed) return { state: 'refuse', reason: 'thermal sensor required at night' };
+    return { state: 'none', reason: '' };
+  }
+
+  private emitAuxiliary(telemetry: Telemetry): void {
+    if (now() - this.lastAuxEmit < 1000) return;
+    this.lastAuxEmit = now();
+    const readiness = this.readinessMessage();
+    const readinessSignature = JSON.stringify([readiness.ready, readiness.reasons, Math.ceil(readiness.eta_ready_s / 5)]);
+    if (readinessSignature !== this.lastReadinessSignature || !this.s.armed) {
+      this.lastReadinessSignature = readinessSignature;
+      this._emit('ready', readiness);
+    }
+    const degradedSpectrum = this.simulationToggles.simulateRfInterference;
+    this._emit('spectrum', {
+      type: 'spectrum', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
+      state: degradedSpectrum ? 'degraded' : 'nominal',
+      bands: [
+        { name: 'GNSS L1', floor_db: degradedSpectrum ? -82 : -101, p95_db: degradedSpectrum ? -74 : -95, peak_mhz: 1575.42, occ_bw_mhz: degradedSpectrum ? 1.8 : 0.2 },
+        { name: 'ISM 2.4', floor_db: -94, p95_db: -83, peak_mhz: 2442, occ_bw_mhz: 18 },
+      ],
+    });
+    this.currentRfEvents().forEach((event) => this._emit('rf', event));
+    const sensors = this.sensorHealth();
+    const failure = this.failureStatus();
+    const health: HealthEventMessage[] = [
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'link', state: this.simulationToggles.simulateLinkLoss ? 'lost' : 'nominal', detail: this.simulationToggles.simulateLinkLoss ? 'heartbeat timeout; holding' : 'telemetry heartbeat nominal' },
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'planner', state: 'nominal', detail: 'planner heartbeat nominal' },
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'gps', state: this.simulationToggles.simulateGpsLoss ? 'denied' : 'nominal', detail: this.simulationToggles.simulateGpsLoss ? 'source switched to optflow' : '3D fix healthy' },
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'battery', state: this.simulationToggles.simulateBatteryFault ? 'fault' : telemetry.battery.charge_state, detail: this.simulationToggles.simulateBatteryFault ? 'cell imbalance and over-temperature' : `${telemetry.battery.soc_pct.toFixed(0)}% SoC` },
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'camera', state: sensors.rgb, detail: sensors.rgb === 'ok' ? 'RGB frames arriving' : 'RGB observation unavailable' },
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'thermal', state: sensors.thermal, detail: sensors.thermal === 'ok' ? 'thermal frames arriving' : 'thermal observation unavailable' },
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'lidar', state: sensors.lidar, detail: sensors.lidar === 'ok' ? 'geometry and proximity nominal' : 'avoidance degraded; clear-band altitude required' },
+      { type: 'healthEvent', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, component: 'sdr', state: degradedSpectrum ? 'degraded' : 'nominal', detail: degradedSpectrum ? 'L1 floor rise exceeds threshold' : 'scripted receiver nominal' },
+    ];
+    const healthSignature = JSON.stringify(health.map((event) => [event.component, event.state, event.detail, failure.state]));
+    if (healthSignature !== this.lastHealthSignature) {
+      this.lastHealthSignature = healthSignature;
+      health.forEach((event) => this._emit('health', event));
+    }
+    this._emit('fleet', {
+      type: 'fleet', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
+      vehicles: [{
+        vehicleId: DEFAULT_VEHICLE_ID, battery: telemetry.battery,
+        controlSource: telemetry.controlSource,
+        failsafe: failure,
+        readiness: { ready: readiness.ready, reasons: readiness.reasons, eta_ready_s: readiness.eta_ready_s },
+      }],
     });
   }
 
@@ -404,7 +646,7 @@ export class MockDataProvider implements MissionDataSource {
         }
       } else if (step === 2) {
         if (this._scnFailing) {
-          const v = verifyMission(this._scnFailing, site, { battery: { remaining: this.s.battery } });
+          const v = verifyMission(this._scnFailing, site, this.verifierContext(this._scnAnomaly ?? this.deriveAnomaly(site)));
           this._emit('verf', {
             type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification: v,
           });
@@ -413,15 +655,32 @@ export class MockDataProvider implements MissionDataSource {
         }
       } else if (step === 3) {
         if (this._scnAnomaly) {
-          this._scnPassing = this.planner.passingPlan(site, this._scnAnomaly);
+          const bridge = window.eis?.plannerPropose;
+          if (bridge) {
+            const result = await bridge({
+              vehicleId: DEFAULT_VEHICLE_ID,
+              anomaly: this._scnAnomaly,
+              capabilities: this.capabilitiesMessage(),
+              context: this.verifierContext(this._scnAnomaly),
+            });
+            this._scnPassing = result.plan;
+            this._scnPassingVerification = result.verification;
+            if (result.fallbackReason) this.log('warning', `Live planner fallback: ${result.fallbackReason}`);
+            if (result.escalationReason) this.log('error', result.escalationReason);
+          } else {
+            this._scnPassing = this.planner.passingPlan(site, this._scnAnomaly);
+            this._scnPassingVerification = verifyMission(
+              this._scnPassing, site, this.verifierContext(this._scnAnomaly),
+            );
+          }
           this._emit('plan', {
             type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan: this._scnPassing,
           });
           this.log('info', `Planner proposed mission ${this._scnPassing.requestId}`);
         }
       } else if (step === 4) {
-        if (this._scnPassing) {
-          const v = verifyMission(this._scnPassing, site, { battery: { remaining: this.s.battery } });
+        if (this._scnPassing && this._scnPassingVerification) {
+          const v = this._scnPassingVerification;
           this._emit('verf', {
             type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification: v,
           });
@@ -467,6 +726,12 @@ export class MockDataProvider implements MissionDataSource {
     let message = 'OK';
     switch (cmd.command) {
       case 'arm':
+        if (!this.readinessMessage().ready) {
+          ok = false;
+          message = this.readinessMessage().reasons.join('; ');
+          this.log('error', `Arm refused — ${message}`);
+          break;
+        }
         this.s.armed = true;
         this.sortieStartedAt ??= now();
         this.log('info', 'Vehicle ARMED');
@@ -583,6 +848,13 @@ export class MockDataProvider implements MissionDataSource {
           message = 'executePlan requires params.plan (the full verified plan)';
           break;
         }
+        const readiness = this.readinessMessage();
+        if (!readiness.ready) {
+          ok = false;
+          message = readiness.reasons.join('; ');
+          this.log('error', `Mission refused — ${message}`);
+          break;
+        }
         // exactly one controlSource: release manual + tracking
         this.manual.active = false;
         this.manual.throttle = this.manual.yaw = this.manual.pitch = this.manual.roll = 0;
@@ -619,8 +891,33 @@ export class MockDataProvider implements MissionDataSource {
       case 'continueMission':
         // Operator-only release from a hostile-drone hold. Phase 3 supplies
         // the held-state transition; the baseline mock acknowledges the gate.
-        this.log('warning', 'Operator approved mission continuation');
+        this.hostileOverride = true;
+        if (this.plannerActive && this.mission && this.s.armed) this.s.mode = 'GUIDED';
+        this.lastAuxEmit = 0;
+        this.log('warning', 'Operator approved mission continuation after hostile-drone hold');
         break;
+      case 'testFault': {
+        if (!p.fault || p.enabled === undefined) {
+          ok = false;
+          message = 'testFault requires fault and enabled';
+          break;
+        }
+        const keyByFault: Partial<Record<TestFaultName, keyof SimulationToggles>> = {
+          gps_loss: 'simulateGpsLoss', rf_interference: 'simulateRfInterference',
+          hostile_drone: 'simulateHostileDrone', link_loss: 'simulateLinkLoss',
+          camera: 'simulateCameraFail', thermal: 'simulateThermalFail', lidar: 'simulateLidarFail',
+          battery_fault: 'simulateBatteryFault', sortie_expiry: 'simulateSortieExpiry', charge: 'simulateCharging',
+        };
+        const key = keyByFault[p.fault];
+        if (!key) {
+          ok = false;
+          message = `${p.fault} is not modeled by the renderer mock`;
+          break;
+        }
+        this.setSimulationToggles({ [key]: p.enabled } as Partial<SimulationToggles>);
+        message = `${p.fault} ${p.enabled ? 'enabled' : 'cleared'}`;
+        break;
+      }
       default:
         ok = false;
         message = 'Unknown command';
@@ -779,11 +1076,61 @@ export class MockDataProvider implements MissionDataSource {
         if (d < 80 && (!staging || d < haversineMeters(staging, { lat, lon }))) staging = sp;
       }
     }
-    const observation: ObservationSummary = staging
-      ? staging.truth === 'false_alarm'
-        ? { detected: false, confidence: 0.12, stagingTruth: staging.truth }
-        : { detected: true, confidence: 0.92, stagingTruth: staging.truth }
-      : { detected: true, confidence: anomaly.confidence };
+    const sensors = this.sensorHealth();
+    const frames = staging ? {
+      ...(sensors.rgb === 'ok' ? { rgb: staging.image } : {}),
+      ...(sensors.thermal === 'ok' ? { thermal: staging.thermalImage } : {}),
+    } : undefined;
+    const geometry: ObservationMessage['geometry'] = sensors.lidar === 'ok' && staging
+      ? staging.truth === 'breach'
+        ? { fence_gaps: [{ lat: staging.lat, lon: staging.lon, width_m: 2.4 }], new_structures: [] }
+        : staging.truth === 'structure'
+          ? { fence_gaps: [], new_structures: [{ lat: staging.lat, lon: staging.lon, footprint_m2: 28, height_m: 3.4 }] }
+          : { fence_gaps: [], new_structures: [] }
+      : { fence_gaps: [], new_structures: [] };
+    const reviewable = !!frames?.rgb && !!frames?.thermal && sensors.lidar !== 'failed';
+    const detected = staging ? staging.truth !== 'false_alarm' : true;
+    const confidence = reviewable ? (detected ? 0.92 : 0.91) : 0.2;
+    const observation: ObservationSummary = {
+      detected,
+      observationAvailable: reviewable,
+      confidence,
+      stagingTruth: staging?.truth,
+      classification: reviewable ? (detected ? 'confirmed' : 'false_alarm') : 'inconclusive',
+      modalities: [
+        ...(frames?.rgb ? ['rgb' as const] : []),
+        ...(frames?.thermal ? ['thermal' as const] : []),
+        ...(sensors.lidar === 'ok' ? ['lidar' as const] : []),
+      ],
+      frames,
+      geometry: {
+        fenceGaps: geometry.fence_gaps.map((gap) => ({ lat: gap.lat, lon: gap.lon, widthM: gap.width_m })),
+        newStructures: geometry.new_structures.map((structure) => ({
+          lat: structure.lat, lon: structure.lon,
+          footprintM2: structure.footprint_m2, heightM: structure.height_m,
+        })),
+      },
+    };
+
+    const observationMessage: ObservationMessage = {
+      type: 'observation', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
+      missionId: m.plan.requestId,
+      ...(staging ? { stagingId: staging.id } : {}),
+      scene: staging?.id ?? anomaly.id,
+      sensors,
+      frames,
+      geometry,
+      tracks: detected && reviewable ? [{
+        id: 901,
+        class: staging?.truth === 'structure' ? 'new_structure' : 'vehicle',
+        bearing_deg: 0,
+        range_m: radiusM,
+        conf: confidence,
+        modality: 'fused',
+        thermal_delta_c: 12.6,
+      }] : [],
+    };
+    this._emit('obs', observationMessage);
 
     this.obs = {
       until: now() + 4500,
@@ -798,12 +1145,16 @@ export class MockDataProvider implements MissionDataSource {
 
     const plan = m.plan;
     setTimeout(() => {
-      const report = writeIncidentReport(anomaly, plan, observation);
+      void (async () => {
+      const report = window.eis?.plannerReport
+        ? await window.eis.plannerReport({ vehicleId: DEFAULT_VEHICLE_ID, anomaly, plan, observation })
+        : writeIncidentReport(anomaly, plan, observation);
       this._emit('rept', {
         type: 'incidentReport', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, report,
       });
       this.log(report.verdict === 'escalate' ? 'critical' : 'info',
         `Incident report ${report.missionId}: ${report.verdict.toUpperCase()}`);
+      })().catch((err: unknown) => this.log('error', `Incident report failed: ${(err as Error).message}`));
     }, 3000);
   }
 
@@ -861,8 +1212,18 @@ export class MockDataProvider implements MissionDataSource {
       s.lon +=
         ((Math.sin(hd) * fwd + Math.cos(hd) * lat) * step) /
         Math.cos((this.homeLat() * Math.PI) / 180);
-    } else if (this.plannerActive && this.mission && s.armed && s.phase === 'flying') {
+    } else if (this.failureStatus().state === 'hold' && s.armed) {
+      s.mode = 'LOITER';
+      s.groundspeed = 0;
+      s.vspeed = 0;
+      s.roll = lerp(s.roll, 0, 0.2);
+      s.pitch = lerp(s.pitch, 0, 0.2);
+    } else if (
+      this.plannerActive && this.mission && s.armed && s.phase === 'flying' &&
+      this.failureStatus().state !== 'hold'
+    ) {
       // planned-mission kinematics (goto / orbit / hold / rtl)
+      s.mode = 'GUIDED';
       this.stepMission(0.1);
     } else {
       // gentle attitude motion when flying (autonomous)
@@ -892,10 +1253,15 @@ export class MockDataProvider implements MissionDataSource {
         s.lon += Math.sin((s.heading * Math.PI) / 180) * 1.2e-6;
       }
     }
-    // battery drain
+    // Battery charge/drain follows the mock fault controls. Charging is
+    // available only while disarmed; ETA uses the same compressed demo rate.
     const draw = s.armed ? (flying ? 18 + s.groundspeed * 1.5 : 6) : 0.4;
     s.current = lerp(s.current, draw, 0.1);
-    s.battery = clamp(s.battery - (s.armed ? 0.0065 + s.groundspeed * 0.0008 : 0), 0, 100);
+    if (this.simulationToggles.simulateCharging && !s.armed) {
+      s.battery = clamp(s.battery + 0.08, 0, 100);
+    } else {
+      s.battery = clamp(s.battery - (s.armed ? 0.0065 + s.groundspeed * 0.0008 : 0), 0, 100);
+    }
     s.voltage = lerp(s.voltage, 14.0 + (s.battery / 100) * 2.8, 0.05);
     // link jitter
     s.rssi = Math.round(clamp(-48 + Math.sin(this.t * 0.3) * 6 - (flying ? 4 : 0), -95, -40));
@@ -917,7 +1283,17 @@ export class MockDataProvider implements MissionDataSource {
       this.log('critical', 'Battery 15% — failsafe imminent');
     }
 
-    this._emit('tel', {
+    const failure = this.failureStatus();
+    if (failure.state === 'rtl' && s.armed && s.phase !== 'rtl' && s.phase !== 'landing') {
+      s.phase = 'rtl';
+      s.mode = 'RTL';
+      this.plannerActive = false;
+      this.mission = null;
+      this.log('critical', `Automatic RTL — ${failure.reason}`);
+    }
+    const sortieElapsed = this.sortieStartedAt === null ? 0 : Math.max(0, (now() - this.sortieStartedAt) / 1000);
+    const forcedSortieElapsed = this.simulationToggles.simulateSortieExpiry ? 425 + sortieElapsed : sortieElapsed;
+    const telemetry: Telemetry = {
       type: 'telemetry',
       ts: now(),
       vehicleId: DEFAULT_VEHICLE_ID,
@@ -930,35 +1306,32 @@ export class MockDataProvider implements MissionDataSource {
           : this.track.state === 'locked'
             ? 'tracking'
             : 'auto',
-      navSource: 'gps',
-      gpsHealth: { fix: s.fix, sats: s.sats, hdop: s.hdop },
-      failsafeState: 'none',
-      failsafeReason: '',
+      navSource: this.simulationToggles.simulateGpsLoss ? 'optflow' : 'gps',
+      gpsHealth: this.simulationToggles.simulateGpsLoss
+        ? { fix: 0, sats: 0, hdop: 99 }
+        : { fix: s.fix, sats: s.sats, hdop: s.hdop },
+      failsafeState: failure.state,
+      failsafeReason: failure.reason,
       attitude: { roll: s.roll, pitch: s.pitch, yaw: s.heading },
       position: { lat: s.lat, lon: s.lon, relAlt: s.relAlt, absAlt: s.relAlt + 32 },
       velocity: { groundspeed: s.groundspeed, verticalSpeed: s.vspeed },
       heading: s.heading,
-      battery: {
-        soc_pct: s.battery,
-        voltage_v: s.voltage,
-        current_a: s.current,
-        cell_delta_v: 0.018,
-        temp_c: 31,
-        remaining_s: Math.max(0, Math.round((s.battery / 100) * 1500)),
-        charge_state: s.armed ? 'discharging' : 'charged',
-        voltage: s.voltage,
-        current: s.current,
-        remaining: s.battery,
-      },
-      gps: { fixType: s.fix, satellites: s.sats, hdop: s.hdop },
+      battery: this.batteryState(),
+      gps: this.simulationToggles.simulateGpsLoss
+        ? { fixType: 0, satellites: 0, hdop: 99 }
+        : { fixType: s.fix, satellites: s.sats, hdop: s.hdop },
       sortie: this.sortieStartedAt === null ? null : {
-        elapsed_s: Math.max(0, (now() - this.sortieStartedAt) / 1000),
+        elapsed_s: forcedSortieElapsed,
         cap_s: 480,
         must_rtl_by_s: 420,
       },
       home: { lat: this.homeLat(), lon: this.homeLon(), distance: homeDist },
-      link: { rssi: s.rssi, latencyMs: s.latency },
-    });
+      link: this.simulationToggles.simulateLinkLoss
+        ? { rssi: -120, latencyMs: 9999 }
+        : { rssi: s.rssi, latencyMs: s.latency },
+    };
+    this._emit('tel', telemetry);
+    this.emitAuxiliary(telemetry);
   }
 
   private stepTracking(): void {

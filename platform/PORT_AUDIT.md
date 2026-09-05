@@ -98,6 +98,22 @@ Packaging: both `electron-builder.yml` files gain two `extraResources` entries
 so the same repo-root-relative paths resolve when packaged —
 `../../../site → site` and `../../satellite/data → ground/satellite/data`.
 
+## Phase 3 planner, SDR, and evidence IPC
+
+Both shells now register the same `planner:propose`, `planner:report`,
+`planner:event`, `sdr:start`, `sdr:stop`, `sdr:status`, `sdr:event`, and
+`site:resolveAsset` channels. The planner runs in the main process, and the
+receive-only Python SDR sidecar is owned by the main-process lifecycle. The
+preload exposes narrow methods; it never exposes Node, filesystem, or API-key
+access. `site:resolveAsset` accepts only local PNG/JPEG/WebP paths contained by
+the selected site directory and returns a data URL.
+
+The package manifests carry the planner runtime, its OpenAI/Zod structured
+output dependencies, the SDR Python sources, baked site assets, and baked
+satellite assets as `extraResources`. Windows hides the sidecar console; Linux
+uses the same subprocess code and defaults to `python3`. Live SDR drivers remain
+optional runtime dependencies, while scripted mode is the offline default.
+
 ### Surfaced renderer-touch (LINUX_PRD §1)
 The shared renderer type `ground/ui/src/vite-env.d.ts` (`ElectronBridge`) must
 gain `loadSiteFile()` / `loadSatelliteTiles()` to match the two preloads — a

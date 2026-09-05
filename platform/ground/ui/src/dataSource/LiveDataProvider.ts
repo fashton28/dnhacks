@@ -14,14 +14,21 @@
  * ========================================================================== */
 import type {
   AnomalyMessage,
+  CapabilitiesMessage,
   CommandAck,
   Command,
   ConnectionConfig,
   ConnectionState,
   IncidentReportMessage,
+  FleetMessage,
+  HealthEventMessage,
   InboundMessage,
   ManualInput,
   MissionPlanMessage,
+  ObservationMessage,
+  ReadinessMessage,
+  RfEventMessage,
+  SpectrumMessage,
   StatusText,
   Telemetry,
   TrackingStatus,
@@ -51,9 +58,17 @@ interface Callbacks {
   plan: Array<(m: MissionPlanMessage) => void>;
   verf: Array<(m: VerificationMessage) => void>;
   rept: Array<(m: IncidentReportMessage) => void>;
+  obs: Array<(m: ObservationMessage) => void>;
+  caps: Array<(m: CapabilitiesMessage) => void>;
+  ready: Array<(m: ReadinessMessage) => void>;
+  health: Array<(m: HealthEventMessage) => void>;
+  rf: Array<(m: RfEventMessage) => void>;
+  spectrum: Array<(m: SpectrumMessage) => void>;
+  fleet: Array<(m: FleetMessage) => void>;
 }
 
 export class LiveDataProvider implements MissionDataSource {
+  readonly kind = 'live' as const;
   private cbs: Callbacks = {
     tel: [],
     trk: [],
@@ -64,6 +79,13 @@ export class LiveDataProvider implements MissionDataSource {
     plan: [],
     verf: [],
     rept: [],
+    obs: [],
+    caps: [],
+    ready: [],
+    health: [],
+    rf: [],
+    spectrum: [],
+    fleet: [],
   };
 
   private ws: WebSocket | null = null;
@@ -193,6 +215,27 @@ export class LiveDataProvider implements MissionDataSource {
       case 'incidentReport':
         this.cbs.rept.forEach((f) => f(msg));
         break;
+      case 'observation':
+        this.cbs.obs.forEach((f) => f(msg));
+        break;
+      case 'capabilities':
+        this.cbs.caps.forEach((f) => f(msg));
+        break;
+      case 'readiness':
+        this.cbs.ready.forEach((f) => f(msg));
+        break;
+      case 'healthEvent':
+        this.cbs.health.forEach((f) => f(msg));
+        break;
+      case 'rfEvent':
+        this.cbs.rf.forEach((f) => f(msg));
+        break;
+      case 'spectrum':
+        this.cbs.spectrum.forEach((f) => f(msg));
+        break;
+      case 'fleet':
+        this.cbs.fleet.forEach((f) => f(msg));
+        break;
       default:
         break;
     }
@@ -262,6 +305,34 @@ export class LiveDataProvider implements MissionDataSource {
     this.cbs.rept.push(cb);
     return () => this._off('rept', cb);
   }
+  onObservation(cb: (m: ObservationMessage) => void): Unsubscribe {
+    this.cbs.obs.push(cb);
+    return () => this._off('obs', cb);
+  }
+  onCapabilities(cb: (m: CapabilitiesMessage) => void): Unsubscribe {
+    this.cbs.caps.push(cb);
+    return () => this._off('caps', cb);
+  }
+  onReadiness(cb: (m: ReadinessMessage) => void): Unsubscribe {
+    this.cbs.ready.push(cb);
+    return () => this._off('ready', cb);
+  }
+  onHealthEvent(cb: (m: HealthEventMessage) => void): Unsubscribe {
+    this.cbs.health.push(cb);
+    return () => this._off('health', cb);
+  }
+  onRfEvent(cb: (m: RfEventMessage) => void): Unsubscribe {
+    this.cbs.rf.push(cb);
+    return () => this._off('rf', cb);
+  }
+  onSpectrum(cb: (m: SpectrumMessage) => void): Unsubscribe {
+    this.cbs.spectrum.push(cb);
+    return () => this._off('spectrum', cb);
+  }
+  onFleet(cb: (m: FleetMessage) => void): Unsubscribe {
+    this.cbs.fleet.push(cb);
+    return () => this._off('fleet', cb);
+  }
 
   private _off<K extends keyof Callbacks>(k: K, cb: unknown): void {
     const list = this.cbs[k] as Array<unknown>;
@@ -327,6 +398,11 @@ export class LiveDataProvider implements MissionDataSource {
     } catch {
       /* fire-and-forget */
     }
+  }
+
+  forwardRfEvent(event: RfEventMessage): void {
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    try { this.ws.send(JSON.stringify(event)); } catch { /* passive feed is best-effort */ }
   }
 
   getVideoUrl(): string {

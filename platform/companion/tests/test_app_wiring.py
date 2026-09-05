@@ -32,12 +32,14 @@ covered by the pre-existing tests.
 from __future__ import annotations
 
 import asyncio
+import math
 from types import SimpleNamespace
 
 import pytest
 
-from eis_companion.app import Companion
+from eis_companion.app import Companion, _great_circle_distance_m
 from eis_companion.config import AppConfig, MAX_SPEED_CAP, load_config
+from eis_companion.control.failsafe import FailsafeDecision
 from eis_companion.mavlink.safety import FailsafeAction, SafetyManager
 from eis_companion.types import ControlSource, Limits, TargetObservation, VehicleState
 
@@ -61,12 +63,22 @@ class FakeVehicle:
     def send_body_velocity(self, vx, vy, vz, yaw_rate, valid=True):
         self.calls.append(("vel", vx, vy, vz, yaw_rate, valid))
 
+    def send_heartbeat(self):
+        self.calls.append(("heartbeat",))
+        return True
+
     def goto_global(self, lat, lon, rel_alt, speed, **kwargs):
         self.calls.append(("goto", lat, lon, rel_alt, speed))
         return True
 
     def set_mode(self, mode):
         self.calls.append(("mode", mode))
+
+    def arm(self):
+        self.calls.append(("arm",))
+
+    def takeoff(self, altitude):
+        self.calls.append(("takeoff", altitude))
 
     def land(self):
         self.calls.append(("land",))
@@ -130,6 +142,14 @@ def make_companion(site_file: str = STUB_SITE) -> Companion:
     c = Companion(cfg)
     c.setup()
     c.vehicle = FakeVehicle()
+    c._fc_ready = True
+    c._battery_snapshot = SimpleNamespace(
+        ready=True, reasons=(), eta_ready_s=0.0, fault="",
+        reserve_should_rtl=False, sortie_should_rtl=False,
+    )
+    c._nav_snapshot = SimpleNamespace(
+        refuse_missions=False, gps_healthy=True, reason="GPS healthy", source="gps"
+    )
     return c
 
 
@@ -142,6 +162,20 @@ def airborne_state(lat=HOME_LAT, lon=HOME_LON, alt=25.0) -> VehicleState:
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_home_distance_uses_vehicle_position_and_site_home():
+    assert _great_circle_distance_m(HOME_LAT, HOME_LON, HOME_LAT, HOME_LON) == pytest.approx(0.0)
+    assert _great_circle_distance_m(FAR_LAT, FAR_LON, HOME_LAT, HOME_LON) > 100.0
+    assert math.isinf(_great_circle_distance_m(math.nan, HOME_LON, HOME_LAT, HOME_LON))
+
+
+def test_telemetry_tick_sends_fc_heartbeat_at_one_hz():
+    c = make_companion()
+    c._last_fc_heartbeat_sent_s = 0.0
+    run(c._telemetry_tick())
+    run(c._telemetry_tick())
+    assert c.vehicle.named("heartbeat") == [("heartbeat",)]
 
 
 def dispatch(c: Companion, command: str, params=None):
@@ -184,6 +218,64 @@ def test_execute_plan_rejects_unknown_tool():
     assert "unknown tool" in ack["message"]
     assert c._planner_engaged is False
     assert c._control_source == ControlSource.AUTO.value
+
+
+@pytest.mark.parametrize("tool", ["follow", "orbit", "goto_relative"])
+def test_sequence_plan_rejects_single_command_only_tools(tool):
+    c = make_companion()
+    params = {"tool": tool, "lat": HOME_LAT, "lon": HOME_LON, "dx": 1.0, "dy": 1.0}
+    ack = dispatch(c, "executePlan", {"plan": valid_plan(tools=[params])})
+    assert ack["success"] is False
+    assert "unknown tool" in ack["message"]
+    assert c._planner_engaged is False
+
+
+def test_startup_race_refuses_arm_without_health_evidence():
+    c = make_companion()
+    c._battery_snapshot = None
+    c._nav_snapshot = None
+    ack = dispatch(c, "arm")
+    assert not ack["success"]
+    assert "telemetry unavailable" in ack["message"]
+
+
+def test_armed_takeoff_transition_does_not_require_charged_state_again():
+    c = make_companion()
+    c._vehicle_state = VehicleState(armed=True, airborne=False, mode="GUIDED")
+    c._battery_snapshot.ready = False
+    c._battery_snapshot.reasons = ("charge_state=discharging",)
+    c._failsafe_decision = FailsafeDecision("none", "", "companion")
+    ack = dispatch(c, "takeoff", {"altitude": 20})
+    assert ack["success"]
+    assert ("takeoff", 20.0) in c.vehicle.calls
+    c.vehicle.calls.clear()
+    run(c._control_tick(0.05))
+    assert c.vehicle.named("vel") == []
+
+
+def test_night_and_clutter_require_real_sensor_rails_before_plan_load():
+    c = make_companion()
+    c._thermal_observation_valid = False
+    night = dispatch(c, "executePlan", {"plan": valid_plan(), "night": True})
+    assert not night["success"] and "thermal" in night["message"]
+    c._thermal_observation_valid = True
+    c._lidar_observation_valid = False
+    clutter = dispatch(c, "executePlan", {
+        "plan": valid_plan(), "routeThroughClutter": True,
+    })
+    assert not clutter["success"] and "LiDAR" in clutter["message"]
+
+
+def test_camera_escalation_allows_existing_plan_to_reach_terminal_rtl():
+    c = make_companion()
+    c._vehicle_state = airborne_state()
+    assert dispatch(c, "executePlan", {"plan": valid_plan(tools=[{"tool": "rtl"}])})["success"]
+    c._failsafe_decision = FailsafeDecision(
+        "escalate", "no observation: camera failed", "companion"
+    )
+    c.vehicle.calls.clear()
+    run(c._control_tick(0.05))
+    assert ("mode", "RTL") in c.vehicle.calls
 
 
 @pytest.mark.parametrize("params", [
@@ -519,7 +611,8 @@ def test_missing_site_still_boots_planner():
     c = make_companion(site_file="site/does-not-exist.json")
     assert c.planner is not None
     ack = dispatch(c, "executePlan", {"plan": valid_plan()})
-    assert ack["success"] is True      # default band = [0, max_altitude]
+    assert ack["success"] is False
+    assert "site model invalid" in ack["message"]
 
 
 # ==========================================================================
@@ -551,6 +644,7 @@ def test_set_max_speed_wire_command_clamped_under_hard_cap():
 def test_planner_config_defaults_mirror_shared_profiles():
     cfg = load_config(None, use_dotenv=False, use_env=False)
     assert cfg.planner.profile_speed_mps == {
+        "follow": 2.0, "inspect": 4.0, "survey": 6.0,
         "slow": 2.0, "standard": 4.0, "fast": 6.0,
     }
     assert all(v <= MAX_SPEED_CAP for v in cfg.planner.profile_speed_mps.values())

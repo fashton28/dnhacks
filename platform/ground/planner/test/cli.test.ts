@@ -18,6 +18,7 @@ const cliJs = path.join(pkgRoot, 'dist', 'cli.js');
 let dir: string;
 let sitePath: string;
 let anomalyPath: string;
+let contextPath: string;
 
 const anomaly: Anomaly = {
   id: 'cli-anom',
@@ -40,6 +41,15 @@ beforeAll(() => {
   anomalyPath = path.join(dir, 'anomaly.json');
   fs.writeFileSync(sitePath, JSON.stringify(stubSite));
   fs.writeFileSync(anomalyPath, JSON.stringify(anomaly));
+  contextPath = path.join(dir, 'scripted-ready-context.json');
+  fs.writeFileSync(contextPath, JSON.stringify({
+    navSource: 'gps', readiness: { ready: true, reasons: [] },
+    battery: { soc_pct: 90, voltage_v: 24, current_a: 1, cell_delta_v: 0.02,
+      temp_c: 25, remaining_s: 1200, charge_state: 'charged', fault: '',
+      voltage: 24, current: 1, remaining: 90 },
+    windMps: 0, anomaly, rfEvents: [], sdrState: 'nominal',
+    sensors: { rgb: 'ok', thermal: 'ok', lidar: 'ok' }, isNight: false,
+  }));
 });
 
 describe('cli', () => {
@@ -51,7 +61,7 @@ describe('cli', () => {
 
     const planPath = path.join(dir, 'plan.json');
     fs.writeFileSync(planPath, planOut);
-    const verification = JSON.parse(runCli(['verify', planPath, sitePath])) as Verification;
+    const verification = JSON.parse(runCli(['verify', planPath, sitePath, '--context', contextPath])) as Verification;
     expect(verification.requestId).toBe(plan.requestId);
     expect(verification.verdict).toBe('pass');
   });
@@ -60,24 +70,26 @@ describe('cli', () => {
     const planOut = runCli(['plan', '--scripted', anomalyPath, sitePath, '--failing']);
     const planPath = path.join(dir, 'failing-plan.json');
     fs.writeFileSync(planPath, planOut);
-    const verification = JSON.parse(runCli(['verify', planPath, sitePath])) as Verification;
+    const verification = JSON.parse(runCli(['verify', planPath, sitePath, '--context', contextPath])) as Verification;
     expect(['rejected', 'corrected']).toContain(verification.verdict);
     const byName = Object.fromEntries(verification.checks.map((c) => [c.name, c]));
-    expect(byName.nfz.ok).toBe(false);
+    expect(byName.nfz_transit.ok && byName.nfz_orbit.ok).toBe(false);
     expect(byName.altitude.ok).toBe(false);
   });
 
-  it('verify honours a telemetry snapshot file', () => {
+  it('verify honours a fail-closed runtime context file', () => {
     const planOut = runCli(['plan', '--scripted', anomalyPath, sitePath]);
     const planPath = path.join(dir, 'plan-t.json');
     fs.writeFileSync(planPath, planOut);
-    const telemPath = path.join(dir, 'telem.json');
-    fs.writeFileSync(telemPath, JSON.stringify({ battery: { remaining: 20 } }));
+    const low = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+    low.battery.soc_pct = 20;
+    const telemPath = path.join(dir, 'low-context.json');
+    fs.writeFileSync(telemPath, JSON.stringify(low));
     const verification = JSON.parse(
-      runCli(['verify', planPath, sitePath, '--telemetry', telemPath]),
+      runCli(['verify', planPath, sitePath, '--context', telemPath]),
     ) as Verification;
     expect(verification.verdict).toBe('rejected'); // 20% cannot cover reserve
-    expect(verification.checks.find((c) => c.name === 'battery')!.ok).toBe(false);
+    expect(verification.checks.find((c) => c.name === 'range')!.ok).toBe(false);
   });
 
   it('report emits an IncidentReport', () => {

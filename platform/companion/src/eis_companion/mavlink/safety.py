@@ -110,6 +110,28 @@ def now_ms() -> float:
     return time.time() * 1000.0
 
 
+# --------------------------------------------------------------------------
+# Battery pack thresholds (feed the flashed BATT_* failsafe params)
+# --------------------------------------------------------------------------
+# Expressed per-cell so one table cannot be mis-flashed onto a pack it was not
+# written for. DEFAULT_PACK_CELLS matches companion/config/default.yaml and the
+# airframe BOM (4S 5000 mAh); a 3S build passes cell_count=3.
+# Erring high is the safe direction -- too high only nuisance-trips the
+# failsafe, too low disables it entirely.
+DEFAULT_PACK_CELLS: int = 4
+CELL_LOW_VOLT: float = 3.5   # V/cell -- warning (BATT_FS_LOW_ACT -> RTL)
+CELL_CRT_VOLT: float = 3.3   # V/cell -- critical (BATT_FS_CRT_ACT -> LAND)
+
+
+def _pack_cells(cell_count: int) -> int:
+    """Clamp to a sane LiPo series count; a bad value degrades to the BOM pack."""
+    try:
+        cells = int(cell_count)
+    except (TypeError, ValueError):
+        return DEFAULT_PACK_CELLS
+    return cells if 1 <= cells <= 12 else DEFAULT_PACK_CELLS
+
+
 class SafetyManager:
     """Stateless-by-design safety coordinator (PRD 11).
 
@@ -326,19 +348,21 @@ class SafetyManager:
     # ----------------------------------------------------------------------
     # 4. Geofence + failsafe param map
     # ----------------------------------------------------------------------
-    def failsafe_param_map(self) -> dict:
+    def failsafe_param_map(self, *, cell_count: int = DEFAULT_PACK_CELLS) -> dict:
         """The ArduCopter PARAM map for this vehicle's safety envelope.
 
         Thin instance wrapper around the module-level :func:`failsafe_param_map`
-        using this manager's current ``Limits``.
+        using this manager's current ``Limits``. ``cell_count`` must match the
+        physical pack (see ``config.battery.cell_count``).
         """
-        return failsafe_param_map(self._limits)
+        return failsafe_param_map(self._limits, cell_count=cell_count)
 
 
 # --------------------------------------------------------------------------
 # Module-level geofence + failsafe PARAM map (no SafetyManager needed)
 # --------------------------------------------------------------------------
-def failsafe_param_map(limits: Limits) -> dict:
+
+def failsafe_param_map(limits: Limits, *, cell_count: int = DEFAULT_PACK_CELLS) -> dict:
     """Return the exact ArduCopter parameters to flash for a safe vehicle.
 
     Returned as a flat ``dict[str, float]`` (param name -> value) so it can be:
@@ -373,8 +397,12 @@ def failsafe_param_map(limits: Limits) -> dict:
         "BATT_MONITOR": 4.0,           # 4 = voltage + current
         "BATT_FS_LOW_ACT": 2.0,        # 2 = RTL on low battery
         "BATT_FS_CRT_ACT": 1.0,        # 1 = LAND on critical battery
-        "BATT_LOW_VOLT": 14.0,         # 4S nominal; tune per pack in flashing.md
-        "BATT_CRT_VOLT": 13.2,
+        # Derived per-cell, never hard-coded to one pack: flashing a 3S table
+        # (10.5 V) onto the 4S pack in the BOM sets the warning at 2.6 V/cell,
+        # i.e. below the point the pack is already destroyed -- the failsafe
+        # would never fire. Pass the build's real cell count.
+        "BATT_LOW_VOLT": round(CELL_LOW_VOLT * _pack_cells(cell_count), 2),
+        "BATT_CRT_VOLT": round(CELL_CRT_VOLT * _pack_cells(cell_count), 2),
         "BATT_LOW_TIMER": 10.0,        # s sustained before acting
 
         # --- GCS / ground-link failsafe (the FC-side backstop deadman) --------
@@ -441,5 +469,8 @@ __all__ = [
     "EmergencyPlan",
     "FailsafeAction",
     "failsafe_param_map",
+    "DEFAULT_PACK_CELLS",
+    "CELL_LOW_VOLT",
+    "CELL_CRT_VOLT",
     "now_ms",
 ]

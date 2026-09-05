@@ -144,10 +144,12 @@ class Vehicle:
         self._target_component: int = 1
         # Latest cached message of each type we care about (raw mavlink objs).
         self._msgs: dict[str, Any] = {}
+        self._msg_ts: dict[str, float] = {}
         self._mode_mapping: dict[str, int] = {}
         self._inv_mode_mapping: dict[int, str] = {}
         self._last_heartbeat_ts: float = 0.0
         self._link_latency_ms: float = 0.0
+        self._fc_ready: bool = False
 
     # ----------------------------------------------------------------------
     # Connection lifecycle
@@ -199,6 +201,7 @@ class Vehicle:
         self._target_system = self._master.target_system
         self._target_component = self._master.target_component
         self._connected = True
+        self._fc_ready = False
         self._last_heartbeat_ts = now()
         self._msgs["HEARTBEAT"] = hb
 
@@ -239,6 +242,24 @@ class Vehicle:
         finally:
             self._connected = False
 
+    def send_heartbeat(self) -> bool:
+        """Send the 1 Hz GCS heartbeat used by the FC link-loss backstop."""
+        if not self._connected or self._master is None:
+            return False
+        try:
+            self._master.mav.heartbeat_send(
+                mavutil.mavlink.MAV_TYPE_GCS,
+                mavutil.mavlink.MAV_AUTOPILOT_INVALID,
+                0,
+                0,
+                mavutil.mavlink.MAV_STATE_ACTIVE,
+                3,
+            )
+            return True
+        except Exception:
+            log.exception("companion heartbeat send failed")
+            return False
+
     # ----------------------------------------------------------------------
     # Data-stream setup
     # ----------------------------------------------------------------------
@@ -271,14 +292,21 @@ class Vehicle:
 
         # Modern: pin the exact messages we consume (interval in microseconds).
         interval_us = int(1_000_000 / rate_hz)
-        wanted = (
+        wanted = tuple(msg_id for msg_id in (
             mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
             mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
             mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD,
             mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS,
             mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,
             mavutil.mavlink.MAVLINK_MSG_ID_HEARTBEAT,
-        )
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_BATTERY_STATUS", -1),
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_EKF_STATUS_REPORT", -1),
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_ESTIMATOR_STATUS", -1),
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_WIND", -1),
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_OPTICAL_FLOW_RAD", -1),
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_ODOMETRY", -1),
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_SIMSTATE", -1),
+        ) if msg_id >= 0)
         for msg_id in wanted:
             try:
                 self._master.mav.command_long_send(
@@ -315,7 +343,16 @@ class Vehicle:
             mtype = msg.get_type()
             if mtype == "BAD_DATA":
                 continue
+            if mtype == "HEARTBEAT":
+                try:
+                    if int(msg.get_srcSystem()) != int(self._target_system):
+                        continue
+                except (AttributeError, TypeError, ValueError):
+                    pass
             self._msgs[mtype] = msg
+            self._msg_ts[mtype] = now()
+            if mtype == "STATUSTEXT" and "ArduPilot Ready" in str(getattr(msg, "text", "")):
+                self._fc_ready = True
             if mtype == "HEARTBEAT":
                 self._last_heartbeat_ts = now()
             count += 1
@@ -534,6 +571,257 @@ class Vehicle:
         self.poll()
         return self.read_telemetry(control_source, home_distance=home_distance)
 
+    def health_inputs(self) -> dict[str, Any]:
+        """Translate cached MAVLink health rails to plain data for pure logic."""
+        sysst = self._msgs.get("SYS_STATUS")
+        batt = self._msgs.get("BATTERY_STATUS")
+        gps = self._msgs.get("GPS_RAW_INT")
+        ekf = self._msgs.get("EKF_STATUS_REPORT") or self._msgs.get("ESTIMATOR_STATUS")
+        flow = self._msgs.get("OPTICAL_FLOW_RAD")
+        odom = self._msgs.get("ODOMETRY") or self._msgs.get("VISION_POSITION_ESTIMATE")
+        wind = self._msgs.get("WIND")
+
+        voltages = []
+        if batt is not None:
+            for raw in getattr(batt, "voltages", ()):
+                if raw not in (0, 65535):
+                    voltages.append(float(raw) / 1000.0)
+        voltage_v = sum(voltages)
+        if voltage_v <= 0.0 and sysst is not None:
+            raw_v = getattr(sysst, "voltage_battery", 0)
+            voltage_v = float(raw_v) / 1000.0 if raw_v not in (0, 65535) else 0.0
+        raw_current = getattr(batt, "current_battery", -1) if batt is not None else (
+            getattr(sysst, "current_battery", -1) if sysst is not None else -1
+        )
+        current_a = float(raw_current) / 100.0 if raw_current != -1 else 0.0
+        remaining_raw = getattr(batt, "battery_remaining", -1) if batt is not None else (
+            getattr(sysst, "battery_remaining", -1) if sysst is not None else -1
+        )
+        temperature_raw = getattr(batt, "temperature", 0) if batt is not None else 0
+        temperature_c = (
+            float(temperature_raw) / 100.0
+            if temperature_raw not in (0, 32767) else math.nan
+        )
+
+        hdop_raw = getattr(gps, "eph", 65535) if gps is not None else 65535
+        speed_accuracy_raw = (
+            getattr(gps, "vel_acc", getattr(gps, "s_acc", 0xFFFFFFFF))
+            if gps is not None else 0xFFFFFFFF
+        )
+        ekf_flags = int(getattr(ekf, "flags", 0)) if ekf is not None else 0
+        attitude_flag = getattr(mavutil.mavlink, "EKF_ATTITUDE", 1) if mavutil else 1
+        velocity_flag = getattr(mavutil.mavlink, "EKF_VELOCITY_HORIZ", 2) if mavutil else 2
+        relative_flag = getattr(mavutil.mavlink, "EKF_POS_HORIZ_REL", 8) if mavutil else 8
+        absolute_flag = getattr(mavutil.mavlink, "EKF_POS_HORIZ_ABS", 16) if mavutil else 16
+        ekf_ok = bool(
+            ekf_flags & attitude_flag
+            and ekf_flags & velocity_flag
+            and ekf_flags & (relative_flag | absolute_flag)
+        )
+        odom_age = math.inf
+        if odom is not None:
+            odom_type = "ODOMETRY" if self._msgs.get("ODOMETRY") is odom else "VISION_POSITION_ESTIMATE"
+            received_at = self._msg_ts.get(odom_type)
+            if received_at is not None:
+                odom_age = max(0.0, now() - received_at)
+        covariance = (
+            getattr(odom, "pose_covariance", getattr(odom, "covariance", ()))
+            if odom is not None else ()
+        )
+        position_variance = float(covariance[0]) if covariance else math.inf
+        extnav_pose_valid = bool(
+            odom is not None
+            and all(math.isfinite(float(getattr(odom, axis, math.nan))) for axis in ("x", "y", "z"))
+        )
+        prearm_bit = getattr(mavutil.mavlink, "MAV_SYS_STATUS_PREARM_CHECK", 1 << 28)
+        prearm_healthy = bool(
+            sysst is not None
+            and int(getattr(sysst, "onboard_control_sensors_present", 0)) & prearm_bit
+            and int(getattr(sysst, "onboard_control_sensors_enabled", 0)) & prearm_bit
+            and int(getattr(sysst, "onboard_control_sensors_health", 0)) & prearm_bit
+        )
+        return {
+            "fc_ready": self._fc_ready or prearm_healthy,
+            "battery": {
+                "voltage_v": voltage_v,
+                "current_a": current_a,
+                "temp_c": temperature_c,
+                "reported_soc_pct": float(remaining_raw) if remaining_raw >= 0 else None,
+                "cell_voltages_v": tuple(voltages),
+            },
+            "nav": {
+                "gps_fix": int(getattr(gps, "fix_type", 0)) if gps is not None else 0,
+                "gps_sats": int(getattr(gps, "satellites_visible", 0)) if gps is not None else 0,
+                "gps_hdop": (
+                    float(hdop_raw) / 100.0 if hdop_raw not in (0, 65535) else math.inf
+                ),
+                "gps_speed_accuracy_mps": (
+                    float(speed_accuracy_raw) / 1000.0
+                    if speed_accuracy_raw != 0xFFFFFFFF else math.inf
+                ),
+                "ekf_ok": ekf_ok,
+                "gps_age_s": max(0.0, now() - self._msg_ts.get("GPS_RAW_INT", 0.0))
+                if "GPS_RAW_INT" in self._msg_ts else math.inf,
+                "ekf_age_s": max(0.0, now() - max(
+                    self._msg_ts.get("EKF_STATUS_REPORT", 0.0),
+                    self._msg_ts.get("ESTIMATOR_STATUS", 0.0),
+                )) if (
+                    "EKF_STATUS_REPORT" in self._msg_ts
+                    or "ESTIMATOR_STATUS" in self._msg_ts
+                ) else math.inf,
+                "extnav_fresh": extnav_pose_valid and odom_age <= 0.5,
+                "extnav_age_s": odom_age,
+                "extnav_position_variance_m2": position_variance,
+                "optflow_quality": float(getattr(flow, "quality", 0.0)) if flow is not None else 0.0,
+                "optflow_innovation_mps": float(
+                    getattr(flow, "innovation_mps", math.inf)
+                ) if flow is not None else math.inf,
+            },
+            "wind_mps": float(getattr(wind, "speed", 0.0)) if wind is not None else 0.0,
+        }
+
+    def sim_truth_inputs(self) -> dict[str, float] | None:
+        """Return fresh SITL ground truth, never the EKF position estimate."""
+        msg = self._msgs.get("SIMSTATE") or self._msgs.get("SIM_STATE")
+        msg_type = "SIMSTATE" if self._msgs.get("SIMSTATE") is msg else "SIM_STATE"
+        received_at = self._msg_ts.get(msg_type)
+        if msg is None or received_at is None or now() - received_at > 0.5:
+            return None
+        lat_raw = getattr(msg, "lat", None)
+        lon_raw = getattr(msg, "lng", getattr(msg, "lon", None))
+        alt_raw = getattr(msg, "alt", None)
+        if lat_raw is None or lon_raw is None or alt_raw is None:
+            return None
+        lat = float(lat_raw) / 1e7 if abs(float(lat_raw)) > 180.0 else float(lat_raw)
+        lon = float(lon_raw) / 1e7 if abs(float(lon_raw)) > 180.0 else float(lon_raw)
+        alt = float(alt_raw) / 1000.0 if abs(float(alt_raw)) > 10_000.0 else float(alt_raw)
+        if not all(math.isfinite(value) for value in (lat, lon, alt)):
+            return None
+        return {"lat": lat, "lon": lon, "alt_amsl_m": alt, "age_s": now() - received_at}
+
+    def set_ekf_source(self, source: str) -> bool:
+        """Issue companion-owned MAV_CMD_SET_EKF_SOURCE_SET (42007)."""
+        source_sets = {"gps": 1, "extnav": 2, "optflow": 3}
+        if source not in source_sets or not self._connected:
+            return False
+        command = getattr(mavutil.mavlink, "MAV_CMD_SET_EKF_SOURCE_SET", 42007)
+        try:
+            self._command_long(command, float(source_sets[source]))
+            deadline = time.monotonic() + 1.5
+            while time.monotonic() < deadline:
+                ack = self._master.recv_match(type="COMMAND_ACK", blocking=True, timeout=0.25)
+                if ack is None or int(getattr(ack, "command", -1)) != int(command):
+                    continue
+                accepted = getattr(mavutil.mavlink, "MAV_RESULT_ACCEPTED", 0)
+                return int(getattr(ack, "result", -1)) == int(accepted)
+            log.warning("EKF source switch to %s timed out waiting for COMMAND_ACK", source)
+            return False
+        except Exception:
+            log.exception("EKF source switch to %s failed", source)
+            return False
+
+    def send_distance_sensor(self, distance_m: float, *, sensor_id: int = 0) -> bool:
+        """Publish a LiDAR range through DISTANCE_SENSOR."""
+        if not self._connected or self._master is None or not math.isfinite(distance_m):
+            return False
+        cm = int(max(1, min(65534, distance_m * 100.0)))
+        try:
+            self._master.mav.distance_sensor_send(
+                int(time.time() * 1000) & 0xFFFFFFFF,
+                20,
+                12000,
+                cm,
+                getattr(mavutil.mavlink, "MAV_DISTANCE_SENSOR_LASER", 0),
+                int(sensor_id),
+                getattr(mavutil.mavlink, "MAV_SENSOR_ROTATION_NONE", 0),
+                0,
+            )
+            return True
+        except Exception:
+            log.exception("DISTANCE_SENSOR send failed")
+            return False
+
+    def send_obstacle_distance(self, distances_cm: Sequence[int]) -> bool:
+        """Publish a 72-bin LiDAR fan for BendyRuler avoidance."""
+        if not self._connected or self._master is None:
+            return False
+        values = [int(max(1, min(65535, value))) for value in distances_cm[:72]]
+        values.extend([65535] * (72 - len(values)))
+        try:
+            self._master.mav.obstacle_distance_send(
+                int(time.time() * 1_000_000),
+                getattr(mavutil.mavlink, "MAV_DISTANCE_SENSOR_LASER", 0),
+                values,
+                5,
+                20,
+                12000,
+                0.0,
+                getattr(mavutil.mavlink, "MAV_FRAME_BODY_FRD", 12),
+            )
+            return True
+        except Exception:
+            log.exception("OBSTACLE_DISTANCE send failed")
+            return False
+
+    def send_extnav_odometry(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        *,
+        vx: float = 0.0,
+        vy: float = 0.0,
+        vz: float = 0.0,
+        quality: int = 100,
+    ) -> bool:
+        """Publish LiDAR-inertial odometry to ArduPilot's extnav rail."""
+        values = (x, y, z, vx, vy, vz)
+        if not self._connected or self._master is None or not all(map(math.isfinite, values)):
+            return False
+        try:
+            nan_cov = [float("nan")] * 21
+            self._master.mav.odometry_send(
+                int(time.time() * 1_000_000),
+                getattr(mavutil.mavlink, "MAV_FRAME_LOCAL_FRD", 20),
+                getattr(mavutil.mavlink, "MAV_FRAME_BODY_FRD", 12),
+                float(x), float(y), float(z),
+                (1.0, 0.0, 0.0, 0.0),
+                float(vx), float(vy), float(vz),
+                0.0, 0.0, 0.0,
+                nan_cov, nan_cov,
+                0,
+                max(0, min(100, int(quality))),
+            )
+            return True
+        except Exception:
+            log.exception("ODOMETRY send failed")
+            return False
+
+    def send_raw_global_target(self, lat: float, lon: float, alt_m: float) -> bool:
+        """UNCLAMPED target used only by the orchestrator's gated SITL hook."""
+        if not self._connected or self._master is None:
+            return False
+        if not all(math.isfinite(v) for v in (lat, lon, alt_m)):
+            return False
+        try:
+            self._master.mav.set_position_target_global_int_send(
+                int(time.time() * 1000) & 0xFFFFFFFF,
+                self._target_system,
+                self._target_component,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                _TYPEMASK_POS_ONLY,
+                int(round(lat * 1e7)),
+                int(round(lon * 1e7)),
+                float(alt_m),
+                0.0, 0.0, 0.0,
+                0.0, 0.0, 0.0,
+                0.0, 0.0,
+            )
+            return True
+        except Exception:
+            log.exception("raw out-of-fence target send failed")
+            return False
+
     # ----------------------------------------------------------------------
     # Discrete commands
     # ----------------------------------------------------------------------
@@ -550,26 +838,36 @@ class Vehicle:
             p[0], p[1], p[2], p[3], p[4], p[5], p[6],
         )
 
-    def arm(self, *, force: bool = False) -> None:
+    def _wait_command_ack(self, command: int, timeout_s: float = 2.0) -> bool:
+        deadline = time.monotonic() + max(0.0, timeout_s)
+        while time.monotonic() < deadline:
+            ack = self._master.recv_match(type="COMMAND_ACK", blocking=True, timeout=0.25)
+            if ack is None or int(getattr(ack, "command", -1)) != int(command):
+                continue
+            accepted = getattr(mavutil.mavlink, "MAV_RESULT_ACCEPTED", 0)
+            return int(getattr(ack, "result", -1)) == int(accepted)
+        return False
+
+    def arm(self, *, force: bool = False) -> bool:
         """Arm the motors. ``force=True`` bypasses some prearm checks (emergency).
 
         SAFETY: prefer the SafetyManager arming checklist *before* calling this;
         ``force`` is for the emergency path only.
         """
         magic = 21196.0 if force else 0.0  # ArduPilot force-arm magic number
-        self._command_long(
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 1.0, magic,
-        )
+        command = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
+        self._command_long(command, 1.0, magic)
+        return self._wait_command_ack(command)
 
-    def disarm(self, *, force: bool = False) -> None:
+    def disarm(self, *, force: bool = False) -> bool:
         """Disarm the motors. ``force=True`` disarms even when airborne (kill).
 
         emergencyStop uses ``force=True`` -- no confirmation, overrides all.
         """
         magic = 21196.0 if force else 0.0
-        self._command_long(
-            mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM, 0.0, magic,
-        )
+        command = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
+        self._command_long(command, 0.0, magic)
+        return self._wait_command_ack(command)
 
     def set_mode(self, mode: str) -> bool:
         """Set the flight mode by ArduCopter name (e.g. 'GUIDED', 'LOITER').
@@ -603,11 +901,12 @@ class Vehicle:
         """
         if not self.set_mode("GUIDED"):
             return False
+        command = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
         self._command_long(
-            mavutil.mavlink.MAV_CMD_NAV_TAKEOFF,
+            command,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, float(alt),
         )
-        return True
+        return self._wait_command_ack(command)
 
     def land(self) -> bool:
         """Switch to LAND mode (descend and disarm where we are)."""

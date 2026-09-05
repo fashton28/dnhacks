@@ -1,0 +1,49 @@
+{
+  "id": "V04",
+  "scenario": "high_wind",
+  "description": "Wind estimate 13.0 m/s exceeds the 12 m/s range-model limit. The mission is short enough that the 1 + 0.05*wind time penalty keeps range and sortie inside budget, so wind fails alone.",
+  "covers": [
+    "wind limit"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V04",
+    "anomalyId": "fixture-south-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0926949,
+        "lon": 29.4739005,
+        "alt": 30
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "windMps": 13,
+    "anomaly": {
+      "id": "fixture-south-anomaly",
+      "lat": -26.0926949,
+      "lon": 29.4739005,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "wind"
+    ],
+    "reasonContains": {
+      "wind": [
+        "wind 13 m/s exceeds 12 m/s"
+      ]
+    }
+  }
+}

@@ -1,107 +1,188 @@
 # Drone Safety Platform
+DNHacks is an autonomous ISR demonstration for critical-infrastructure sites.
+A baked satellite cue becomes a schema-bound mission proposal, a deterministic
+verifier checks the complete route, a companion process independently clamps
+the approved commands, and real ArduCopter SITL enforces the final flight and
+fence behavior. The demo site is selected through `site/site.json`, with the
+included Komati model in `site/site.stub.json` as the offline fallback.
 
-Autonomous person-following drone — companion computer software, Windows ground
-control center, ArduPilot SITL simulator, and full hardware guide.
+The normal demonstration is fully offline. Satellite imagery, SDR samples,
+sensor observations, and planner decisions all have deterministic baked or
+scripted sources. Live LLM planning is an explicit opt-in.
 
----
-
-## Zero to flying in SITL — 5 commands
-
+## Demo in 90 seconds
 ```bash
 # 1. Clone the repo (if not already done)
 git clone --recurse-submodules <repo-url> dnhacks-platform && cd dnhacks-platform
-
-# 2. Install Python venv + companion deps + ArduPilot SITL  (Linux/WSL2/macOS)
-bash scripts/setup-sim.sh
-
-# 3. (Windows) Install Node deps and build the ground UI  (PowerShell)
-.\scripts\setup-ground.ps1
-
-# 4. Run the full acceptance e2e  (SITL + companion + tests)
-bash scripts/run-sim-e2e.sh          # Linux/WSL2/macOS
-.\scripts\run-sim-e2e.ps1            # Windows (runs SITL inside WSL2)
-
-# 5. Start the ground control center  (second terminal, Windows)
-cd ground/app/windows && npm run dev
-#   (Linux ground station: bash scripts/setup-ground-linux.sh, then cd ground/app/linux && npm run dev)
 ```
 
-> On Windows, steps 2 and 4 run inside WSL2 (Ubuntu). The SITL UDP port 14550
-> is forwarded through WSL2 localhost automatically — no extra config needed.
-> See [docs/network.md](docs/network.md) for details.
+Prepare the pinned Python and Node dependencies and the official ArduCopter
+runtime while a network is available. The launchers only inspect local caches;
+they never install, pull, or download anything during the demonstration.
+On Windows with Docker Desktop running:
 
----
+```powershell
+.\scripts\demo.ps1
+```
+
+On Linux or a prepared WSL2 distribution:
+
+```bash
+bash scripts/demo.sh
+```
+
+The command derives the SITL home from `EIS_SITE_FILE`, defaulting to
+`site/site.json` and then `site/site.stub.json`. It starts the modern ArduCopter
+runtime, verifies the required battery, EKF3, Vicon, frame, and accelerometer
+parameters, starts the companion, waits for `readiness.ready`, and opens the
+live Electron ground station. `Ctrl-C` stops only the processes and named SITL
+container created by the launcher. Logs are written under `logs/demo/`.
+
+The operator sequence is short:
+
+1. Wait for **READY**, then select **Start live inspection** to load the baked
+   Komati cue into the host planner.
+2. Review the proposed route and the verifier's ordered checks. A corrected
+   route shows every change and is rechecked as a complete path.
+3. Approve the effective plan. The companion reclamps it before sending GUIDED
+   commands, while ArduCopter retains its native fence and failsafes.
+4. Watch the RGB, thermal, and LiDAR observation, incident decision, RTL, and
+   landing. The simulated pad returns the pack to charged in 30 seconds by
+   default.
+
+Run a dependency-only check without starting the stack:
+
+```powershell
+.\scripts\demo.ps1 --preflight
+```
+
+```bash
+bash scripts/demo.sh --preflight
+```
+
+If a dependency is missing, the launcher names the exact image, volume,
+runtime, virtual environment, or Node install it expected. Windows prefers the
+cached Docker runtime and falls back to a prepared native WSL2 SITL. Linux uses
+the same Docker runtime when available and otherwise uses `sim/run_sitl.sh`.
+
+### Failure beats
+
+Flags schedule a guarded SITL `testFault` 20 seconds after launch so the normal
+readiness and cue are visible first. Set `EIS_DEMO_FAULT_DELAY_S` to change that
+delay.
+
+| Command | Expected visible behavior |
+|---|---|
+| `--gps-loss` | The companion detects the GPS transition, selects the configured external-navigation EKF source, holds, refuses new missions, and reports the source change. |
+| `--hostile-drone` | A mission on the pad is refused; an airborne mission holds for the operator's continue-or-RTL decision. |
+| `--link-loss` | The companion zeroes commands and holds; ArduCopter's GCS failsafe remains the RTL backstop. |
+| `--camera-fail` | The sortie still returns, but the recognizer escalates the missing RGB observation instead of inventing a detection. |
+| `--battery-fault` | Dispatch is refused on the pad; an airborne pack fault commands RTL independently of the planner. |
+| `--night --thermal-fail` | Night dispatch is refused because a healthy thermal rail is required. |
+| `--lidar-fail` | Clutter routes are refused; an airborne mission climbs to the site's clear band and reports degraded sensing. |
+| `--sortie-cap 45` | The verifier trims a plan to the tighter budget or rejects it, and the companion retains an independent sortie-expiry RTL. |
+
+Flags may be combined. `--link-loss` is injected last so it cannot prevent the
+other requested faults from being acknowledged. PowerShell aliases such as
+`-GpsLoss`, `-HostileDrone`, `-SortieCap 45`, and `-Night` are also accepted.
+
+Use `--live-llm` only when a network is intentionally available and
+`OPENAI_API_KEY` is set. Without this flag, `EIS_PLANNER_MODE=scripted` and the
+mission path makes no LLM network request.
 
 ## Architecture
 
-```
-Camera ─► Jetson Orin Nano ──(MAVLink/UART)──► ArduPilot FC ─► motors
-            │  capture → detect(person) → track → guidance        ▲
-            │  + MAVLink bridge + video stream + control API    sensors / RC
-            │
-            └──(WiFi: control WebSocket :8765 + RTSP :8554)──► Windows GCS
-                           │
-               ground/app (Electron) wraps ground/ui (React)
-               MockDataProvider ←──────┬──────→ LiveDataProvider
-                    (SITL/dev)         │              (live drone)
-                                       │
-                              one-line swap in
-                        ground/ui/src/dataSource/index.ts
-```
-
-- The **Jetson** runs all perception and guidance; it sends high-level
-  body-frame velocity setpoints to the FC via MAVLink GUIDED mode.
-- The **flight controller** does all stabilisation; the pilot's RC transmitter
-  always has override priority (hardwired in ArduPilot parameters).
-- The **ground control center** is a monitoring and commanding station. It runs
-  identically against SITL and against a real drone — the only difference is
-  which `DataSource` implementation is active (see below).
-
----
-
-## Build / run order (PRD §10)
-
-| Step | Command | Environment |
-|------|---------|-------------|
-| 1 | `bash scripts/setup-sim.sh` | Linux / WSL2 / macOS |
-| 2 | `bash scripts/run-sim-e2e.sh` or `make e2e` | Linux / WSL2 |
-| 3 | `.\scripts\setup-ground.ps1` | Windows PowerShell |
-| 4 | `cd ground/app/windows && npm run dev` (or `ground/app/linux` on Linux) | Windows / Linux — connects to SITL |
-| 5 | Follow `docs/` to build hardware, flash FC, provision Jetson | Hardware |
-| 6 | Update `.env` (`EIS_HOST=<jetson-ip>`, `EIS_SITL=false`), restart GCS | Windows |
-
-Run steps 1-2 before anything else — they prove the full guidance loop with
-zero hardware. Steps 5-6 require physical hardware.
-
----
-
-## DataSource seam — the one-line swap
-
-The ground UI is fully decoupled from the backend via a `DataSource` interface.
-In development and SITL mode it uses `MockDataProvider` (synthetic data, no
-network). To connect to a real companion (or a local SITL companion), change
-**exactly one line**:
-
-**`ground/ui/src/dataSource/index.ts`**
-
-```ts
-// Before (mock / pure UI dev):
-export const dataSource: DataSource = new MockDataProvider();
-
-// After (live drone OR SITL companion over WebSocket):
-export const dataSource: DataSource = new LiveDataProvider();
+```text
+baked satellite / passive SDR / RF feed
+                  |
+                  v
+        anomaly + site model
+                  |
+                  v
+ schema-bound planner -> deterministic MissionVerifier -> operator approval
+                                                     |
+                                                     v
+               Electron GCS <-> companion :8765 <-> ArduCopter SITL :5760
+                                      |                 |
+                         sensor fusion + report     native EKF/fence
 ```
 
-`LiveDataProvider` reads `ConnectionConfig` from the Electron settings store
-(persisted to disk via the preload bridge), opens the control WebSocket to the
-companion, streams telemetry/tracking/statusText, forwards commands including
-high-rate `manualInput` (fire-and-forget, not acked per frame), and returns
-the RTSP video URL. Everything else in the UI is unchanged.
+- `ground/satellite/` turns baked optical and clearly labelled synthetic SAR
+  fallback assets into anomaly cues.
+- `ground/planner/` contains the scripted/live planner, ordered verifier, route
+  correction, and report decision.
+- `ground/sdr/` is receive-only. Its default source is scripted; live mode uses
+  SoapySDR or pyrtlsdr when installed. There is no transmit path.
+- `ground/ui/` is the shared React renderer. `ground/app/windows/` and
+  `ground/app/linux/` host it in matching Electron shells.
+- `companion/` owns vehicle readiness, independent plan clamping, sensor fusion,
+  navigation-source switching, battery/sortie policy, and failure responses.
+- `sim/` contains real ArduCopter integration and the acceptance gauntlet.
+- `site/` owns site geometry and staged observations. Runtime code consumes the
+  selected JSON instead of embedding another location.
+- `shared/` mirrors the wire contract whose TypeScript authority lives in
+  `ground/ui/src/contract/index.ts`.
 
----
+The trust chain is deliberately layered: the LLM can only propose a typed plan;
+the ground verifier evaluates the full path; the companion validates the
+approved effective plan again; and ArduCopter applies its native flight fence.
+Manual control preempts automation, and failure outcomes resolve to hold, RTL,
+escalate, or refuse.
 
-## Ground station: Windows & Linux
+Mission sequences currently admit `goto_gps`, `orbit_point`, `hold`, and `rtl`,
+whose geometry and duration can be checked end to end and decoded by the
+companion sequence executor. The shared wire enum still supports `follow`,
+moving-target `orbit`, and `goto_relative` as individual `planCommand` tools;
+the mission planner rejects them until track/relative geometry and matching
+sequence execution can be proved.
 
+## Offline prerequisites
+
+The Windows demo expects:
+
+- Docker Desktop with cached image `radarku/ardupilot-sitl:latest`;
+- volume `dnhacks-phase4-sitl-runtime` containing executable
+  `/runtime/arducopter-4.7.0` (the verified binary reports official
+  ArduCopter 4.7.1);
+- `companion/.venv/Scripts/python.exe` with the pinned companion dependencies;
+- installed dependencies under `ground/ui/node_modules` and
+  `ground/app/windows/node_modules`.
+
+Linux uses `companion/.venv/bin/python` and `ground/app/linux/node_modules`.
+When Docker is absent, it additionally requires a native `sim_vehicle.py` or
+ArduCopter binary discoverable by `sim/run_sitl.sh`.
+
+The launchers preserve SITL EEPROM in `dnhacks-phase4-sitl-state2` and omit
+`--wipe` during normal starts. They use frame model `quad`, native Vicon on
+serial 5, and bind MAVLink only to `127.0.0.1:5760`. The control WebSocket binds
+on port `8765`; the ground Vite development server uses `5173`.
+
+## Verification
+
+Run the focused offline suites from the repository root:
+
+```powershell
+companion\.venv\Scripts\python.exe -m pytest companion\tests
+Push-Location ground\planner; npm test; Pop-Location
+Push-Location ground\satellite; npm test; Pop-Location
+companion\.venv\Scripts\python.exe -m pytest ground\sdr\tests
+Push-Location ground\ui; npm run lint; npm run typecheck; npm run build; Pop-Location
+```
+
+Use the matching shell syntax on Linux. The end-to-end acceptance scripts in
+`sim/` and the two `scripts/run-sim-e2e.*` wrappers exercise the public
+WebSocket contract against ArduCopter SITL.
+
+## Documentation and history
+
+- [Failure modes](docs/FAILURE_MODES.md) maps each detection to one authority
+  and one of hold, RTL, escalate, or refuse.
+- [Hackathon decisions](docs/ADR-hackathon.md) records the site, RF, sensor,
+  planner, and battery decisions.
+- [Site contract](docs/SITE_CONTRACT.md) defines the runtime geometry model.
+- [Session summary](SESSION_SUMMARY.md) records implemented phases and verified
+  boundaries.
+- [Port audit](PORT_AUDIT.md) tracks the Windows/Linux shell parity.
 The GCS ships for **both** Windows and Linux. The React renderer (`ground/ui`)
 is platform-agnostic and **shared** — only the Electron shell + packaging differ:
 

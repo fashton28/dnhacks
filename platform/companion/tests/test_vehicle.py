@@ -108,6 +108,36 @@ def sent(v: Vehicle) -> list:
     return v._master.sent
 
 
+def test_companion_heartbeat_drives_fc_gcs_failsafe_watchdog():
+    v = make_vehicle()
+    assert v.send_heartbeat() is True
+    assert sent(v) == [("heartbeat", (
+        mav.MAV_TYPE_GCS,
+        mav.MAV_AUTOPILOT_INVALID,
+        0,
+        0,
+        mav.MAV_STATE_ACTIVE,
+        3,
+    ))]
+
+
+def test_foreign_vicon_heartbeat_does_not_replace_fc_state():
+    class ForeignHeartbeat(Msg):
+        def get_srcSystem(self):
+            return 2
+
+    v = make_vehicle([ForeignHeartbeat(
+        "HEARTBEAT", base_mode=0, custom_mode=0,
+    )])
+    v._msgs["HEARTBEAT"] = Msg(
+        "HEARTBEAT",
+        base_mode=mav.MAV_MODE_FLAG_SAFETY_ARMED,
+        custom_mode=4,
+    )
+    assert v.poll() == 0
+    assert v.vehicle_state().armed is True
+
+
 PERIMETER = [
     (-35.360761, 149.16223),
     (-35.360761, 149.16823),
@@ -250,6 +280,20 @@ def test_goto_refuses_when_not_connected():
     v._connected = False
     assert v.goto_global(-35.36, 149.16, 10.0, 2.0) is False
     assert sent(v) == []
+
+
+def test_arm_and_ekf_source_report_flight_controller_ack_result():
+    arm_command = mav.MAV_CMD_COMPONENT_ARM_DISARM
+    v = make_vehicle(inbox=[Msg("COMMAND_ACK", command=arm_command, result=mav.MAV_RESULT_DENIED)])
+    assert v.arm() is False
+    assert sent(v)[0][0] == "command_long"
+
+    source_command = getattr(mav, "MAV_CMD_SET_EKF_SOURCE_SET", 42007)
+    v = make_vehicle(inbox=[Msg(
+        "COMMAND_ACK", command=source_command, result=mav.MAV_RESULT_ACCEPTED,
+    )])
+    assert v.set_ekf_source("extnav") is True
+    assert sent(v)[0][1][4] == 2.0
 
 
 # --------------------------------------------------------------------------

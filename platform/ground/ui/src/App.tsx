@@ -28,6 +28,15 @@ import type {
   CommandName,
   Command,
   ManualInput,
+  HealthEventMessage,
+  ObservationMessage,
+  ReadinessMessage,
+  RfEventMessage,
+  SensorHealth,
+  SimulationToggles,
+  SpectrumMessage,
+  CapabilitiesMessage,
+  Anomaly,
 } from '@/contract';
 import { DEFAULT_VEHICLE_ID } from '@/contract';
 
@@ -43,8 +52,9 @@ import type { PlanProposal, ReportResolution } from '@/store';
 import { dataSource, isHubMode, consoleUrl } from '@/dataSource';
 import type { FleetEntry } from '@/dataSource';
 import { getSiteModel } from '@/site';
+import type { SiteModel } from '@/site';
 
-import { Toast, Tabs, Badge } from '@/components';
+import { Toast, Tabs, Badge, Button } from '@/components';
 import {
   StatusBar,
   ControlsPanel,
@@ -58,6 +68,9 @@ import {
   VerifierPanel,
   ReportPanel,
   AuditLogPanel,
+  MissionStatusStrip,
+  ObservationPanel,
+  SimulationPanel,
 } from '@/panels';
 import {
   ChecklistModal,
@@ -70,6 +83,10 @@ import {
   ManualBanner,
   PlannerBanner,
 } from '@/views';
+import type { VerificationContext } from '@planner/verifier';
+import type { ObservationSummary } from '@planner/report';
+import { pointInPolygon } from '@planner/site';
+import bakedAnomalies from '@satdata/anomalies.json';
 
 /* Pre-site fallback home / launch point (matches the mock scene origin before
    the site model loads). Once the site JSON is loaded, its home is used —
@@ -81,13 +98,32 @@ type CenterView = 'flight' | 'mission' | 'world';
 
 /** Hub-only extensions of the frozen DataSource (fleet list + vehicle selection). */
 interface FleetCapable {
-  onFleet(cb: (rows: FleetEntry[]) => void): () => void;
+  onFleetRows(cb: (rows: FleetEntry[]) => void): () => void;
   setVehicle(id: string): void;
   getVehicle(): string;
 }
 function fleetCapable(ds: unknown): ds is FleetCapable {
-  return !!ds && typeof (ds as FleetCapable).onFleet === 'function' && typeof (ds as FleetCapable).setVehicle === 'function';
+  return !!ds && typeof (ds as FleetCapable).onFleetRows === 'function' && typeof (ds as FleetCapable).setVehicle === 'function';
 }
+const DEFAULT_SIMULATION_TOGGLES: SimulationToggles = {
+  simulateGpsLoss: false, simulateRfInterference: false, simulateHostileDrone: false,
+  simulateLinkLoss: false, simulateCameraFail: false, simulateCharging: false,
+  simulateBatteryFault: false, simulateSortieExpiry: false, simulateThermalFail: false,
+  simulateLidarFail: false, simulateNight: false,
+};
+
+function liveDemoAnomaly(site: SiteModel): Anomaly {
+  const baked = (bakedAnomalies as Anomaly[])[0];
+  if (baked && pointInPolygon(baked, site.perimeter)) return baked;
+  const staging = site.staging[0];
+  return {
+    ...(baked ?? { id: 'sat-change-1', type: 'change', confidence: 0.9, thumbnail: '', source: 'sentinel2' as const }),
+    lat: staging?.lat ?? site.home.lat,
+    lon: staging?.lon ?? site.home.lon,
+  };
+}
+
+/* Center-column view: classic flight ops vs the mission (security) workspace. */
 
 /* Which modal (if any) is currently open. */
 type ModalKind =
@@ -147,6 +183,17 @@ function GroundControl(): JSX.Element {
   const [trail, setTrail] = useState<{ lat: number; lon: number }[]>([]);
   const [elapsed, setElapsed] = useState(0);
   const [recording, setRecording] = useState(false);
+  const [observation, setObservation] = useState<ObservationMessage | null>(null);
+  const [readiness, setReadiness] = useState<ReadinessMessage | null>(null);
+  const [health, setHealth] = useState<Partial<Record<HealthEventMessage['component'], HealthEventMessage>>>({});
+  const [rfEvents, setRfEvents] = useState<RfEventMessage[]>([]);
+  const [spectrum, setSpectrum] = useState<SpectrumMessage | null>(null);
+  const [capabilities, setCapabilities] = useState<CapabilitiesMessage | null>(null);
+  const [livePlanning, setLivePlanning] = useState(false);
+  const [simulationToggles, setSimulationToggles] = useState<SimulationToggles>(() => ({
+    ...DEFAULT_SIMULATION_TOGGLES,
+    ...ds.getSimulationToggles?.(),
+  }));
 
   const [standoff, setStandoff] = useState(4);
   const [maxSpeed, setMaxSpeed] = useState(3);
@@ -161,10 +208,13 @@ function GroundControl(): JSX.Element {
   /* Mission (anomaly → plan → verification → report) state + audit trail. */
   const mission = useMission();
   const autoSwitchedRef = useRef(false);
+  const liveStartedRef = useRef(false);
+  const reportingRef = useRef(new Set<string>());
 
   /* Connection config is owned by SettingsStore. The host shown in the status
      bar mirrors it; SITL collapses the host label to 'sitl'. */
   const config: ConnectionConfig = settings.connection;
+  const [activeConfig, setActiveConfig] = useState<ConnectionConfig>(config);
 
   const pushToast = useCallback((t: Omit<ToastItem, 'id'>) => {
     const id = Math.random();
@@ -196,9 +246,17 @@ function GroundControl(): JSX.Element {
   /* ----- subscriptions: connect on mount, disconnect on unmount ----------- */
   useEffect(() => {
     let cancelled = false;
-    ds.connect(config).catch(() => {
-      if (!cancelled) setConnState('error');
-    });
+    void (async () => {
+      let selected = config;
+      if (ds.kind === 'live' && window.eis?.defaultConfig) {
+        try {
+          selected = { ...config, ...(await window.eis.defaultConfig()) };
+        } catch { /* retain the user's stored connection */ }
+      }
+      if (cancelled) return;
+      setActiveConfig(selected);
+      await ds.connect(selected);
+    })().catch(() => { if (!cancelled) setConnState('error'); });
 
     const offC = ds.onConnectionChange(s => setConnState(s));
     const offT = ds.onTelemetry(t => {
@@ -219,7 +277,7 @@ function GroundControl(): JSX.Element {
       if (!a.success) pushToast({ severity: 'error', title: `${a.command} failed`, message: a.message });
     });
     const offFleet = fleetCapable(ds)
-      ? ds.onFleet((rows) => { setFleet(rows); setVehicleId(ds.getVehicle()); })
+      ? ds.onFleetRows((rows) => { setFleet(rows); setVehicleId(ds.getVehicle()); })
       : () => {};
 
     /* mission channels (anomaly → plan → verification → incident report) */
@@ -245,16 +303,105 @@ function GroundControl(): JSX.Element {
         message: m.report.missionId,
       });
     });
+    const offOb = ds.onObservation(m => {
+      setObservation(m);
+      appendFrame(m);
+      missionStore.addAudit('observation', `Observation ${m.scene}: ${m.tracks.length} track(s), RGB ${m.sensors.rgb}, thermal ${m.sensors.thermal}, LiDAR ${m.sensors.lidar}`, m.vehicleId);
+      const reportService = window.eis?.plannerReport;
+      if (ds.kind === 'live' && reportService) {
+        const state = missionStore.get();
+        const requestId = m.missionId ?? state.executedRequestId;
+        const proposal = requestId
+          ? state.proposals.find((candidate) => candidate.plan.requestId === requestId)
+          : undefined;
+        const anomaly = proposal
+          ? state.anomalies.find((candidate) => candidate.id === proposal.plan.anomalyId)
+          : undefined;
+        if (requestId && proposal && anomaly && !reportingRef.current.has(requestId)) {
+          reportingRef.current.add(requestId);
+          const reviewable = m.sensors.rgb !== 'failed' && m.sensors.thermal !== 'failed' &&
+            !!m.frames?.rgb && !!m.frames?.thermal;
+          const confidence = m.tracks.length > 0
+            ? Math.max(...m.tracks.map((track) => track.conf))
+            : reviewable ? 0.9 : 0;
+          const summary: ObservationSummary = {
+            detected: m.tracks.length > 0,
+            observationAvailable: reviewable,
+            confidence,
+            classification: reviewable ? (m.tracks.length > 0 ? 'confirmed' : 'false_alarm') : 'inconclusive',
+            modalities: [...new Set(m.tracks.map((track) => track.modality))],
+            frames: m.frames,
+            geometry: {
+              fenceGaps: m.geometry.fence_gaps.map((gap) => ({ lat: gap.lat, lon: gap.lon, widthM: gap.width_m })),
+              newStructures: m.geometry.new_structures.map((structure) => ({
+                lat: structure.lat, lon: structure.lon,
+                footprintM2: structure.footprint_m2, heightM: structure.height_m,
+              })),
+            },
+          };
+          void reportService({ vehicleId: m.vehicleId, anomaly, plan: effectivePlan(proposal), observation: summary })
+            .then((report) => {
+              missionStore.ingestReport(report, m.vehicleId);
+              appendFrame({ type: 'incidentReport', ts: Date.now(), vehicleId: m.vehicleId, report });
+              pushToast({
+                severity: report.verdict === 'escalate' ? 'critical' : 'info',
+                title: `Incident report: ${report.verdict.replace('_', ' ')}`,
+                message: report.missionId,
+              });
+            })
+            .catch((error: unknown) => {
+              reportingRef.current.delete(requestId);
+              missionStore.addAudit('report', `Report service failed: ${(error as Error).message}`, m.vehicleId);
+            });
+        }
+      }
+    });
+    const offCa = ds.onCapabilities(m => { setCapabilities(m); appendFrame(m); });
+    const offRe = ds.onReadiness(m => { setReadiness(m); appendFrame(m); });
+    const offHe = ds.onHealthEvent(m => {
+      setHealth(current => ({ ...current, [m.component]: m }));
+      appendFrame(m);
+      missionStore.addAudit('health', `${m.component}: ${m.state} — ${m.detail}`, m.vehicleId);
+    });
+    const offRf = ds.onRfEvent(m => {
+      setRfEvents(current => [...current.slice(-19), m]);
+      appendFrame(m);
+      missionStore.addAudit('rf', `${m.source}/${m.kind} ${m.band} (${(m.confidence * 100).toFixed(0)}%)`, m.vehicleId);
+    });
+    const offSp = ds.onSpectrum(m => { setSpectrum(m); appendFrame(m); });
+    const offFl = ds.onFleet(m => appendFrame(m));
 
     return () => {
       cancelled = true;
       offC(); offT(); offK(); offTxt(); offAck(); offFleet();
-      offAn(); offPl(); offVf(); offRp();
+      offAn(); offPl(); offVf(); offRp(); offOb(); offCa(); offRe(); offHe(); offRf(); offSp(); offFl();
       ds.disconnect();
     };
     // Reconnect when the user changes connection in Settings.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ds, config.host, config.controlPort, config.videoUrl, config.sitl, appendFrame, pushToast]);
+
+  /* Electron SDR sidecar events bypass the WebSocket provider but use the
+     same contract envelopes. Passive RF detections are forwarded unchanged
+     when a live companion connection is available. */
+  useEffect(() => {
+    const bridge = window.eis;
+    if (!bridge?.onSdrEvent) return;
+    const off = bridge.onSdrEvent((event) => {
+      appendFrame(event);
+      if (event.type === 'spectrum') setSpectrum(event);
+      else if (event.type === 'healthEvent') {
+        setHealth(current => ({ ...current, [event.component]: event }));
+        missionStore.addAudit('health', `${event.component}: ${event.state} — ${event.detail}`, event.vehicleId);
+      } else {
+        setRfEvents(current => [...current.slice(-19), event]);
+        missionStore.addAudit('rf', `${event.source}/${event.kind} ${event.band} (${(event.confidence * 100).toFixed(0)}%)`, event.vehicleId);
+        ds.forwardRfEvent?.(event);
+      }
+    });
+    void bridge.sdrStart?.({ mode: activeConfig.sitl ? 'scripted' : 'live', vehicleId: DEFAULT_VEHICLE_ID });
+    return () => { off(); void bridge.sdrStop?.(); };
+  }, [appendFrame, activeConfig.sitl, ds]);
 
   /* ----- history + trail + flight-timer sampling (1 Hz) ------------------- */
   useEffect(() => {
@@ -322,6 +469,10 @@ function GroundControl(): JSX.Element {
 
   /* ----- mission flow: approve / deny / abort / report disposition -------- */
   const doApprovePlan = (proposal: PlanProposal) => {
+    if (readiness?.ready !== true) {
+      pushToast({ severity: 'error', title: 'Mission approval blocked', message: readiness?.reasons.join('; ') || 'Readiness is unavailable' });
+      return;
+    }
     const plan = effectivePlan(proposal);
     setManualActive(false); // exactly one controlSource — planner takes over
     missionStore.noteApproval(proposal.plan.requestId);
@@ -391,8 +542,89 @@ function GroundControl(): JSX.Element {
 
   const trackingActive = !!tracking && tracking.state !== 'idle';
   const flying = (tel?.position?.relAlt ?? 0) > 0.5;
-  const hostLabel = config.sitl ? 'sitl' : config.host;
+  const hostLabel = activeConfig.sitl ? 'sitl' : activeConfig.host;
   const plannerActive = tel?.controlSource === 'planner';
+  const sensorState = (state?: string): SensorHealth | undefined => {
+    if (state === 'ok' || state === 'ready' || state === 'nominal') return 'ok';
+    if (state === 'degraded') return 'degraded';
+    if (state === 'failed' || state === 'unavailable' || state === 'fault') return 'failed';
+    return undefined;
+  };
+  const sensorHealth: Partial<Record<'rgb' | 'thermal' | 'lidar', SensorHealth>> = {
+    rgb: sensorState(health.camera?.state) ?? observation?.sensors.rgb,
+    thermal: sensorState(health.thermal?.state) ?? observation?.sensors.thermal,
+    lidar: sensorState(health.lidar?.state) ?? observation?.sensors.lidar,
+  };
+
+  const updateSimulation = (next: Partial<SimulationToggles>) => {
+    setSimulationToggles(current => ({ ...current, ...next }));
+    ds.setSimulationToggles?.(next);
+  };
+
+  const startLiveInspection = async (): Promise<void> => {
+    const planner = window.eis?.plannerPropose;
+    if (ds.kind !== 'live' || livePlanning || liveStartedRef.current) return;
+    if (!planner) {
+      pushToast({ severity: 'error', title: 'Planner service unavailable', message: 'Run the ground station inside an Electron shell.' });
+      return;
+    }
+    if (!mission.site || !tel || !capabilities || !readiness) {
+      pushToast({
+        severity: 'warning', title: 'Waiting for live context',
+        message: 'Site, telemetry, capabilities, and readiness must arrive before planning.',
+      });
+      return;
+    }
+    liveStartedRef.current = true;
+    setLivePlanning(true);
+    const anomaly = liveDemoAnomaly(mission.site);
+    missionStore.ingestAnomaly(anomaly, tel.vehicleId);
+    appendFrame({ type: 'anomaly', ts: Date.now(), vehicleId: tel.vehicleId, anomaly });
+    setCenterView('mission');
+    const allSensors = sensorHealth.rgb && sensorHealth.thermal && sensorHealth.lidar
+      ? { rgb: sensorHealth.rgb, thermal: sensorHealth.thermal, lidar: sensorHealth.lidar }
+      : undefined;
+    const context: VerificationContext = {
+      telemetry: { battery: tel.battery, navSource: tel.navSource, position: tel.position },
+      battery: tel.battery,
+      navSource: tel.navSource,
+      currentPosition: tel.position,
+      currentAltitudeM: tel.position.relAlt,
+      readiness: { ready: readiness.ready, reasons: readiness.reasons },
+      anomaly,
+      rfEvents,
+      ...(spectrum ? { sdrState: spectrum.state } : {}),
+      ...(allSensors ? { sensors: allSensors } : {}),
+      isNight: import.meta.env.VITE_EIS_DEMO_NIGHT === 'true',
+      maxSortieS: capabilities.max_sortie_s,
+      dispatchMinSocPct: capabilities.dispatch_min_soc_pct,
+      profileCapabilities: capabilities.profiles,
+    };
+    try {
+      const result = await planner({
+        vehicleId: tel.vehicleId,
+        anomaly,
+        telemetry: tel,
+        capabilities,
+        context,
+      });
+      missionStore.ingestPlan(result.plan, result.vehicleId);
+      missionStore.ingestVerification(result.verification, result.vehicleId);
+      missionStore.addAudit('plan', `Ground planner ${result.source}, ${result.attempts} attempt(s)${result.fallbackReason ? `; fallback: ${result.fallbackReason}` : ''}`, result.vehicleId);
+      appendFrame({ type: 'missionPlan', ts: Date.now(), vehicleId: result.vehicleId, plan: result.plan });
+      appendFrame({ type: 'verification', ts: Date.now(), vehicleId: result.vehicleId, verification: result.verification });
+      pushToast({
+        severity: result.verification.verdict === 'rejected' ? 'error' : 'success',
+        title: `Planner result: ${result.verification.verdict}`,
+        message: result.escalationReason ?? result.plan.requestId,
+      });
+    } catch (error) {
+      liveStartedRef.current = false;
+      pushToast({ severity: 'error', title: 'Planning failed', message: (error as Error).message });
+    } finally {
+      setLivePlanning(false);
+    }
+  };
 
   /* Home + the plan route to draw: the approved (executing) plan wins,
      otherwise the proposal selected in the verifier panel. */
@@ -433,11 +665,14 @@ function GroundControl(): JSX.Element {
       <StatusBar
         tel={tel}
         connState={connState}
-        sitl={config.sitl}
+        sitl={activeConfig.sitl}
+        sourceKind={ds.kind}
         host={hostLabel}
         elapsed={elapsed}
         controllerOn={controllerOn}
         manualActive={manualActive}
+        health={health}
+        spectrum={spectrum}
         onDisarm={doDisarm}
         onOpenSettings={() => setModal('settings')}
         onOpenFailsafe={() => setModal('failsafe')}
@@ -480,6 +715,7 @@ function GroundControl(): JSX.Element {
             onInput={onStickInput}
             onControllerChange={setControllerOn}
           />
+          {ds.kind === 'mock' && activeConfig.sitl && <SimulationPanel value={simulationToggles} onChange={updateSimulation} />}
         </div>
 
         {/* CENTER */}
@@ -502,6 +738,16 @@ function GroundControl(): JSX.Element {
               </Badge>
             )}
             {mission.executing && <Badge tone="accent" mono>MISSION EXECUTING</Badge>}
+            {ds.kind === 'live' && (
+              <Button
+                variant="primary"
+                disabled={livePlanning || liveStartedRef.current || connState !== 'connected'}
+                onClick={() => void startLiveInspection()}
+                style={{ marginLeft: 'auto' }}
+              >
+                {livePlanning ? 'Planning inspection…' : liveStartedRef.current ? 'Inspection planned' : 'Start scripted inspection'}
+              </Button>
+            )}
           </div>
 
           {centerView === 'world' ? (
@@ -541,8 +787,18 @@ function GroundControl(): JSX.Element {
               </div>
             </div>
           ) : (
-            <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: '1.25fr 1fr', gap: 10 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr', gap: 10, minHeight: 0 }}>
+            <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: 'auto 1.2fr 1fr', gap: 8 }}>
+              <MissionStatusStrip
+                telemetry={tel}
+                readiness={readiness}
+                health={health}
+                sensors={sensorHealth}
+                spectrum={spectrum}
+                rfEvents={rfEvents}
+                onContinue={() => cmd('continueMission')}
+                onRtl={() => cmd('rtl')}
+              />
+              <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 0.9fr 1fr', gap: 10, minHeight: 0 }}>
                 <MissionMap
                   site={mission.site}
                   tel={tel}
@@ -550,7 +806,10 @@ function GroundControl(): JSX.Element {
                   anomalies={mission.anomalies}
                   plan={routePlan}
                   executing={mission.executing}
+                  observation={observation}
+                  rfEvents={rfEvents}
                 />
+                <ObservationPanel observation={observation} sensorHealth={sensorHealth} />
                 <SatellitePanel anomalies={mission.anomalies} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr 0.9fr', gap: 10, minHeight: 0 }}>
@@ -561,6 +820,8 @@ function GroundControl(): JSX.Element {
                   onSelect={(id) => missionStore.select(id)}
                   onApprove={doApprovePlan}
                   onDeny={doDenyPlan}
+                  readinessReady={readiness?.ready === true}
+                  readinessReasons={readiness?.reasons ?? ['readiness unavailable']}
                 />
                 <ReportPanel
                   report={mission.report}

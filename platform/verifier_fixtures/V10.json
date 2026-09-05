@@ -1,0 +1,59 @@
+{
+  "id": "V10",
+  "scenario": "nfz_transit",
+  "description": "The leg never enters the ash-dam polygon but closes to 20 m of it, inside the 25 m route buffer, while flying at exactly the 30 m ceiling. AT the ceiling is forbidden (only strictly above is legal) - compare V01, which flies the same airspace at 45 m and passes. Correction pushes the target out to the buffer plus margin.",
+  "covers": [
+    "NFZ at ceiling",
+    "NFZ buffer",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V10",
+    "anomalyId": "fixture-dam-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0888322,
+        "lon": 29.4719,
+        "alt": 30
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 30,
+    "anomaly": {
+      "id": "fixture-dam-anomaly",
+      "lat": -26.0888322,
+      "lon": 29.4719,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "nfz_transit"
+    ],
+    "editedChecks": [
+      "nfz_transit"
+    ],
+    "reasonContains": {
+      "nfz_transit": [
+        "leg to tool 0 is 20.0 m from NFZ \"ash-dam\"; 25 m required"
+      ]
+    },
+    "editContains": {
+      "nfz_transit": [
+        "moved tool 0 clear of buffered NFZ \"ash-dam\""
+      ]
+    }
+  }
+}

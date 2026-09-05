@@ -1,0 +1,58 @@
+{
+  "id": "V09",
+  "scenario": "outside_geofence",
+  "description": "The anomaly sits 60 m outside the operational geofence, so the target and the leg to it both leave containment. Correction moves the target back inside with a 5 m margin and the observation is still within proximity.",
+  "covers": [
+    "geofence out",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V09",
+    "anomalyId": "fixture-east-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4775013,
+        "alt": 30
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "anomaly": {
+      "id": "fixture-east-anomaly",
+      "lat": -26.0873051,
+      "lon": 29.4775013,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "geofence"
+    ],
+    "editedChecks": [
+      "geofence"
+    ],
+    "reasonContains": {
+      "geofence": [
+        "tool 0 target is outside geofence",
+        "leg to tool 0 leaves geofence"
+      ]
+    },
+    "editContains": {
+      "geofence": [
+        "moved tool 0 target inside operational geofence"
+      ]
+    }
+  }
+}

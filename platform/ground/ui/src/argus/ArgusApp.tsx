@@ -174,6 +174,7 @@ export default function ArgusApp(): JSX.Element {
   useEffect(() => { const id = st.getState().selected; if (id) void loadCamera(id); }, [loadCamera, st]);
 
   /* ---- actions ---- */
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Hub payloads are dynamically shaped
   const post = useCallback(async (path: string, body: unknown, okMsg?: string): Promise<any> => {
     const r = await hub.postJson(path, body);
     if (!r.ok) {

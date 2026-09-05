@@ -58,8 +58,29 @@ CommandName = Literal[
     "engageTracking", "disengageTracking", "selectTarget",
     "setStandoff", "setMaxSpeed", "emergencyStop",
     "engageManual", "disengageManual",
-    "executePlan", "abortPlan", "continueMission",
+    "executePlan", "abortPlan", "continueMission", "testFault",
 ]
+
+# SITL-only: reject unless config.sitl and EIS_ENABLE_TEST_HOOKS=true.
+# This command is never available to the LLM planner.
+TestFaultName = Literal[
+    "gps_loss", "rf_interference", "hostile_drone", "link_loss",
+    "planner_heartbeat", "camera", "thermal", "lidar",
+    "battery_fault", "battery_drain", "sortie_expiry", "charge",
+    "wind", "raw_out_of_fence",
+]
+
+
+class CommandParams(TypedDict, total=False):
+    altitude: float
+    mode: Mode
+    targetId: int
+    meters: float
+    mps: float
+    plan: MissionPlan
+    fault: TestFaultName
+    enabled: bool
+    value: float
 
 
 # --- TypedDicts for the JSON messages (what goes over the wire) -------------
@@ -288,7 +309,7 @@ class CommandRequired(TypedDict):
 
 
 class Command(CommandRequired, total=False):
-    params: dict  # per-command bag; executePlan carries {"plan": MissionPlan}
+    params: CommandParams
 
 
 class CommandAck(TypedDict):

@@ -13,7 +13,7 @@ import { IconButton } from '@/components/IconButton';
 import { BatteryGauge } from '@/instruments/BatteryGauge';
 import { SignalGauge } from '@/instruments/SignalGauge';
 import logoMark from '@/assets/logo-mark.svg';
-import type { Telemetry, ConnectionState } from '@/contract';
+import type { Telemetry, ConnectionState, HealthEventMessage, SpectrumMessage } from '@/contract';
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
@@ -39,10 +39,13 @@ export interface StatusBarProps {
   tel: Telemetry | null;
   connState: ConnectionState;
   sitl: boolean;
+  sourceKind?: 'mock' | 'live' | 'hub';
   host?: string;
   elapsed: number;
   controllerOn: boolean;
   manualActive: boolean;
+  health?: Partial<Record<HealthEventMessage['component'], HealthEventMessage>>;
+  spectrum?: SpectrumMessage | null;
   onDisarm: () => void;
   onOpenSettings: () => void;
   onOpenFailsafe?: () => void;
@@ -62,10 +65,13 @@ export function StatusBar({
   tel,
   connState,
   sitl,
+  sourceKind = 'live',
   host,
   elapsed,
   controllerOn,
   manualActive,
+  health = {},
+  spectrum = null,
   onDisarm,
   onOpenSettings,
   onOpenFailsafe,
@@ -143,7 +149,9 @@ export function StatusBar({
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-tertiary)' }}>
           {displayHost}
         </span>
-        <Badge tone={sitl ? 'caution' : 'nominal'}>{sitl ? 'SITL' : 'LIVE'}</Badge>
+        <Badge tone={sourceKind === 'mock' || sitl ? 'caution' : 'nominal'}>
+          {sourceKind === 'mock' ? 'MOCK' : sitl ? 'SITL' : 'LIVE'}
+        </Badge>
       </span>
 
       <Sep />
@@ -211,6 +219,13 @@ export function StatusBar({
         latencyMs={tel?.link?.latencyMs}
         lost={!connected}
       />
+
+      <span style={{ display: 'inline-flex', gap: 4 }}>
+        <Badge tone={tel?.navSource === 'gps' ? 'nominal' : tel?.navSource ? 'caution' : 'outline'}>{(tel?.navSource ?? 'NAV ?').toUpperCase()}</Badge>
+        <Badge tone={spectrum?.state === 'nominal' ? 'nominal' : spectrum ? 'danger' : 'outline'}>RF {spectrum?.state ?? '?'}</Badge>
+        <Badge tone={health.link?.state === 'nominal' ? 'nominal' : health.link ? 'danger' : 'outline'}>LINK {health.link?.state ?? '?'}</Badge>
+        <Badge tone={health.planner?.state === 'nominal' ? 'nominal' : health.planner ? 'danger' : 'outline'}>PLAN {health.planner?.state ?? '?'}</Badge>
+      </span>
 
       {/* Right side: controller indicator + actions + DISARM */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
