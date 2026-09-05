@@ -29,9 +29,10 @@ def _free_port() -> int:
 
 
 class HubHandle:
-    def __init__(self, port: int, tmp: Path):
+    def __init__(self, port: int, tmp: Path, app=None):
         self.port = port
         self.tmp = tmp
+        self.app = app  # for tests that exercise Hub internals directly (e.g. the autonomy executor)
         self.http = f"http://127.0.0.1:{port}"
         self.ws_controller = f"ws://127.0.0.1:{port}/ws/controller"
         self.ws_live = f"ws://127.0.0.1:{port}/ws/live"
@@ -85,7 +86,7 @@ async def hub(tmp_path: Path):
                     break
             except httpx.ConnectError:
                 await asyncio.sleep(0.05)
-    handle = HubHandle(port, tmp_path)
+    handle = HubHandle(port, tmp_path, app)
     try:
         yield handle
     finally:
