@@ -9,6 +9,14 @@ An overhead imagery layer flags change at a facility, an LLM agent decides what 
 The fictional critical-infrastructure facility being monitored. A compact simulated world (a few hundred metres across) anchored at real-world coordinates so geofence and altitude math is real. Has a perimeter fence, protected areas, and no-fly zones.
 _Avoid_: plant, facility (fine in prose, but the entity is the Site), world (the World is the simulator's rendering of the Site)
 
+**Zone**:
+A named polygon inside the Site with a security classification: protected area, service yard, exclusion zone, or open ground. Zones are declared in Site context, never inferred. The Triage Agent reads the Zone a Detection falls in; the Safety Validator reads exclusion zones as no-fly.
+_Avoid_: region, sector, area (fine in prose, but the entity is the Zone)
+
+**Site context**:
+The static description of the Site that the Triage Agent reads alongside a Detection: the Zones, what is normally present in each, and the current maintenance schedule. Authored by hand, not generated. Without it, Scenarios 3 and 4 have no basis for a decision and triage degrades to restating the Detection.
+_Avoid_: metadata, config, profile
+
 **Detection**:
 A candidate change flagged by the wide-area layer: a georeferenced polygon, a confidence, and a change type. Unconfirmed. A Detection may never become an Incident.
 _Avoid_: alert, anomaly, alarm
@@ -78,7 +86,7 @@ _Avoid_: UAV, vehicle (vehicle is what a Drone might detect), robot (simulator t
 The set of Drones available at a Site. Its size is configured by the Operator, not fixed by the system.
 
 **Scenario**:
-A scripted change to the Site that creates something to detect: an intruder vehicle appears at the perimeter, a fence section opens, an object is left near a building. Scenarios are what the wide-area layer's after image differs by.
+A scripted change to the Site that creates something to detect. Scenarios are what the wide-area layer's after image differs by. Exactly five are in scope; they are catalogued under "What we monitor" below, and a change not in that list is not in scope.
 _Avoid_: test case, event, anomaly
 
 **Supervisor**:
@@ -88,3 +96,41 @@ _Avoid_: god mode, orchestrator
 **Hub**:
 The single backend process that connects Drones, the Triage Agent, the Safety Validator, the Console, and the audit log. Every command to a Drone passes through the Hub.
 _Avoid_: server, backend, API (fine in code, but the entity is the Hub)
+
+---
+
+## What we monitor
+
+Five Scenarios, and only these five. Each names what changes at the Site, what the wide-area layer should produce, what the correct outcome is, and why it earns a place in the set.
+
+**1. `intruder_vehicle`**
+A vehicle stops against the outer perimeter fence. A large contiguous change, well clear of the minimum-area threshold. Triage dispatches; the Incident Report escalates.
+In the set because it is the largest and most legible change from directly overhead, and it is the demo opener.
+
+**2. `unattended_object`**
+A crate is left beside the reactor building, inside a protected area. A small change, close to the minimum-area threshold. Triage dispatches; the Incident Report escalates.
+In the set because it exercises the area threshold, and because an unattended object inside a protected area is the canonical security concern at a Site like this.
+
+**3. `unattended_object_benign`**
+The same crate, in the service yard. The same object, the same change area, a different Zone. Triage dispatches at lower priority; the Incident Report logs rather than escalates.
+In the set because it produces effectively the same Detection as Scenario 2 with the opposite outcome, and the only thing separating them is the Triage Agent reasoning about the Zone. Run 2 and 3 back to back in the demo: it is the clearest available proof that the judgment layer is doing work no rule could do.
+
+**4. `authorized_activity`**
+A marked maintenance vehicle parks in the service yard during a maintenance window declared in Site context. The wide-area layer detects it. Triage declines to dispatch.
+In the set because it is the only Scenario where the correct action is to do nothing. It is where the false-positive rate comes from, and a monitoring system that cannot restrain itself is one an Operator switches off.
+
+**5. `perimeter_opening`**
+A named fence section is translated open. A thin change, and from directly above a fence is only a few pixels wide, so the opening must be paired with visible ground disturbance or it falls under the minimum area. Triage dispatches; the Incident Report escalates.
+In the set because it is the hardest change to make legible from overhead. Build it last.
+
+### Build order
+
+1, then 4, then 3, then 2, then 5. Scenario 1 unblocks the pipeline. Without 4 the eval numbers mean nothing. Without 3 the pitch loses its strongest moment.
+
+### Overhead pairs must differ by more than the Scenario
+
+Two renders of an unchanged Site are pixel-identical, so a detector run against clean pairs scores 100% precision and 100% recall by construction, and a number that cannot fall is not a measurement. Every overhead pass therefore varies the sun angle, applies slight camera jitter, saves through JPEG compression, and allows benign motion such as Drones repositioned on their pads. This is what makes the minimum-area and confidence thresholds tunable parameters rather than decoration.
+
+### Out of scope
+
+Identifying a person, reading a plate, counting occupants, or inferring intent. The wide-area layer localises change, the Drone's Observations describe what is there, and the Operator decides what it means.
