@@ -390,7 +390,7 @@
    "properties": {
     "kind": "helipad",
     "name": "pad_2",
-    "drone_id": null
+    "drone_id": "drone-2"
    },
    "geometry": {
     "type": "Point",
@@ -405,7 +405,7 @@
    "properties": {
     "kind": "helipad",
     "name": "pad_3",
-    "drone_id": null
+    "drone_id": "drone-3"
    },
    "geometry": {
     "type": "Point",

@@ -16,7 +16,7 @@ release/
 *.tsbuildinfo
 .vite/
 console/dist/
-console/public/assets/        # CC0 Poly Haven assets, fetched by scripts/fetch_assets.py
+console/public/assets/
 # ---- ArduPilot SITL / logs ----
 platform/sim/ardupilot/
 *.tlog
