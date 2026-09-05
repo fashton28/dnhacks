@@ -26,6 +26,8 @@ its message/constant definitions.
 """
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from pymavlink import mavutil
@@ -419,3 +421,64 @@ def test_set_param_silence_retries_then_false():
     v = make_vehicle(inbox=[])
     assert v.set_param("FENCE_TYPE", 5.0, retries=3, timeout=0.01) is False
     assert [name for name, _ in sent(v)] == ["param_set"] * 3
+
+
+# --------------------------------------------------------------------------
+# Gimbal: MAV_CMD_DO_MOUNT_CONTROL, the manager variant, and the SIGN FLIP
+# --------------------------------------------------------------------------
+# The contract reports pitch as -30 = up, 0 = level, +90 = straight DOWN.
+# ArduPilot's mount uses the opposite sign for the same physical angle. Every
+# angle crossing this seam is negated, in both directions -- getting it wrong
+# points the camera at the sky, so it is pinned here on the wire values.
+DO_MOUNT_CONTROL = getattr(mav, "MAV_CMD_DO_MOUNT_CONTROL", 205)
+MAVLINK_TARGETING = getattr(mav, "MAV_MOUNT_MODE_MAVLINK_TARGETING", 2)
+GIMBAL_MANAGER_PITCHYAW = getattr(mav, "MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW", 1000)
+
+
+def test_gimbal_pitch_uses_mount_control_in_mavlink_targeting_mode():
+    v = make_vehicle()
+    assert v.set_gimbal_pitch(45.0) is True
+    name, args = sent(v)[0]
+    assert name == "command_long"
+    # (target_system, target_component, command, confirmation, p1..p7)
+    assert args[2] == DO_MOUNT_CONTROL
+    assert args[4] == pytest.approx(-45.0)          # contract +down -> mount -down
+    assert args[10] == pytest.approx(float(MAVLINK_TARGETING))
+
+
+def test_gimbal_manager_variant_is_selected_by_the_config_flag():
+    v = make_vehicle()
+    assert v.set_gimbal_pitch(30.0, use_gimbal_manager=True) is True
+    name, args = sent(v)[0]
+    assert name == "command_long"
+    assert args[2] == GIMBAL_MANAGER_PITCHYAW
+    assert args[4] == pytest.approx(-30.0)
+
+
+def test_gimbal_command_refuses_non_finite_and_disconnected():
+    v = make_vehicle()
+    assert v.set_gimbal_pitch(float("nan")) is False
+    assert sent(v) == []
+    v._connected = False
+    assert v.set_gimbal_pitch(10.0) is False
+
+
+def test_reported_gimbal_pitch_comes_from_mount_status_in_contract_sign():
+    v = make_vehicle()
+    v._msgs["MOUNT_STATUS"] = Msg("MOUNT_STATUS", pointing_a=-4500)   # centideg
+    assert v.gimbal_pitch_deg() == pytest.approx(45.0)
+
+
+def test_reported_gimbal_pitch_falls_back_to_the_gimbal_device_quaternion():
+    v = make_vehicle()
+    # 45 deg nose-down in the ArduPilot sign: q = (cos(-22.5), 0, sin(-22.5), 0)
+    half = math.radians(-45.0) / 2.0
+    v._msgs["GIMBAL_DEVICE_ATTITUDE_STATUS"] = Msg(
+        "GIMBAL_DEVICE_ATTITUDE_STATUS",
+        q=(math.cos(half), 0.0, math.sin(half), 0.0),
+    )
+    assert v.gimbal_pitch_deg() == pytest.approx(45.0, abs=1e-6)
+
+
+def test_an_unreported_mount_returns_none_not_a_fictional_zero():
+    assert make_vehicle().gimbal_pitch_deg() is None

@@ -53,6 +53,15 @@ ManualHandler = Callable[[Dict[str, Any]], Union[None, Awaitable[None]]]
 HeartbeatHook = Callable[[float], None]
 MessageHandler = Callable[[Dict[str, Any]], Union[None, Dict[str, Any], Awaitable[Any]]]
 ConnectMessages = Callable[[], Union[list[Dict[str, Any]], Awaitable[list[Dict[str, Any]]]]]
+# Operator presence: called with the resulting client count when a ground
+# session appears or disappears. This is the liveness signal behind attendance
+# mode -- an operator connecting reverts unattended mode to attended.
+PresenceHook = Callable[[int], Union[None, Awaitable[None]]]
+
+#: Message types persisted to the hash-chained audit log. These are the
+#: durable record of what the vehicle decided and why: health transitions,
+#: attendance-mode changes, and escalations.
+_AUDITED_TYPES = frozenset({"healthEvent", "mode", "escalation"})
 
 
 def _now_ms() -> int:
@@ -73,7 +82,10 @@ class ApiServer:
         plan_command_handler: Optional[MessageHandler] = None,
         plan_heartbeat_handler: Optional[MessageHandler] = None,
         rf_event_handler: Optional[MessageHandler] = None,
+        fleet_handler: Optional[MessageHandler] = None,
         connect_messages: Optional[ConnectMessages] = None,
+        client_connected_hook: Optional[PresenceHook] = None,
+        client_disconnected_hook: Optional[PresenceHook] = None,
         vehicle_id: str = "eis-1",
         audit_path: Optional[str] = None,
         max_queue: int = 32,
@@ -98,10 +110,14 @@ class ApiServer:
         self._plan_command_handler = plan_command_handler
         self._plan_heartbeat_handler = plan_heartbeat_handler
         self._rf_event_handler = rf_event_handler
+        self._fleet_handler = fleet_handler
         self._connect_messages = connect_messages
+        self._client_connected_hook = client_connected_hook
+        self._client_disconnected_hook = client_disconnected_hook
         self.vehicle_id = str(vehicle_id).strip() or "eis-1"
         self._audit_path = Path(audit_path) if audit_path else None
         self._audit_events: list[Dict[str, Any]] = []
+        self._chain = _build_chain(self._audit_path)
         self._load_audit()
         self._max_queue = max_queue
 
@@ -173,6 +189,7 @@ class ApiServer:
         peer = getattr(ws, "remote_address", None)
         self._clients.add(ws)
         log.info("ground client connected: %s (clients=%d)", peer, len(self._clients))
+        await self._notify_presence(self._client_connected_hook)
         try:
             await self._send_initial(ws)
             async for raw in ws:
@@ -184,6 +201,23 @@ class ApiServer:
         finally:
             self._clients.discard(ws)
             log.info("ground client disconnected: %s (clients=%d)", peer, len(self._clients))
+            await self._notify_presence(self._client_disconnected_hook)
+
+    async def _notify_presence(self, hook: Optional[PresenceHook]) -> None:
+        """Tell the orchestrator an operator session appeared/disappeared.
+
+        A raising hook must never take down the socket: presence is an input
+        to attendance mode, and a broken hook leaves the mode where it was
+        rather than flipping it.
+        """
+        if hook is None:
+            return
+        try:
+            result = hook(len(self._clients))
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception:
+            log.exception("presence hook failed")
 
     async def _on_message(self, ws: WebSocketServerProtocol, raw: Any) -> None:
         try:
@@ -226,6 +260,11 @@ class ApiServer:
             await self._dispatch_message(self._plan_heartbeat_handler, msg)
         elif mtype == "rfEvent":
             await self._dispatch_message(self._rf_event_handler, msg)
+        elif mtype == "fleet":
+            # The hub-relayed peer view (ADR D26): the ONLY cross-vehicle input.
+            # Fire-and-forget like manualInput -- there is nothing to ack, and
+            # a peer update must never block the telemetry pump.
+            await self._dispatch_message(self._fleet_handler, msg)
         else:
             # Unknown / ping / heartbeat frames: counted for liveness, ignored.
             log.debug("ignoring inbound frame type=%r", mtype)
@@ -301,7 +340,7 @@ class ApiServer:
         """Send one JSON message to every connected client (best-effort)."""
         message.setdefault("vehicleId", self.vehicle_id)
         message.setdefault("ts", _now_ms())
-        if message.get("type") == "healthEvent":
+        if message.get("type") in _AUDITED_TYPES:
             self._persist_audit(message)
         if not self._clients:
             return
@@ -363,32 +402,68 @@ class ApiServer:
             await self._send(ws, message)
 
     def _load_audit(self) -> None:
+        """Replay the recent audit tail so a reconnecting UI sees history.
+
+        Only ``healthEvent`` entries are replayed to clients (that is what the
+        UI's event log consumes); the chain itself covers every audited type.
+        Stored records carry ``prev``/``hash``, which are chain metadata and
+        not wire fields, so they are stripped before anything is sent.
+        """
         if self._audit_path is None or not self._audit_path.exists():
             return
         try:
             for line in self._audit_path.read_text(encoding="utf-8").splitlines()[-100:]:
                 item = json.loads(line)
                 if isinstance(item, dict) and item.get("type") == "healthEvent":
-                    self._audit_events.append(item)
+                    self._audit_events.append(_without_chain(item))
         except Exception:
             log.exception("could not load local health-event audit")
 
+    @property
+    def audit_head(self) -> str:
+        """Hash of the newest audit entry -- the chain's head."""
+        return self._chain.head if self._chain is not None else ""
+
+    def verify_audit_chain(self) -> bool:
+        """True when every loaded link hashes to its successor's ``prev``."""
+        return True if self._chain is None else self._chain.verify()
+
     def _persist_audit(self, event: Dict[str, Any]) -> None:
+        """Append one event to the hash-chained, append-only audit log.
+
+        The chain is what makes suppression DETECTABLE: an entry removed or
+        edited after the fact breaks the link to its successor
+        (docs/THREAT_MODEL.md A7). Every entry already carries ``vehicleId``
+        -- ``broadcast`` stamps it before we get here.
+        """
         self._audit_events.append(dict(event))
         self._audit_events = self._audit_events[-1000:]
-        if self._audit_path is None:
+        if self._chain is None:
             return
         try:
-            self._audit_path.parent.mkdir(parents=True, exist_ok=True)
-            with self._audit_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(event, separators=(",", ":")) + "\n")
+            self._chain.append(event)
         except Exception:
-            log.exception("could not persist health-event audit")
+            log.exception("could not persist the audit entry")
 
 
 # ==========================================================================
 # Small contract-shape builders
 # ==========================================================================
+def _without_chain(entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Strip the audit chain's own bookkeeping from a replayed wire message."""
+    return {k: v for k, v in entry.items() if k not in ("prev", "hash")}
+
+
+def _build_chain(path: Optional[Path]):
+    """The hash-chained audit sink; ``None`` if the security module is absent."""
+    try:
+        from ..security import AuditChain
+    except Exception:  # pragma: no cover - only on a broken install
+        log.warning("security.AuditChain unavailable; audit chaining disabled")
+        return None
+    return AuditChain(str(path) if path is not None else None)
+
+
 def _ack(command: str, success: bool, message: str, vehicle_id: str = "eis-1") -> Dict[str, Any]:
     return {
         "type": "ack",

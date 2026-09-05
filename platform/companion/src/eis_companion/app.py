@@ -24,6 +24,13 @@ asyncio tasks
   (1) telemetry pump @10 Hz : read vehicle telemetry, stamp controlSource, push.
   (2) perception+tracking   : frames -> detect -> tracker -> push 'tracking' @~10 Hz.
         (+ staging-point still-image detections spliced in while a plan flies)
+  (2b) envelope monitor @20 Hz: an INDEPENDENT coroutine fed by telemetry and
+        the verified mission record. It checks the certified corridor, the
+        altitude band, the geofence margin, NFZ buffers, the standoff floor,
+        the sortie budget and inter-vehicle separation, and routes its action
+        requests to the FAILSAFE state machine -- never to guidance. Guidance
+        can neither read nor write monitor state; the monitor cannot be
+        disabled by anything it watches.
   (3) control loop @10-20 Hz: pick the ONE active control source and emit a
         clamped body-velocity setpoint:
           manual active            -> ManualPilot setpoint (watchdog-gated)
@@ -44,6 +51,15 @@ SAFETY INVARIANTS enforced here (PRD 11)
     ground-link deadman also covers planner flight).
   * emergencyStop/disarm need no confirmation and override everything.
   * Default to the safe (hold) state on startup and on ANY exception.
+  * The envelope monitor is INDEPENDENT: its own coroutine, its own inputs,
+    its requests reaching the flight state only through control/failsafe.py.
+    Manual engage suspends its ACTIONS (a hands-on operator wins) but never
+    its evaluation or its logging -- the audit trail stays unbroken.
+  * Privileged commands (enterUnattended / exitUnattended / setGimbal) are
+    refused unless signed, fresh and unreplayed. Unattended mode is entered
+    only by a signed command and reverts the instant an operator connects.
+  * A mission record whose hash does not verify is REFUSED, not flown: the
+    monitor never runs against a record it cannot check.
 ============================================================================
 """
 from __future__ import annotations
@@ -77,6 +93,28 @@ CONTROL_HZ = 20.0
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _test_hooks_enabled(config: AppConfig) -> bool:
+    """SITL + an explicit opt-in. Every test hook is OFF by default."""
+    return bool(
+        config.sitl
+        and os.environ.get("EIS_ENABLE_TEST_HOOKS", "").lower() == "true"
+    )
+
+
+def _test_hook(config: AppConfig, name: str) -> bool:
+    """One named test hook: SITL, hooks enabled, AND the hook's own env var.
+
+    Three gates rather than one, because these hooks deliberately produce
+    unsafe behaviour (flying outside the corridor, delivering an unverified
+    plan) to prove the safety machinery catches it. Nothing here is reachable
+    on a real vehicle, and nothing here is reachable by a wire message.
+    """
+    return bool(
+        _test_hooks_enabled(config)
+        and os.environ.get(name, "").lower() == "true"
+    )
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
@@ -167,6 +205,32 @@ class Companion:
         self._thermal_observation_valid: Optional[bool] = None
         self._lidar_observation_valid: Optional[bool] = None
 
+        # ---- runtime envelope monitor (its own coroutine; see _envelope_loop)
+        # These three flags are the ONLY channel from the monitor to the flight
+        # state, and they are consumed exclusively by control/failsafe.py.
+        # Guidance never reads them; nothing writes them but _envelope_tick.
+        self._envelope_hold: bool = False
+        self._envelope_rtl: bool = False
+        self._envelope_escalate: bool = False
+        self._envelope_speed_scale: float = 1.0
+        self._envelope_decision: Any = None
+        self._envelope_signature: Optional[Tuple[str, str, str]] = None
+        self._envelope_last_publish_ms: float = 0.0
+        self._envelope_escalation_key: str = ""
+        self._peer_vehicle: Optional[Dict[str, Any]] = None
+        self._peer_received_s: float = 0.0
+        self._wind_mps: float = 0.0
+
+        # ---- attendance mode + mission record -------------------------------
+        self._mission_record: Optional[Dict[str, Any]] = None
+        self._sortie_starts_ms: List[int] = []
+        self._mode_signature: Optional[Tuple[str, bool]] = None
+
+        # ---- gimbal ---------------------------------------------------------
+        self._gimbal_reported_pitch: Optional[float] = None
+        self._gimbal_leg_index: int = -1
+        self._gimbal_last_sent: Optional[float] = None
+
         self._stop = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
 
@@ -183,6 +247,11 @@ class Companion:
         self.battery_health: Optional[Any] = None
         self.nav_health: Optional[Any] = None
         self.failsafe: Optional[Any] = None
+        self.envelope: Optional[Any] = None        # control.envelope.EnvelopeMonitor
+        self.attendance: Optional[Any] = None      # control.mode.AttendanceMachine
+        self.unattended_envelope: Optional[Any] = None
+        self.gimbal: Optional[Any] = None          # control.gimbal.GimbalController
+        self.verifier: Optional[Any] = None        # security.CommandVerifier
         self.safety: Optional[Any] = None
         self.api: Optional[Any] = None
         self.video: Optional[Any] = None
@@ -245,6 +314,13 @@ class Companion:
         self.nav_health = NavHealth()
         self.failsafe = FailsafeMachine()
 
+        # --- runtime envelope monitor + attendance mode + gimbal -----------
+        self.envelope = self._build_envelope_monitor()
+        self.attendance = self._build_attendance()
+        self.unattended_envelope = self._build_unattended_envelope()
+        self.gimbal = self._build_gimbal()
+        self.verifier = self._build_verifier()
+
         # --- safety manager (pure stdlib) ---------------------------------
         from .mavlink import SafetyManager
         self.safety = SafetyManager(self.limits)
@@ -266,9 +342,12 @@ class Companion:
             plan_command_handler=self._handle_plan_command,
             plan_heartbeat_handler=self._handle_plan_heartbeat,
             rf_event_handler=self._handle_rf_event,
+            fleet_handler=self._handle_fleet,
             connect_messages=self._connect_messages,
+            client_connected_hook=self._on_operator_connected,
+            client_disconnected_hook=self._on_operator_disconnected,
             vehicle_id=cfg.vehicle_id,
-            audit_path=str(Path(__file__).resolve().parents[3] / "logs" / "companion-audit.jsonl"),
+            audit_path=self._audit_path(),
         )
 
         # --- video stream --------------------------------------------------
@@ -286,6 +365,152 @@ class Companion:
         except Exception:
             log.exception("failed to construct ManualPilot; manual piloting disabled")
             return None
+
+    def _audit_path(self) -> str:
+        """Where this vehicle's hash-chained audit log lives.
+
+        PER VEHICLE by default (ADR D26): two companions sharing one file would
+        interleave two chains into one that verifies as neither. The historical
+        single-vehicle name is kept for ``eis-1`` so an existing log keeps its
+        continuity.
+        """
+        configured = str(self.config.security.audit_path or "").strip()
+        if configured:
+            return configured
+        vehicle = str(self.config.vehicle_id or "eis-1")
+        name = (
+            "companion-audit.jsonl" if vehicle == "eis-1"
+            else f"companion-audit-{vehicle}.jsonl"
+        )
+        return str(Path(__file__).resolve().parents[3] / "logs" / name)
+
+    def _build_envelope_monitor(self) -> Optional[Any]:
+        """The runtime envelope monitor (control/envelope.py).
+
+        Built from the CONFIG-FLOORED thresholds and the site containment
+        geometry. It gets no reference to guidance, the planner, the tracker
+        or the API -- the orchestrator hands it samples and takes back a
+        decision, and that is the whole of its coupling to the rest of the
+        system.
+        """
+        try:
+            from .control.envelope import EnvelopeLimits, EnvelopeMonitor
+        except Exception:
+            log.exception("control.envelope unavailable; envelope monitoring disabled")
+            return None
+        e = self.config.envelope
+        try:
+            monitor = EnvelopeMonitor(EnvelopeLimits(
+                standoff_floor_m=self.limits.min_standoff,
+                geofence_margin_m=e.geofence_margin_m,
+                nfz_buffer_m=e.nfz_buffer_m,
+                separation_m=e.separation_m,
+                separation_stale_m=e.separation_stale_m,
+                peer_stale_s=e.peer_stale_s,
+                peer_hold_s=e.peer_hold_s,
+                escalate_after_s=e.escalate_after_s,
+                breach_multiple=e.breach_multiple,
+                hysteresis_m=e.hysteresis_m,
+                recovery_s=e.recovery_s,
+            ))
+        except Exception:
+            log.exception("failed to construct EnvelopeMonitor")
+            return None
+        monitor.set_geometry(self._site_geometry())
+        return monitor
+
+    def _site_geometry(self) -> Any:
+        """Convert the loaded Site into the monitor's plain-data geometry.
+
+        site.py does file I/O and lives outside control/, so the pure monitor
+        never sees it -- this is the one place the two shapes meet.
+        """
+        from .control.envelope import MonitoredZone, SiteGeometry
+        if self.site is None:
+            return SiteGeometry(nfz_buffer_m=self.config.envelope.nfz_buffer_m)
+        zones = tuple(
+            MonitoredZone(
+                name=zone.name,
+                polygon=tuple(tuple(v) for v in zone.polygon),
+                ceiling_m=float(zone.ceiling_m),
+            )
+            for zone in getattr(self.site, "nfz", ())
+        )
+        return SiteGeometry(
+            geofence=tuple(tuple(v) for v in getattr(self.site, "geofence", ())),
+            nfz=zones,
+            # The site file may only TIGHTEN the buffer: the config floor wins
+            # whenever it is larger.
+            nfz_buffer_m=max(
+                float(getattr(self.site, "nfz_buffer_m", 0.0)),
+                float(self.config.envelope.nfz_buffer_m),
+            ),
+        )
+
+    def _build_attendance(self) -> Optional[Any]:
+        """The attended/unattended state machine (control/mode.py).
+
+        Starts ATTENDED with no operator recorded: the safe default is that
+        nobody has authorised unattended flight, and only a signed command
+        changes that.
+        """
+        try:
+            from .control.mode import AttendanceMachine
+        except Exception:
+            log.exception("control.mode unavailable; attendance mode disabled")
+            return None
+        return AttendanceMachine(now_ms=_now_ms(), operator_present=False)
+
+    def _build_unattended_envelope(self) -> Optional[Any]:
+        """UNATTENDED_ENVELOPE, tightened by config (never widened)."""
+        try:
+            from .control.mode import UnattendedEnvelope
+        except Exception:
+            return None
+        u = self.config.unattended
+        return UnattendedEnvelope().tightened(
+            min_alt_m=u.min_alt_m,
+            max_alt_m=u.max_alt_m,
+            max_laps=u.max_laps,
+            max_hold_s=u.max_hold_s,
+            max_sorties_per_hour=u.max_sorties_per_hour,
+            max_wind_mps=u.max_wind_mps,
+            profiles=u.profiles,
+        )
+
+    def _build_gimbal(self) -> Optional[Any]:
+        """The pure pointing controller (control/gimbal.py). No MAVLink here."""
+        if not self.config.gimbal.enabled:
+            return None
+        try:
+            from .control.gimbal import GimbalController, GimbalLimits
+        except Exception:
+            log.exception("control.gimbal unavailable; gimbal pointing disabled")
+            return None
+        g = self.config.gimbal
+        try:
+            return GimbalController(GimbalLimits(
+                min_pitch_deg=g.pitch_min_deg,
+                max_pitch_deg=g.pitch_max_deg,
+                slew_rate_dps=g.slew_rate_dps,
+            ))
+        except Exception:
+            log.exception("failed to construct GimbalController")
+            return None
+
+    def _build_verifier(self) -> Optional[Any]:
+        """The signed-command verifier (per vehicle: its own key env var)."""
+        try:
+            from .security import CommandVerifier
+        except Exception:
+            log.exception("security.CommandVerifier unavailable")
+            return None
+        s = self.config.security
+        return CommandVerifier.from_env(
+            s.session_key_env,
+            max_age_ms=s.max_command_age_ms,
+            require_all=s.require_signed_commands,
+        )
 
     def _build_vehicle(self) -> Optional[Any]:
         cfg = self.config
@@ -513,11 +738,14 @@ class Companion:
             except Exception:
                 log.exception("video stream failed to start (non-fatal)")
 
-        # Launch the task graph.
+        # Launch the task graph. The envelope monitor is its OWN task: it must
+        # keep evaluating even if perception stalls or the control loop is
+        # held, and it must not be schedulable by anything it watches.
         self._tasks = [
             asyncio.create_task(self._telemetry_loop(), name="telemetry"),
             asyncio.create_task(self._perception_loop(), name="perception"),
             asyncio.create_task(self._control_loop(), name="control"),
+            asyncio.create_task(self._envelope_loop(), name="envelope"),
         ]
         log.info("companion running (sitl=%s)", self.config.sitl)
         await self._status("info", "Companion online")
@@ -654,8 +882,32 @@ class Companion:
                 }
                 if self._vehicle_state.armed else None
             )
+        gimbal_pitch = self._gimbal_pitch_for_telemetry()
+        if gimbal_pitch is not None:
+            # Optional in the contract: an airframe with no commandable mount
+            # omits the field rather than reporting a fictional 0.
+            telem["gimbal"] = {"pitchDeg": round(float(gimbal_pitch), 2)}
         if self.api is not None:
             await self.api.push_telemetry(telem)
+
+    def _gimbal_pitch_for_telemetry(self) -> Optional[float]:
+        """Reported mount pitch, falling back to the commanded angle.
+
+        Preference order is deliberate: what the mount SAYS it is doing beats
+        what we asked for, because the gap between the two is the interesting
+        failure. With no mount and no controller there is nothing to report.
+        """
+        if self.vehicle is not None and hasattr(self.vehicle, "gimbal_pitch_deg"):
+            try:
+                reported = self.vehicle.gimbal_pitch_deg()
+            except Exception:
+                reported = None
+            if reported is not None and math.isfinite(float(reported)):
+                self._gimbal_reported_pitch = float(reported)
+                return float(reported)
+        if self.gimbal is not None:
+            return float(self.gimbal.commanded_pitch_deg)
+        return self._gimbal_reported_pitch
 
     async def _health_tick(
         self, telem: Dict[str, Any], *, home_distance_m: Optional[float] = None
@@ -796,6 +1048,9 @@ class Companion:
         wind = float(raw.get("wind_mps", 0.0))
         if self._faults["wind"]:
             wind = max(13.0, self._fault_values.get("wind", 13.0))
+        # Kept for the UNATTENDED_ENVELOPE check, whose wind limit is half the
+        # attended one (ADR D23) -- nobody can take manual control up there.
+        self._wind_mps = wind
         if wind > 12.0:
             self._wind_above_since_ms = self._wind_above_since_ms or _now_ms()
         else:
@@ -860,6 +1115,12 @@ class Companion:
             ),
             soc_degraded=bool(getattr(bat, "degraded_estimate", False)),
             manual_engaged=False,
+            # The envelope monitor's ONLY route into the flight state. It runs
+            # in its own coroutine and writes these three flags; nothing in
+            # guidance or the planner can read, set or clear them.
+            envelope_hold=bool(self._envelope_hold),
+            envelope_rtl=bool(self._envelope_rtl),
+            envelope_escalate=bool(self._envelope_escalate),
         )
         if self.failsafe is not None:
             self._failsafe_decision = self.failsafe.evaluate(signals)
@@ -929,6 +1190,17 @@ class Companion:
             "max_sortie_s": self.config.battery.max_sortie_s,
             "dispatch_min_soc_pct": self.config.battery.dispatch_min_soc_pct,
         }, self._readiness_message()]
+        if self.attendance is not None:
+            # A reconnecting UI must be told the attendance mode outright --
+            # it is not inferable from telemetry, and guessing "attended"
+            # would be the dangerous guess.
+            messages.append(
+                self.attendance.message(self.config.vehicle_id, _now_ms())
+            )
+        if self._envelope_decision is not None:
+            messages.append(self._envelope_decision.to_message(
+                self.config.vehicle_id, _now_ms()
+            ))
         for component, healthy in (
             ("camera", self._camera_observation_valid),
             ("thermal", self._thermal_observation_valid),
@@ -970,6 +1242,84 @@ class Companion:
 
     async def _handle_plan_heartbeat(self, msg: Dict[str, Any]) -> None:
         self._last_planner_heartbeat_ms = _now_ms()
+
+    # ---- fleet (the ONLY cross-vehicle input, ADR D26) --------------------
+    async def _handle_fleet(self, msg: Dict[str, Any]) -> None:
+        """Consume one hub-relayed fleet frame and keep the peer position.
+
+        Star topology: there is no vehicle-to-vehicle radio and no peer-to-peer
+        negotiation, so this frame is the only way this vehicle learns about
+        the other one -- which is exactly what makes the staleness rule
+        enforceable (the age is measurable because there is one path).
+
+        Malformed or self-only frames leave the previous peer in place and
+        therefore let it AGE, which widens separation and eventually holds.
+        Silently forgetting a peer would do the opposite.
+        """
+        vehicles = msg.get("vehicles")
+        if not isinstance(vehicles, list):
+            return
+        for entry in vehicles:
+            if not isinstance(entry, dict):
+                continue
+            vid = str(entry.get("vehicleId", ""))
+            if not vid or vid == self.config.vehicle_id:
+                continue
+            position = entry.get("position") or {}
+            try:
+                lat = float(position.get("lat"))
+                lon = float(position.get("lon"))
+            except (TypeError, ValueError):
+                continue
+            if not (math.isfinite(lat) and math.isfinite(lon)):
+                continue
+            self._peer_vehicle = {
+                "vehicleId": vid,
+                "lat": lat,
+                "lon": lon,
+                "relAlt": float(position.get("relAlt", 0.0) or 0.0),
+            }
+            self._peer_received_s = time.monotonic()
+            return
+
+    # ---- operator presence -> attendance mode (ADR D23) ------------------
+    async def _on_operator_connected(self, client_count: int) -> None:
+        """An operator session appeared: revert to attended, immediately.
+
+        No command, no confirmation, no signature: moving toward supervision
+        is always allowed and always automatic.
+        """
+        if self.attendance is None:
+            return
+        transition = self.attendance.operator_connected(_now_ms())
+        if transition.changed:
+            await self._status(
+                "warning", "operator connected: reverted to attended mode"
+            )
+        await self._publish_mode(force=transition.changed)
+
+    async def _on_operator_disconnected(self, client_count: int) -> None:
+        """The last operator session went away. The mode does NOT change.
+
+        Losing the operator makes the vehicle unsupervised, not authorised:
+        only a signed enterUnattended does that.
+        """
+        if self.attendance is None or client_count > 0:
+            return
+        self.attendance.operator_disconnected(_now_ms())
+        await self._publish_mode()
+
+    async def _publish_mode(self, *, force: bool = False) -> None:
+        """Emit the contract 'mode' message when attendance state changes."""
+        if self.api is None or self.attendance is None:
+            return
+        signature = (self.attendance.mode, self.attendance.operator_present)
+        if not force and signature == self._mode_signature:
+            return
+        self._mode_signature = signature
+        await self.api.broadcast(
+            self.attendance.message(self.config.vehicle_id, _now_ms())
+        )
 
     async def _handle_plan_command(self, msg: Dict[str, Any]) -> Dict[str, Any]:
         request_id = str(msg.get("requestId", ""))
@@ -1182,6 +1532,193 @@ class Companion:
         }
 
     # ======================================================================
+    # Task 2b: runtime envelope monitor @ 20 Hz -- INDEPENDENT of guidance
+    # ======================================================================
+    async def _envelope_loop(self) -> None:
+        """Run the monitor on its own clock, whatever else is happening.
+
+        A tick that raises does NOT leave the last verdict standing: if the
+        monitor cannot evaluate, we cannot claim to be inside the envelope, so
+        the safe answer is a hold request. That is the same "default to the
+        safe state on any exception" rule the control loop follows, applied to
+        the component whose whole job is knowing where the edges are.
+        """
+        period = 1.0 / max(1.0, float(self.config.envelope.hz))
+        while not self._stop.is_set():
+            t0 = time.monotonic()
+            try:
+                await self._envelope_tick()
+            except Exception:
+                log.exception("envelope tick failed -> request hold")
+                self._envelope_hold = True
+                self._envelope_rtl = False
+                self._envelope_speed_scale = 0.0
+                await self._health_event(
+                    "envelope", "unavailable", "envelope monitor tick failed"
+                )
+            await self._sleep_remaining(t0, period)
+
+    async def _envelope_tick(self) -> None:
+        """One monitor evaluation: sample -> decision -> failsafe request + wire."""
+        monitor = self.envelope
+        if monitor is None:
+            return
+        from .control.envelope import EnvelopeSample
+
+        st = self._vehicle_state
+        bat = self._battery_snapshot
+        sample = EnvelopeSample(
+            t_s=time.monotonic(),
+            lat=st.lat,
+            lon=st.lon,
+            rel_alt_m=st.relAlt,
+            airborne=bool(st.airborne),
+            standoff_m=self._observed_standoff_m(),
+            sortie_elapsed_s=float(getattr(bat, "elapsed_sortie_s", 0.0) or 0.0),
+            sortie_cap_s=float(getattr(bat, "cap_s", math.inf) or math.inf),
+        )
+        # A hands-on operator preempts everything: the monitor keeps evaluating
+        # and logging (the record must not go dark mid-flight) but its action
+        # requests are suspended until manual is released.
+        decision = monitor.update(
+            sample, peer=self._peer_sample(), suspended=bool(self._manual_engaged)
+        )
+        self._envelope_decision = decision
+        self._apply_envelope_decision(decision)
+        await self._publish_envelope(decision)
+
+    def _observed_standoff_m(self) -> float:
+        """Measured distance to the observed subject, or ``inf`` if none.
+
+        ``inf`` means "the standoff constraint does not apply this tick" --
+        deliberately NOT 0, which would read as a breach every time the tracker
+        loses lock.
+        """
+        result = self._latest_tracking
+        if result is None:
+            return math.inf
+        distance = getattr(result, "estimated_distance", None)
+        if distance is None:
+            return math.inf
+        try:
+            value = float(distance)
+        except (TypeError, ValueError):
+            return math.inf
+        return value if math.isfinite(value) and value > 0.0 else math.inf
+
+    def _peer_sample(self) -> Optional[Any]:
+        """The peer vehicle from the last fleet message (ADR D26).
+
+        The age is measured from OUR receipt of the fleet frame, which is the
+        only path peer state takes -- there is no vehicle-to-vehicle radio, so
+        there is no second, unobservable source to disagree with.
+        """
+        from .control.envelope import PeerSample
+        peer = self._peer_vehicle
+        if not peer:
+            return None
+        return PeerSample(
+            vehicle_id=str(peer.get("vehicleId", "")),
+            lat=float(peer.get("lat", 0.0)),
+            lon=float(peer.get("lon", 0.0)),
+            rel_alt_m=float(peer.get("relAlt", 0.0)),
+            age_s=max(0.0, time.monotonic() - self._peer_received_s),
+            valid=True,
+        )
+
+    def _apply_envelope_decision(self, decision: Any) -> None:
+        """Route the monitor's request to the failsafe machine. Nothing else.
+
+        These flags are read ONLY by ``_health_tick`` when it builds
+        ``FailsafeSignals``. There is no path from here to guidance, the
+        planner or a setpoint: the monitor constrains, it never guides.
+        """
+        if getattr(decision, "suspended", False):
+            self._envelope_hold = False
+            self._envelope_rtl = False
+            self._envelope_escalate = False
+            self._envelope_speed_scale = 1.0
+            return
+        action = decision.wire_action
+        self._envelope_rtl = action == "rtl"
+        self._envelope_hold = action == "hold"
+        self._envelope_escalate = bool(decision.escalated)
+        self._envelope_speed_scale = float(decision.speed_scale)
+
+    async def _publish_envelope(self, decision: Any) -> None:
+        """Emit 'envelope' at ~5 Hz while airborne, plus every state change.
+
+        A change is published immediately whatever the rate: an operator
+        should see a breach the tick it happens, not up to 200 ms later.
+        """
+        if self.api is None:
+            return
+        signature = decision.signature
+        changed = signature != self._envelope_signature
+        now = _now_ms()
+        period_ms = 1000.0 / max(0.5, float(self.config.envelope.publish_hz))
+        due = (
+            self._vehicle_state.airborne
+            and now - self._envelope_last_publish_ms >= period_ms
+        )
+        if changed:
+            self._envelope_signature = signature
+            await self._on_envelope_change(decision)
+        if changed or due:
+            self._envelope_last_publish_ms = now
+            await self.api.broadcast(
+                decision.to_message(self.config.vehicle_id, now)
+            )
+
+    async def _on_envelope_change(self, decision: Any) -> None:
+        """Health event on every envelope state change; escalate on persistence."""
+        detail = decision.detail or decision.constraint or "envelope nominal"
+        suffix = " (actions suspended: manual control)" if decision.suspended else ""
+        await self._health_event(
+            "envelope",
+            decision.state if not decision.escalated else "escalated",
+            f"{detail}{suffix}",
+        )
+        if decision.escalated:
+            key = f"{decision.constraint}:{decision.state}"
+            if key != self._envelope_escalation_key:
+                self._envelope_escalation_key = key
+                await self._escalate_envelope(decision)
+        elif decision.state == "in_envelope":
+            self._envelope_escalation_key = ""
+
+    async def _escalate_envelope(self, decision: Any) -> None:
+        """Raise the contract ``escalation`` for a breach that persisted 5 s.
+
+        An escalation is a message to humans and NEVER a change of flight
+        state: the hold or RTL underneath it was decided by the companion and
+        stays decided by the companion whether or not anyone reads this.
+        """
+        if self.api is None:
+            return
+        record = self._mission_record or {}
+        await self.api.broadcast({
+            "type": "escalation",
+            "ts": _now_ms(),
+            "vehicleId": self.config.vehicle_id,
+            "missionId": str(record.get("missionId", "")),
+            "channel": "console",
+            "payload": {
+                "kind": "envelope_breach",
+                "constraint": decision.constraint,
+                "state": decision.state,
+                "action": decision.wire_action,
+                "marginM": decision.wire_margin_m,
+                "detail": decision.detail,
+                "durationS": round(float(decision.breach_duration_s), 1),
+                "mode": self._attendance_mode(),
+            },
+        })
+
+    def _attendance_mode(self) -> str:
+        return str(getattr(self.attendance, "mode", "attended"))
+
+    # ======================================================================
     # Task 3: control loop @ 10-20 Hz -- the ONE active control source wins
     # ======================================================================
     async def _control_loop(self) -> None:
@@ -1200,6 +1737,11 @@ class Companion:
             await self._sleep_remaining(t0, period)
 
     async def _control_tick(self, dt: float) -> None:
+        # The mount is pointed every tick, whatever the flight state: where the
+        # camera looks is never a control input, so it is decided here and
+        # cannot feed back into guidance.
+        await self._gimbal_tick(dt)
+
         # E-stop latch: while latched, never command motion.
         if self._estop_latched:
             await self._send_hold("emergency stop latched")
@@ -1264,6 +1806,16 @@ class Companion:
             return
         self._last_applied_failsafe = "none"
 
+        # SITL-only, triple-gated: command motion straight out of the certified
+        # corridor to prove the monitor is independent of guidance. It sits
+        # AFTER the failsafe branches above precisely so the monitor's hold/RTL
+        # wins over it -- that suppression IS the proof.
+        if self._guidance_override_active():
+            await self._send_setpoint(self._clamp_setpoint(
+                VelocitySetpoint(vx=self.limits.max_speed, valid=True)
+            ))
+            return
+
         sp = VelocitySetpoint.hold()
 
         if self._planner_engaged and self._planner_tracking_tool and self._guidance_preconditions_ok():
@@ -1287,6 +1839,86 @@ class Companion:
         """Guidance only runs armed + airborne + GUIDED (PRD 6.1)."""
         st = self._vehicle_state
         return bool(st.armed and st.airborne and str(st.mode).upper() == "GUIDED")
+
+    def _guidance_override_active(self) -> bool:
+        """EIS_TEST_GUIDANCE_OVERRIDE: the monitor-independence demo hook.
+
+        OFF by default and unreachable from the wire: it needs SITL,
+        EIS_ENABLE_TEST_HOOKS=true AND its own env var, and there is no command
+        that sets any of them. It only bites while a mission is actually being
+        flown, so it cannot move a parked vehicle.
+        """
+        if not _test_hook(self.config, "EIS_TEST_GUIDANCE_OVERRIDE"):
+            return False
+        return bool(
+            (self._planner_engaged or self._tracking_engaged)
+            and self._guidance_preconditions_ok()
+        )
+
+    # ---- gimbal -----------------------------------------------------------
+    async def _gimbal_tick(self, dt: float) -> None:
+        """Point the mount: auto-geometry during observation legs, or override.
+
+        The auto target is pure trigonometry from the orbit centre's ground
+        distance and our altitude (control/gimbal.py). No model is consulted
+        and no plan field selects the angle -- an LLM cannot influence where
+        the camera looks any more than it can influence where the aircraft
+        goes. A new leg clears an operator override.
+        """
+        if self.gimbal is None:
+            return
+        leg_index = int(getattr(self.planner, "tool_index", -1))
+        if self._planner_engaged and leg_index != self._gimbal_leg_index:
+            self._gimbal_leg_index = leg_index
+            self.gimbal.clear_override()
+        elif not self._planner_engaged:
+            self._gimbal_leg_index = -1
+
+        if not self.gimbal.override_active:
+            self.gimbal.set_auto_target(self._auto_gimbal_target())
+
+        pitch = self.gimbal.update(dt)
+        await self._send_gimbal(pitch)
+
+    def _auto_gimbal_target(self) -> Optional[float]:
+        """Deterministic pointing angle for the active observation leg.
+
+        Returns ``None`` (leave the mount where it is) unless a plan is flying
+        an orbit: transit legs have nothing to look at, and swinging the mount
+        on every goto would only smear the imagery that matters.
+        """
+        if not self._planner_engaged or self.planner is None:
+            return None
+        centre = getattr(self.planner, "current_observation_center", None)
+        if not centre:
+            return None
+        from .control.gimbal import auto_pitch_from_ground_deg
+        ground = _great_circle_distance_m(
+            self._vehicle_state.lat, self._vehicle_state.lon, centre[0], centre[1]
+        )
+        if not math.isfinite(ground):
+            return None
+        return auto_pitch_from_ground_deg(
+            ground, self._vehicle_state.relAlt, self.gimbal.limits
+        )
+
+    async def _send_gimbal(self, pitch_deg: float) -> None:
+        """Send the mount command, throttled to actual movement."""
+        if self.vehicle is None or not hasattr(self.vehicle, "set_gimbal_pitch"):
+            return
+        if (
+            self._gimbal_last_sent is not None
+            and abs(pitch_deg - self._gimbal_last_sent) < 0.25
+        ):
+            return
+        self._gimbal_last_sent = pitch_deg
+        try:
+            await _maybe_await(self.vehicle.set_gimbal_pitch(
+                pitch_deg,
+                use_gimbal_manager=bool(self.config.gimbal.use_gimbal_manager),
+            ))
+        except Exception:
+            log.exception("gimbal pitch command failed")
 
     def _guidance_setpoint(self, dt: float) -> VelocitySetpoint:
         if self.guidance is None or self._latest_tracking is None:
@@ -1344,12 +1976,14 @@ class Companion:
             return None
         if kind == "done":
             self._planner_engaged = False
+            self._disarm_envelope()
             self._set_control_source(ControlSource.AUTO.value)
             await self._status("info", "mission plan complete -> hold")
             await self._send_hold("plan complete")
             return None
         # idle / unexpected while engaged: release and hold (safe default).
         self._planner_engaged = False
+        self._disarm_envelope()
         self._set_control_source(ControlSource.AUTO.value)
         return VelocitySetpoint.hold()
 
@@ -1412,14 +2046,24 @@ class Companion:
         """Final hard clamp of every axis to Limits (belt-and-braces).
 
         Guidance / ManualPilot already clamp, but the orchestrator re-asserts the
-        envelope so no component can ever push the FC past it."""
+        envelope so no component can ever push the FC past it.
+
+        The envelope monitor's slow-down request is applied HERE, at the last
+        clamp, and not inside guidance. That placement is the point: guidance
+        neither reads nor writes monitor state, and the orchestrator -- whose
+        job is enforcing invariants between components -- scales what guidance
+        already produced. The scale never exceeds 1.0, so it can only tighten.
+        """
         if not sp.valid:
             return VelocitySetpoint.hold()
         L = self.limits
+        scale = min(1.0, max(0.0, float(self._envelope_speed_scale)))
+        speed_cap = L.max_speed * scale
+        climb_cap = L.max_climb_rate * scale
         return VelocitySetpoint(
-            vx=_clamp(sp.vx, -L.max_speed, L.max_speed),
-            vy=_clamp(sp.vy, -L.max_speed, L.max_speed),
-            vz=_clamp(sp.vz, -L.max_climb_rate, L.max_climb_rate),
+            vx=_clamp(sp.vx, -speed_cap, speed_cap),
+            vy=_clamp(sp.vy, -speed_cap, speed_cap),
+            vz=_clamp(sp.vz, -climb_cap, climb_cap),
             yaw_rate=_clamp(sp.yaw_rate, -L.max_yaw_rate, L.max_yaw_rate),
             valid=True,
         )
@@ -1463,6 +2107,7 @@ class Companion:
         self._planner_engaged = False
         if self.planner is not None:
             _safe_call(getattr(self.planner, "reset", None))
+        self._disarm_envelope()
         self._control_source = ControlSource.AUTO.value
 
     async def _upload_site_fence(self) -> None:
@@ -1504,11 +2149,57 @@ class Companion:
         also guards, but we keep our own try so the ack message is meaningful)."""
         command = str(msg.get("command", ""))
         params = msg.get("params") or {}
+        verdict = await self._verify_command(msg, command)
+        if verdict is not None:
+            return verdict
         try:
             ok, message = await self._dispatch(command, params)
         except Exception as exc:
             log.exception("command %r failed", command)
             ok, message = False, f"{command} failed: {exc}"
+        return {
+            "type": "ack",
+            "ts": _now_ms(),
+            "vehicleId": self.config.vehicle_id,
+            "command": command,
+            "success": bool(ok),
+            "message": message,
+        }
+
+    async def _verify_command(
+        self, msg: Dict[str, Any], command: str
+    ) -> Optional[Dict[str, Any]]:
+        """Refuse unsigned, replayed or stale privileged commands.
+
+        Returns a failed CommandAck to send back, or ``None`` to continue to
+        dispatch. Unsigned / invalid / replayed / stale are four DIFFERENT
+        refusal reasons because they are four different attacks, and every
+        rejected privileged command is itself reportable -- an attempt is the
+        event (docs/THREAT_MODEL.md A6/A7), so it lands in the hash-chained
+        audit as a healthEvent.
+        """
+        verifier = self.verifier
+        if verifier is None:
+            # No verifier at all: only privileged commands are affected, and
+            # they fail closed rather than falling through unverified.
+            from .security import PRIVILEGED_COMMANDS
+            if command in PRIVILEGED_COMMANDS:
+                await self._health_event(
+                    "link", "refused", f"{command} refused: no command verifier"
+                )
+                return self._ack(command, False, f"{command} refused: no verifier")
+            return None
+        result = verifier.verify(msg)
+        if result.ok:
+            return None
+        await self._health_event(
+            "link", f"refused_{result.failure or 'unsigned'}",
+            f"{command}: {result.reason}",
+        )
+        await self._status("warning", f"{command} refused: {result.reason}")
+        return self._ack(command, False, f"{command} refused: {result.reason}")
+
+    def _ack(self, command: str, ok: bool, message: str) -> Dict[str, Any]:
         return {
             "type": "ack",
             "ts": _now_ms(),
@@ -1529,6 +2220,17 @@ class Companion:
             return await self._continue_mission()
         if command == "testFault":
             return await self._test_fault(params)
+
+        # ---- privileged transitions (already signature-checked) ------------
+        # These stay available during a failsafe: pointing the camera and
+        # returning to supervision are both things an operator may need while
+        # the vehicle is held.
+        if command == "enterUnattended":
+            return await self._enter_unattended(params)
+        if command == "exitUnattended":
+            return await self._exit_unattended(params)
+        if command == "setGimbal":
+            return await self._set_gimbal(params)
         # Recovery, operator takeover, and explicit return commands remain
         # available during a failsafe. New autonomous work does not.
         decision = self._failsafe_decision
@@ -1700,6 +2402,67 @@ class Companion:
         # auto-hold in GUIDED (zero-velocity); optionally LOITER if available.
         return True, "manual control released -> auto hold"
 
+    # ---- attendance mode (signed) ----------------------------------------
+    async def _enter_unattended(self, params: Dict[str, Any]):
+        """enterUnattended: the ONLY way into unattended mode, and it is signed.
+
+        The signature was already checked in ``_verify_command`` -- reaching
+        here means the envelope was authentic, fresh and unreplayed. An
+        operator being connected still blocks entry: unattended means nobody
+        is watching, and someone is.
+        """
+        if self.attendance is None:
+            return False, "attendance mode unavailable"
+        operator = str(params.get("operatorId", "") or "")
+        transition = self.attendance.enter_unattended(
+            signature_ok=True, now_ms=_now_ms(), operator_id=operator,
+        )
+        if not transition.ok:
+            await self._health_event("link", "refused", transition.reason)
+            return False, transition.reason
+        await self._health_event(
+            "link", "unattended", f"unattended mode entered by {operator or 'operator'}"
+        )
+        await self._publish_mode(force=True)
+        return True, transition.reason
+
+    async def _exit_unattended(self, params: Dict[str, Any]):
+        """exitUnattended: back to supervision. Always permitted."""
+        if self.attendance is None:
+            return False, "attendance mode unavailable"
+        operator = str(params.get("operatorId", "") or "")
+        transition = self.attendance.exit_unattended(
+            signature_ok=True, now_ms=_now_ms(), operator_id=operator,
+        )
+        if transition.changed:
+            await self._health_event(
+                "link", "attended", f"attended mode restored by {operator or 'operator'}"
+            )
+            await self._publish_mode(force=True)
+        return True, transition.reason
+
+    async def _set_gimbal(self, params: Dict[str, Any]):
+        """setGimbal: hold a pitch until the next leg (signed, then clamped).
+
+        A valid signature buys the right to ASK; it does not buy travel past
+        the mechanical envelope, so the angle is clamped exactly like every
+        other operator input.
+        """
+        if self.gimbal is None:
+            return False, "gimbal unavailable"
+        try:
+            requested = float(params.get("pitchDeg"))
+        except (TypeError, ValueError):
+            return False, "setGimbal requires params.pitchDeg"
+        if not math.isfinite(requested):
+            return False, "setGimbal pitchDeg must be finite"
+        applied = self.gimbal.set_override(requested)
+        clamped = abs(applied - requested) > 1e-6
+        note = " (clamped)" if clamped else ""
+        return True, (
+            f"gimbal pitch {applied:.1f} deg{note}; holds until the next leg"
+        )
+
     async def _execute_plan(self, params: Dict[str, Any]):
         """executePlan: validate params.plan through PlannerExecutor.load_plan
         (the companion-side INDEPENDENT validator the trust layer requires --
@@ -1744,6 +2507,25 @@ class Companion:
         if not isinstance(plan, dict):
             return False, "executePlan requires params.plan (MissionPlan)"
 
+        # The mission record is what the monitor is measured against, so it is
+        # checked BEFORE anything is loaded: a record whose hash does not match
+        # its content is refused, never flown (FAILURE_MODES, "Monitor input
+        # stale -- mission record hash mismatch").
+        record = params.get("missionRecord")
+        ok, message = await self._verify_dispatch_record(record)
+        if not ok:
+            return False, message
+
+        # Unattended dispatch must fit UNATTENDED_ENVELOPE (ADR D23). Outside
+        # it the answer is REFUSE -- never a clamp into range -- and the
+        # refusal escalates, because an unattended request the system declined
+        # is precisely what a human needs to see.
+        ok, message = await self._check_unattended_dispatch(plan, params)
+        if not ok:
+            return False, message
+
+        plan = self._maybe_corrupt_plan(plan)
+
         # planner_exec resolves plan/leg profiles via the config-clamped
         # profile_speeds mapping it was constructed with; a rejected load
         # leaves any previously armed plan untouched.
@@ -1776,8 +2558,178 @@ class Companion:
 
         self._planner_engaged = True
         self._set_control_source(ControlSource.PLANNER.value)
+        await self._arm_envelope(plan, params.get("missionRecord"))
         await self._status("info", f"mission plan engaged: {message}")
         return True, message
+
+    # ---- dispatch-time trust checks --------------------------------------
+    async def _verify_dispatch_record(
+        self, record: Optional[Any]
+    ) -> Tuple[bool, str]:
+        """Verify the mission record's hash chain before anything is dispatched.
+
+        A record that declares a hash must match its own content; a mismatch
+        REFUSES the dispatch and raises a health event, because the monitor
+        would otherwise be measuring the flight against a record nobody can
+        vouch for. A dispatch with no record at all is still accepted (the
+        ground half stamps records incrementally), and that is the only reason
+        this is not simply mandatory.
+        """
+        try:
+            from .security import verify_mission_record
+        except Exception:
+            return True, ""
+        check = verify_mission_record(record, required=False)
+        if check.ok:
+            return True, ""
+        await self._health_event("envelope", "refused", check.reason)
+        await self._status("critical", f"dispatch refused: {check.reason}")
+        return False, f"plan refused: {check.reason}"
+
+    async def _check_unattended_dispatch(
+        self, plan: Dict[str, Any], params: Dict[str, Any]
+    ) -> Tuple[bool, str]:
+        """Gate an unattended dispatch on UNATTENDED_ENVELOPE (ADR D23)."""
+        if self.attendance is None or not self.attendance.unattended:
+            return True, ""
+        if self.unattended_envelope is None:
+            return False, "plan refused: unattended envelope unavailable"
+        from .control.mode import DispatchRequest, check_unattended
+
+        alt, laps, hold_s = _plan_envelope_shape(plan)
+        request = DispatchRequest(
+            profile=str(plan.get("profile", "")),
+            altitude_m=alt,
+            laps=laps,
+            hold_s=hold_s,
+            inside_perimeter=self._plan_inside_perimeter(plan),
+            nav_source=str(getattr(self._nav_snapshot, "source", "gps")),
+            rf_interference=bool(
+                self._faults["rf_interference"]
+                or (
+                    self._last_rf_interference_ms
+                    and _now_ms() - self._last_rf_interference_ms <= 60_000
+                )
+            ),
+            hostile_drone=bool(self._faults["hostile_drone"]),
+            night=bool(params.get("night", False)),
+            thermal_healthy=not (
+                self._faults["thermal"] or self._thermal_observation_valid is False
+            ),
+            wind_mps=float(self._wind_mps),
+            recent_sortie_starts_ms=tuple(self._sortie_starts_ms),
+            now_ms=_now_ms(),
+        )
+        check = check_unattended(request, self.unattended_envelope)
+        if check.ok:
+            return True, ""
+        reason = f"unattended dispatch refused: {check.reason}"
+        await self._health_event("envelope", "refused", reason)
+        await self._escalate_unattended_refusal(check)
+        return False, reason
+
+    async def _escalate_unattended_refusal(self, check: Any) -> None:
+        """Every envelope refusal escalates -- there is nobody there to tell."""
+        if self.api is None:
+            return
+        await self.api.broadcast({
+            "type": "escalation",
+            "ts": _now_ms(),
+            "vehicleId": self.config.vehicle_id,
+            "missionId": str((self._mission_record or {}).get("missionId", "")),
+            "channel": "console",
+            "payload": {
+                "kind": "unattended_envelope_refusal",
+                "violations": list(check.violations),
+                "mode": self._attendance_mode(),
+            },
+        })
+
+    def _plan_inside_perimeter(self, plan: Dict[str, Any]) -> bool:
+        """Does every coordinate in the plan lie inside the site perimeter?
+
+        With no site model the answer is False, not True: "we cannot check"
+        must never read as "it is fine" for an unattended dispatch.
+        """
+        if self.site is None or not getattr(self.site, "perimeter", None):
+            return False
+        from .control.envelope import point_in_polygon
+        perimeter = [tuple(v) for v in self.site.perimeter]
+        for tool in plan.get("tools") or ():
+            if not isinstance(tool, dict):
+                continue
+            lat, lon = tool.get("lat"), tool.get("lon")
+            if lat is None or lon is None:
+                continue
+            try:
+                point = (float(lat), float(lon))
+            except (TypeError, ValueError):
+                return False
+            if not point_in_polygon(point, perimeter):
+                return False
+        return True
+
+    def _maybe_corrupt_plan(self, plan: Dict[str, Any]) -> Dict[str, Any]:
+        """EIS_TEST_BAD_PLAN: deliver a NON-planner plan and watch it bounce.
+
+        OFF by default and triple-gated like the guidance-override hook. It
+        substitutes a tool no deterministic planner can emit, so the companion's
+        own validator rejects it at ``planner_exec.load_plan`` -- proving the
+        companion re-validates rather than trusting whatever arrived over the
+        wire. It corrupts a COPY; the caller's plan is untouched.
+        """
+        if not _test_hook(self.config, "EIS_TEST_BAD_PLAN"):
+            return plan
+        log.warning("EIS_TEST_BAD_PLAN active: injecting a non-planner tool")
+        corrupted = dict(plan)
+        corrupted["tools"] = [
+            {"tool": "teleport", "lat": 0.0, "lon": 0.0},
+            *list(plan.get("tools") or ()),
+        ]
+        return corrupted
+
+    async def _arm_envelope(
+        self, plan: Dict[str, Any], record: Optional[Any]
+    ) -> None:
+        """Install the certified corridor and open the mission record.
+
+        The corridor comes from the mission record when it carries one, else
+        from the plan. It is what the monitor checks -- NOT the waypoint list
+        and never the planner's own arithmetic (ADR D21).
+        """
+        from .control.envelope import Corridor
+
+        raw_record = dict(record) if isinstance(record, dict) else {}
+        corridor_raw = raw_record.get("corridor") or plan.get("corridor")
+        corridor = Corridor.from_wire(corridor_raw)
+        if self.envelope is not None:
+            self.envelope.set_geometry(self._site_geometry())
+            self.envelope.arm(corridor)
+        self._envelope_signature = None
+        self._envelope_escalation_key = ""
+
+        started = _now_ms()
+        self._sortie_starts_ms = [
+            ts for ts in self._sortie_starts_ms if started - ts <= 3_600_000
+        ][-16:]
+        self._sortie_starts_ms.append(started)
+
+        # Every dispatch is tagged with the attendance mode in force, so the
+        # record answers "was anyone watching?" without inference.
+        self._mission_record = {
+            **raw_record,
+            "missionId": str(raw_record.get("missionId", plan.get("requestId", ""))),
+            "vehicleId": self.config.vehicle_id,
+            "anomalyId": str(raw_record.get("anomalyId", plan.get("anomalyId", ""))),
+            "startedAt": started,
+            "mode": self._attendance_mode(),
+        }
+        if not corridor.has_shape:
+            await self._health_event(
+                "envelope", "degraded",
+                "no corridor in the mission record; only site containment is monitored",
+            )
+        await self._publish_mode()
 
     async def _abort_plan(self):
         """abortPlan: zero-and-hold + release back to auto (disengage idiom).
@@ -1794,6 +2746,7 @@ class Companion:
             _safe_call(getattr(self.planner, "abort", None))
         if not was_engaged:
             return True, "no active plan (abortPlan is idempotent)"
+        self._disarm_envelope()
         await self._send_hold("abortPlan")
         self._set_control_source(ControlSource.AUTO.value)
         await self._status("info", "mission plan aborted -> hold")
@@ -1930,7 +2883,28 @@ class Companion:
         if self.planner is not None:
             # Full reset: a plan must never survive a failsafe/release.
             _safe_call(getattr(self.planner, "reset", None))
+        self._disarm_envelope()
         self._set_control_source(source)
+
+    def _disarm_envelope(self) -> None:
+        """Drop the mission corridor when the plan goes away.
+
+        The monitor keeps running -- site containment (geofence, NFZ buffers,
+        standoff, separation) applies whether or not a plan is loaded. Only
+        the corridor, which belongs to a specific dispatch, is dropped, and
+        with it the action requests that corridor raised.
+        """
+        if self.envelope is not None:
+            _safe_call(getattr(self.envelope, "disarm", None))
+        self._envelope_hold = False
+        self._envelope_rtl = False
+        self._envelope_escalate = False
+        self._envelope_speed_scale = 1.0
+        self._envelope_signature = None
+        self._envelope_escalation_key = ""
+        if self.gimbal is not None:
+            _safe_call(getattr(self.gimbal, "clear_override", None))
+        self._gimbal_leg_index = -1
 
     def _sync_safety_limits(self) -> None:
         if self.safety is not None:
@@ -1998,6 +2972,45 @@ def _safe_call(fn) -> None:
             fn()
         except Exception:
             pass
+
+
+def _plan_envelope_shape(plan: Dict[str, Any]) -> Tuple[float, float, float]:
+    """(altitude_m, laps, hold_s) -- the shape UNATTENDED_ENVELOPE checks.
+
+    The WORST case of each is returned (highest altitude, most laps, longest
+    hold): an envelope check has to be answered by the part of the plan that
+    comes closest to the limit, not by its average. A plan that declares no
+    altitude yields NaN, which fails the band test -- "we could not tell" must
+    not read as "it was fine" when nobody is watching.
+    """
+    altitude = math.nan
+    laps = 0.0
+    hold_s = 0.0
+    for tool in plan.get("tools") or ():
+        if not isinstance(tool, dict):
+            continue
+        name = str(tool.get("tool", ""))
+        for key in ("alt", "alt_m", "altitude"):
+            if key in tool:
+                try:
+                    value = float(tool[key])
+                except (TypeError, ValueError):
+                    continue
+                if math.isfinite(value):
+                    altitude = value if math.isnan(altitude) else max(altitude, value)
+        if name in ("orbit", "orbit_point"):
+            try:
+                laps = max(laps, float(tool.get("laps", 1.0)))
+            except (TypeError, ValueError):
+                laps = max(laps, 1.0)
+        if name == "hold":
+            for key in ("durationS", "duration_s"):
+                if key in tool:
+                    try:
+                        hold_s = max(hold_s, float(tool[key]))
+                    except (TypeError, ValueError):
+                        pass
+    return (altitude, laps, hold_s)
 
 
 def _telemetry_from_state(st: VehicleState) -> Dict[str, Any]:

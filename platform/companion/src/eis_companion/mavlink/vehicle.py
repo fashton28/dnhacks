@@ -306,6 +306,10 @@ class Vehicle:
             getattr(mavutil.mavlink, "MAVLINK_MSG_ID_OPTICAL_FLOW_RAD", -1),
             getattr(mavutil.mavlink, "MAVLINK_MSG_ID_ODOMETRY", -1),
             getattr(mavutil.mavlink, "MAVLINK_MSG_ID_SIMSTATE", -1),
+            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_MOUNT_STATUS", -1),
+            getattr(
+                mavutil.mavlink, "MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS", -1
+            ),
         ) if msg_id >= 0)
         for msg_id in wanted:
             try:
@@ -719,6 +723,87 @@ class Vehicle:
         except Exception:
             log.exception("EKF source switch to %s failed", source)
             return False
+
+    # ----------------------------------------------------------------------
+    # Camera mount (gimbal)
+    # ----------------------------------------------------------------------
+    # SIGN CONVENTION. The shared contract (and the ARGUS console) report
+    # gimbal pitch as -30 = up, 0 = level, +90 = straight DOWN. ArduPilot's
+    # mount uses the opposite sign for the same physical angle: 0 = forward,
+    # -90 = straight down. So every angle crossing this seam is NEGATED, in
+    # both directions. Getting this wrong points the camera at the sky, which
+    # is exactly the kind of silent failure a comment is cheaper than.
+    def set_gimbal_pitch(
+        self, pitch_deg: float, *, use_gimbal_manager: bool = False
+    ) -> bool:
+        """Command mount pitch, in CONTRACT degrees (+90 = straight down).
+
+        Uses MAV_CMD_DO_MOUNT_CONTROL in MAVLink-targeting mode by default --
+        the form the demo airframe answers. ``use_gimbal_manager`` selects the
+        newer MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW instead; the two are not
+        interchangeable across firmware, which is why it is a config flag and
+        not an autodetect.
+        """
+        if not self._connected or self._master is None:
+            return False
+        if not math.isfinite(pitch_deg):
+            return False
+        mav_pitch = -float(pitch_deg)          # contract -> ArduPilot mount sign
+        try:
+            if use_gimbal_manager:
+                command = getattr(
+                    mavutil.mavlink, "MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW", 1000
+                )
+                # pitch, yaw, pitch-rate, yaw-rate, flags, _, gimbal device id.
+                # NaN rate = "hold this angle" rather than "slew at 0 deg/s".
+                self._command_long(
+                    command, mav_pitch, 0.0, float("nan"), float("nan"), 0.0, 0.0, 0.0
+                )
+            else:
+                command = getattr(mavutil.mavlink, "MAV_CMD_DO_MOUNT_CONTROL", 205)
+                mode = getattr(
+                    mavutil.mavlink, "MAV_MOUNT_MODE_MAVLINK_TARGETING", 2
+                )
+                # pitch, roll, yaw, _, _, _, mount mode
+                self._command_long(
+                    command, mav_pitch, 0.0, 0.0, 0.0, 0.0, 0.0, float(mode)
+                )
+            return True
+        except Exception:
+            log.exception("gimbal pitch command failed")
+            return False
+
+    def gimbal_pitch_deg(self) -> Optional[float]:
+        """Reported mount pitch in CONTRACT degrees, or ``None`` if unreported.
+
+        Prefers MOUNT_STATUS (centidegrees, ArduPilot sign) and falls back to
+        GIMBAL_DEVICE_ATTITUDE_STATUS's quaternion. ``None`` means the mount
+        told us nothing -- the caller falls back to the commanded angle rather
+        than reporting a fictional 0.
+        """
+        status = self._msgs.get("MOUNT_STATUS")
+        if status is not None:
+            raw = getattr(status, "pointing_a", None)
+            if raw is not None:
+                try:
+                    value = -float(raw) / 100.0    # centideg, ArduPilot sign
+                except (TypeError, ValueError):
+                    value = None
+                if value is not None and math.isfinite(value):
+                    return value
+        attitude = self._msgs.get("GIMBAL_DEVICE_ATTITUDE_STATUS")
+        if attitude is not None:
+            q = getattr(attitude, "q", None)
+            if isinstance(q, (list, tuple)) and len(q) == 4:
+                try:
+                    w, x, y, z = (float(v) for v in q)
+                except (TypeError, ValueError):
+                    return None
+                sin_pitch = max(-1.0, min(1.0, 2.0 * (w * y - z * x)))
+                pitch = math.degrees(math.asin(sin_pitch))
+                if math.isfinite(pitch):
+                    return -pitch                  # same negation as above
+        return None
 
     def send_distance_sensor(self, distance_m: float, *, sensor_id: int = 0) -> bool:
         """Publish a LiDAR range through DISTANCE_SENSOR."""
