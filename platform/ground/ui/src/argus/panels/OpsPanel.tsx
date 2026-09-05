@@ -1,7 +1,7 @@
 import React from 'react';
-import { SlidersHorizontal, Camera, ScanSearch, Send, Home, Route, Pause, Play, Square, Hand, HandMetal, Car, Package, PackageCheck, Wrench, DoorOpen, RotateCcw, Minus, Plus, Video } from 'lucide-react';
+import { SlidersHorizontal, Camera, ScanSearch, Send, Home, Route, Pause, Play, Square, Hand, HandMetal, Car, Package, PackageCheck, Wrench, DoorOpen, RotateCcw, Minus, Plus, Video, ZoomIn, ZoomOut } from 'lucide-react';
 import { Panel, Button } from '@/components';
-import { useArgus, activeMission } from '../store';
+import { useArgus, activeMission, CAMERA_MODES, FOV_MAX, FOV_MIN, fovToZoom, zoomToFov, type CameraMode } from '../store';
 
 export interface OpsActions {
   baseline(): Promise<void>;
@@ -18,6 +18,10 @@ export interface OpsActions {
   manualRelease(): Promise<void>;
   /** Point the camera: -30 (up) .. 90 (straight down). Debounced by the caller. */
   gimbal(pitchDeg: number): void;
+  /** Sensor the Renderer draws for this Drone's feed. */
+  cameraMode(mode: CameraMode): void;
+  /** Field of view in degrees (110 wide .. 20 narrow); debounced by the caller. */
+  cameraFov(fovDeg: number): void;
 }
 
 export const GIMBAL_MIN = -30;
@@ -50,6 +54,8 @@ export function OpsPanel({ act }: { act: OpsActions }): React.ReactElement {
   const dispatchReason = !latest ? 'Detect change first' : dispatching ? `Dispatching ${dispatching}` : `Dispatch ${latest.id} to the Triage Agent`;
   const airborne = (drone?.alt ?? 0) > 0.5;
   const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 45;
+  const cam = useArgus((s) => (s.selected ? s.camera[s.selected] : undefined)) ?? { mode: 'rgb' as CameraMode, fov_deg: 70 };
+  const zoom = fovToZoom(cam.fov_deg);
   const sz = 'sm' as const;
 
   return (
@@ -93,6 +99,18 @@ export function OpsPanel({ act }: { act: OpsActions }): React.ReactElement {
       <div className="a-body argus-hint" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 3, display: 'flex', alignItems: 'center', gap: 5 }}>
         <Video size={11} /> {gimbal < 0 ? 'Looking up' : gimbal === 0 ? 'Level' : gimbal >= 85 ? 'Straight down' : 'Tilted down'} · keys [ ]
       </div>
+      <div className="a-seg" role="group" aria-label="Sensor" style={{ marginTop: 8 }} title="Sensor the feed shows (V cycles)">
+        {CAMERA_MODES.map((m) => (
+          <button key={m} data-on={cam.mode === m || undefined} disabled={!selected} onClick={() => act.cameraMode(m)}>{m === 'rgb' ? 'RGB' : m === 'thermal' ? 'Thermal' : 'LiDAR'}</button>
+        ))}
+      </div>
+      <div className="a-gimbal" style={{ marginTop: 6 }} title="Zoom: field of view 110° (1x) to 20° (5.5x). Keys - and =">
+        <button className="a-icobtn" onClick={() => act.cameraFov(zoomToFov(zoom - 0.5))} disabled={!selected || cam.fov_deg >= FOV_MAX} aria-label="Zoom out"><ZoomOut size={13} /></button>
+        <input type="range" min={10} max={55} step={1} value={Math.round(zoom * 10)} disabled={!selected} onChange={(e) => act.cameraFov(zoomToFov(Number(e.target.value) / 10))} aria-label="Zoom" />
+        <button className="a-icobtn" onClick={() => act.cameraFov(zoomToFov(zoom + 0.5))} disabled={!selected || cam.fov_deg <= FOV_MIN} aria-label="Zoom in"><ZoomIn size={13} /></button>
+        <span className="a-num" style={{ fontSize: 12, textAlign: 'right' }}>{zoom.toFixed(1)}<span className="a-unit">x</span></span>
+      </div>
+      <div className="a-body argus-hint" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 3 }}>Field of view {Math.round(cam.fov_deg)}° · keys - =</div>
 
       <Section>Manual control</Section>
       {manualActive

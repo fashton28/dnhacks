@@ -1,5 +1,5 @@
 import React from 'react';
-import { useArgus } from '../store';
+import { useArgus, fovToZoom } from '../store';
 import { ArgusMark } from '../Brand';
 import { GIMBAL_MAX, GIMBAL_MIN } from './OpsPanel';
 
@@ -13,6 +13,8 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
   const stale = now - lastFrameTs > 4000;
   const url = selected ? `${hubBase}/drones/${selected}/mjpeg` : '';
   const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 45;
+  const cam = useArgus((s) => (s.selected ? s.camera[s.selected] : undefined)) ?? { mode: 'rgb', fov_deg: 70 };
+  const zoom = fovToZoom(cam.fov_deg);
   const frac = (gimbal - GIMBAL_MIN) / (GIMBAL_MAX - GIMBAL_MIN);
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%', background: '#000', overflow: 'hidden' }}>
@@ -26,9 +28,11 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
         <span><span className="dim">ALT </span>{(drone?.alt ?? 0).toFixed(1)} m</span>
         <span><span className="dim">HDG </span>{String(Math.round(drone?.heading_deg ?? 0)).padStart(3, '0')}°</span>
         <span><span className="dim">CAM </span>{gimbal}°</span>
+        <span><span className="dim">ZOOM </span>{zoom.toFixed(1)}x</span>
       </div>
       {/* top-right: link state */}
       <div className="a-hud" style={{ position: 'absolute', right: 12, top: 10, display: 'flex', gap: 10, alignItems: 'center' }}>
+        <span className="a-modetag" data-mode={cam.mode}>{cam.mode === 'rgb' ? 'RGB' : cam.mode === 'thermal' ? 'THERMAL' : 'LIDAR'}</span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: stale ? 'var(--amber-bright)' : 'var(--red-bright)' }}>
           <span className="a-dot" data-live={!stale} />{stale ? 'NO SIGNAL' : 'LIVE'}
         </span>
