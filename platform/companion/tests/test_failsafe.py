@@ -46,3 +46,54 @@ def test_charge_stall_has_specific_pad_reason():
     decision = decide(FailsafeSignals(airborne=False, readiness_ok=False, charge_stalled=True))
     assert decision.state == "refuse"
     assert decision.reason == "battery charge_stalled"
+
+
+# ---------------------------------------------------------------------------
+# The envelope monitor's requests (control/envelope.py -> here, never to
+# guidance). Containment outranks a hold; an escalation rides on top of the
+# flight state rather than replacing it.
+# ---------------------------------------------------------------------------
+def test_envelope_containment_breach_returns_to_launch():
+    decision = decide(FailsafeSignals(airborne=True, envelope_rtl=True))
+    assert decision.state == "rtl"
+    assert "envelope" in decision.reason
+
+
+def test_envelope_hold_request_holds():
+    decision = decide(FailsafeSignals(airborne=True, envelope_hold=True))
+    assert decision.state == "hold"
+    assert "envelope" in decision.reason
+
+
+def test_envelope_rtl_outranks_an_envelope_hold():
+    decision = decide(
+        FailsafeSignals(airborne=True, envelope_hold=True, envelope_rtl=True)
+    )
+    assert decision.state == "rtl"
+
+
+def test_an_escalation_never_downgrades_the_flight_state():
+    """FAILURE_MODES: 'the vehicle's hold/rtl state is unchanged by the
+    escalation'. Escalation is a message to humans, not a mode change."""
+    held = decide(FailsafeSignals(
+        airborne=True, envelope_hold=True, envelope_escalate=True
+    ))
+    assert held.state == "hold"
+    returning = decide(FailsafeSignals(
+        airborne=True, envelope_rtl=True, envelope_escalate=True
+    ))
+    assert returning.state == "rtl"
+
+
+def test_a_standalone_envelope_escalation_still_surfaces():
+    """The breach cleared but the escalation is outstanding: the operator must
+    still be told, so it does not silently vanish with the hold."""
+    decision = decide(FailsafeSignals(airborne=True, envelope_escalate=True))
+    assert decision.state == "escalate"
+    assert "envelope" in decision.reason
+
+
+def test_envelope_requests_do_nothing_on_the_ground():
+    """A parked vehicle is not flown anywhere by a monitor request."""
+    assert decide(FailsafeSignals(airborne=False, envelope_hold=True)).state == "none"
+    assert decide(FailsafeSignals(airborne=False, envelope_rtl=True)).state == "none"

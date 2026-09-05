@@ -56,6 +56,52 @@ MAX_CELL_IMBALANCE_V: float = 0.10
 MAX_BATT_TEMP_C: float = 60.0
 GEOFENCE_RADIUS_DEFAULT: float = 60.0  # m
 
+# ==========================================================================
+# UNATTENDED_ENVELOPE hard bounds (ADR D23). These sit alongside the speed /
+# standoff / sortie / SoC floors above and obey the same rule: YAML and env
+# may only TIGHTEN them. The widest unattended flight this system will ever
+# accept is 30-50 m AGL, inspect profile, one lap, a 15 s hold, two sorties an
+# hour, and half the attended wind limit -- because nobody is watching and
+# nobody can take manual control.
+#
+# Mirrors the same constants in control/mode.py (the pure-logic owner);
+# tests/test_mode.py pins the two copies equal. They are duplicated rather
+# than imported so loading config stays a stdlib-only operation.
+# ==========================================================================
+UNATTENDED_MIN_ALT_FLOOR_M: float = 30.0     # may be raised, never lowered
+UNATTENDED_MAX_ALT_CEIL_M: float = 50.0      # may be lowered, never raised
+UNATTENDED_MAX_LAPS_CAP: float = 1.0
+UNATTENDED_MAX_HOLD_CAP_S: float = 15.0
+UNATTENDED_MAX_SORTIES_PER_HOUR_CAP: int = 2
+UNATTENDED_MAX_WIND_CAP_MPS: float = 6.0     # half the attended 12 m/s limit
+UNATTENDED_PROFILES_ALLOWED: Tuple[str, ...] = ("inspect",)
+
+# ==========================================================================
+# Runtime envelope-monitor bounds (ADR D21 / D22). Same rule again: a config
+# layer may make the monitor stricter (wider separation, bigger buffers, a
+# shorter escalation dwell) and can never make it more permissive. There is
+# deliberately NO enable/disable knob: the monitor cannot be turned off.
+# ==========================================================================
+ENVELOPE_SEPARATION_FLOOR_M: float = 40.0        # nominal inter-vehicle gap
+ENVELOPE_SEPARATION_STALE_FLOOR_M: float = 80.0  # peer data > peer_stale_s old
+ENVELOPE_PEER_STALE_CAP_S: float = 3.0           # may only be shortened
+ENVELOPE_PEER_HOLD_CAP_S: float = 10.0           # may only be shortened
+ENVELOPE_ESCALATE_CAP_S: float = 5.0             # may only be shortened
+ENVELOPE_BREACH_MULTIPLE_CAP: float = 2.0        # may only be tightened
+ENVELOPE_GEOFENCE_MARGIN_FLOOR_M: float = 5.0    # may only be widened
+ENVELOPE_NFZ_BUFFER_FLOOR_M: float = 25.0        # may only be widened
+ENVELOPE_HZ: float = 20.0                        # monitor tick rate
+ENVELOPE_PUBLISH_HZ: float = 5.0                 # 'envelope' message rate
+
+# ==========================================================================
+# Gimbal pitch envelope (shared contract GIMBAL_PITCH_MIN/MAX_DEG). -30 looks
+# UP, 0 is level, +90 is straight DOWN. Config may narrow the travel; nothing
+# may widen it past the mechanical envelope.
+# ==========================================================================
+GIMBAL_PITCH_MIN_DEG: float = -30.0
+GIMBAL_PITCH_MAX_DEG: float = 90.0
+GIMBAL_SLEW_RATE_CAP_DPS: float = 90.0
+
 # Fallback mirror of the shared contract's PROFILE_SPEED_MPS (shared/shared.py /
 # shared/shared.ts). The authoritative copy is loaded from shared/shared.py at
 # config time when the monorepo checkout is present (_shared_profile_speeds);
@@ -222,6 +268,77 @@ class PlannerConfig:
 
 
 @dataclass
+class EnvelopeConfig:
+    """Runtime envelope-monitor thresholds (ADR D21 / D22).
+
+    Every field is re-asserted in ``_enforce_safety_floor`` so a config layer
+    can only make the monitor stricter. There is no on/off switch by design:
+    the monitor is not something guidance, the planner, the ground station or
+    a model is allowed to disable, so it is not something a YAML file gets to
+    disable either.
+    """
+    hz: float = ENVELOPE_HZ                       # monitor tick rate
+    publish_hz: float = ENVELOPE_PUBLISH_HZ       # 'envelope' wire message rate
+    geofence_margin_m: float = ENVELOPE_GEOFENCE_MARGIN_FLOOR_M
+    nfz_buffer_m: float = ENVELOPE_NFZ_BUFFER_FLOOR_M
+    separation_m: float = ENVELOPE_SEPARATION_FLOOR_M
+    separation_stale_m: float = ENVELOPE_SEPARATION_STALE_FLOOR_M
+    peer_stale_s: float = ENVELOPE_PEER_STALE_CAP_S
+    peer_hold_s: float = ENVELOPE_PEER_HOLD_CAP_S
+    escalate_after_s: float = ENVELOPE_ESCALATE_CAP_S
+    breach_multiple: float = ENVELOPE_BREACH_MULTIPLE_CAP
+    hysteresis_m: float = 2.0                     # recovery margin
+    recovery_s: float = 2.0                       # dwell inside tolerance
+
+
+@dataclass
+class UnattendedConfig:
+    """UNATTENDED_ENVELOPE (ADR D23), hard-floored like the speed cap."""
+    min_alt_m: float = UNATTENDED_MIN_ALT_FLOOR_M
+    max_alt_m: float = UNATTENDED_MAX_ALT_CEIL_M
+    max_laps: float = UNATTENDED_MAX_LAPS_CAP
+    max_hold_s: float = UNATTENDED_MAX_HOLD_CAP_S
+    max_sorties_per_hour: int = UNATTENDED_MAX_SORTIES_PER_HOUR_CAP
+    max_wind_mps: float = UNATTENDED_MAX_WIND_CAP_MPS
+    profiles: Tuple[str, ...] = UNATTENDED_PROFILES_ALLOWED
+
+
+@dataclass
+class GimbalConfig:
+    """Camera-mount pointing envelope + the MAVLink targeting variant.
+
+    ``use_gimbal_manager`` selects MAV_CMD_DO_GIMBAL_MANAGER_PITCHYAW instead
+    of the classic MAV_CMD_DO_MOUNT_CONTROL; it is a flag because the two are
+    not interchangeable across firmware and the classic form is what the
+    demo airframe answers.
+    """
+    enabled: bool = True
+    pitch_min_deg: float = GIMBAL_PITCH_MIN_DEG
+    pitch_max_deg: float = GIMBAL_PITCH_MAX_DEG
+    slew_rate_dps: float = 30.0
+    use_gimbal_manager: bool = False
+
+
+@dataclass
+class SecurityConfig:
+    """Command signing + the hash-chained audit (docs/THREAT_MODEL.md).
+
+    ``session_key_env`` names the environment variable holding this vehicle's
+    HMAC key -- per vehicle, so a second airframe has its own and neither can
+    mint the other's privileged commands. Key custody is the deploying
+    organisation's, not this system's.
+
+    ``require_signed_commands`` extends the signature requirement to EVERY
+    command. The privileged set (enterUnattended / exitUnattended / setGimbal)
+    always requires one regardless of this flag -- that part is not a knob.
+    """
+    session_key_env: str = "EIS_SESSION_KEY"
+    max_command_age_ms: int = 30_000
+    require_signed_commands: bool = False
+    audit_path: str = ""            # "" -> logs/companion-audit.jsonl
+
+
+@dataclass
 class AppConfig:
     """The whole companion configuration, fully resolved + typed."""
     sitl: bool = True
@@ -235,6 +352,10 @@ class AppConfig:
     safety: SafetyConfig = field(default_factory=SafetyConfig)
     battery: BatteryConfig = field(default_factory=BatteryConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
+    envelope: EnvelopeConfig = field(default_factory=EnvelopeConfig)
+    unattended: UnattendedConfig = field(default_factory=UnattendedConfig)
+    gimbal: GimbalConfig = field(default_factory=GimbalConfig)
+    security: SecurityConfig = field(default_factory=SecurityConfig)
     vehicle_id: str = "eis-1"
     source_path: Optional[str] = None     # the YAML path actually loaded
 
@@ -533,6 +654,64 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         heartbeat_timeout_ms=int(_g(pl_d, "heartbeat_timeout_ms", 2000)),
     )
 
+    env_d = _section(raw, "envelope")
+    envelope = EnvelopeConfig(
+        hz=float(_g(env_d, "hz", ENVELOPE_HZ)),
+        publish_hz=float(_g(env_d, "publish_hz", ENVELOPE_PUBLISH_HZ)),
+        geofence_margin_m=float(
+            _g(env_d, "geofence_margin_m", ENVELOPE_GEOFENCE_MARGIN_FLOOR_M)
+        ),
+        nfz_buffer_m=float(_g(env_d, "nfz_buffer_m", ENVELOPE_NFZ_BUFFER_FLOOR_M)),
+        separation_m=float(_g(env_d, "separation_m", ENVELOPE_SEPARATION_FLOOR_M)),
+        separation_stale_m=float(
+            _g(env_d, "separation_stale_m", ENVELOPE_SEPARATION_STALE_FLOOR_M)
+        ),
+        peer_stale_s=float(_g(env_d, "peer_stale_s", ENVELOPE_PEER_STALE_CAP_S)),
+        peer_hold_s=float(_g(env_d, "peer_hold_s", ENVELOPE_PEER_HOLD_CAP_S)),
+        escalate_after_s=float(
+            _g(env_d, "escalate_after_s", ENVELOPE_ESCALATE_CAP_S)
+        ),
+        breach_multiple=float(
+            _g(env_d, "breach_multiple", ENVELOPE_BREACH_MULTIPLE_CAP)
+        ),
+        hysteresis_m=float(_g(env_d, "hysteresis_m", 2.0)),
+        recovery_s=float(_g(env_d, "recovery_s", 2.0)),
+    )
+
+    un_d = _section(raw, "unattended")
+    profiles_raw = un_d.get("profiles")
+    profiles = UNATTENDED_PROFILES_ALLOWED
+    if isinstance(profiles_raw, (list, tuple)) and profiles_raw:
+        profiles = tuple(str(p).strip().lower() for p in profiles_raw if str(p).strip())
+    unattended = UnattendedConfig(
+        min_alt_m=float(_g(un_d, "min_alt_m", UNATTENDED_MIN_ALT_FLOOR_M)),
+        max_alt_m=float(_g(un_d, "max_alt_m", UNATTENDED_MAX_ALT_CEIL_M)),
+        max_laps=float(_g(un_d, "max_laps", UNATTENDED_MAX_LAPS_CAP)),
+        max_hold_s=float(_g(un_d, "max_hold_s", UNATTENDED_MAX_HOLD_CAP_S)),
+        max_sorties_per_hour=int(
+            _g(un_d, "max_sorties_per_hour", UNATTENDED_MAX_SORTIES_PER_HOUR_CAP)
+        ),
+        max_wind_mps=float(_g(un_d, "max_wind_mps", UNATTENDED_MAX_WIND_CAP_MPS)),
+        profiles=profiles,
+    )
+
+    gim_d = _section(raw, "gimbal")
+    gimbal = GimbalConfig(
+        enabled=bool(_g(gim_d, "enabled", True)),
+        pitch_min_deg=float(_g(gim_d, "pitch_min_deg", GIMBAL_PITCH_MIN_DEG)),
+        pitch_max_deg=float(_g(gim_d, "pitch_max_deg", GIMBAL_PITCH_MAX_DEG)),
+        slew_rate_dps=float(_g(gim_d, "slew_rate_dps", 30.0)),
+        use_gimbal_manager=bool(_g(gim_d, "use_gimbal_manager", False)),
+    )
+
+    sec_d = _section(raw, "security")
+    security = SecurityConfig(
+        session_key_env=str(_g(sec_d, "session_key_env", "EIS_SESSION_KEY")),
+        max_command_age_ms=int(_g(sec_d, "max_command_age_ms", 30_000)),
+        require_signed_commands=bool(_g(sec_d, "require_signed_commands", False)),
+        audit_path=str(_g(sec_d, "audit_path", "")),
+    )
+
     return AppConfig(
         sitl=bool(_g(raw, "sitl", True)),
         limits=limits,
@@ -545,6 +724,10 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         safety=safety,
         battery=battery,
         planner=planner,
+        envelope=envelope,
+        unattended=unattended,
+        gimbal=gimbal,
+        security=security,
         vehicle_id=str(_g(raw, "vehicle_id", "eis-1")),
     )
 
@@ -658,6 +841,77 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if s is not None:
         cfg.vehicle_id = s
 
+    # runtime envelope monitor (may only tighten -- see _enforce_safety_floor)
+    f = _env_float("EIS_ENVELOPE_SEPARATION_M")
+    if f is not None:
+        cfg.envelope.separation_m = f
+    f = _env_float("EIS_ENVELOPE_SEPARATION_STALE_M")
+    if f is not None:
+        cfg.envelope.separation_stale_m = f
+    f = _env_float("EIS_ENVELOPE_PEER_STALE_S")
+    if f is not None:
+        cfg.envelope.peer_stale_s = f
+    f = _env_float("EIS_ENVELOPE_PEER_HOLD_S")
+    if f is not None:
+        cfg.envelope.peer_hold_s = f
+    f = _env_float("EIS_ENVELOPE_ESCALATE_AFTER_S")
+    if f is not None:
+        cfg.envelope.escalate_after_s = f
+    f = _env_float("EIS_ENVELOPE_GEOFENCE_MARGIN_M")
+    if f is not None:
+        cfg.envelope.geofence_margin_m = f
+    f = _env_float("EIS_ENVELOPE_NFZ_BUFFER_M")
+    if f is not None:
+        cfg.envelope.nfz_buffer_m = f
+
+    # UNATTENDED_ENVELOPE (may only tighten)
+    f = _env_float("EIS_UNATTENDED_MIN_ALT_M")
+    if f is not None:
+        cfg.unattended.min_alt_m = f
+    f = _env_float("EIS_UNATTENDED_MAX_ALT_M")
+    if f is not None:
+        cfg.unattended.max_alt_m = f
+    f = _env_float("EIS_UNATTENDED_MAX_HOLD_S")
+    if f is not None:
+        cfg.unattended.max_hold_s = f
+    i = _env_int("EIS_UNATTENDED_MAX_SORTIES_PER_HOUR")
+    if i is not None:
+        cfg.unattended.max_sorties_per_hour = i
+    f = _env_float("EIS_UNATTENDED_MAX_WIND_MPS")
+    if f is not None:
+        cfg.unattended.max_wind_mps = f
+
+    # gimbal
+    b = _env_bool("EIS_GIMBAL_ENABLED")
+    if b is not None:
+        cfg.gimbal.enabled = b
+    f = _env_float("EIS_GIMBAL_PITCH_MIN_DEG")
+    if f is not None:
+        cfg.gimbal.pitch_min_deg = f
+    f = _env_float("EIS_GIMBAL_PITCH_MAX_DEG")
+    if f is not None:
+        cfg.gimbal.pitch_max_deg = f
+    f = _env_float("EIS_GIMBAL_SLEW_RATE_DPS")
+    if f is not None:
+        cfg.gimbal.slew_rate_dps = f
+    b = _env_bool("EIS_GIMBAL_MANAGER")
+    if b is not None:
+        cfg.gimbal.use_gimbal_manager = b
+
+    # command signing / audit
+    s = _env("EIS_SESSION_KEY_ENV")
+    if s is not None:
+        cfg.security.session_key_env = s
+    i = _env_int("EIS_COMMAND_MAX_AGE_MS")
+    if i is not None:
+        cfg.security.max_command_age_ms = i
+    b = _env_bool("EIS_REQUIRE_SIGNED_COMMANDS")
+    if b is not None:
+        cfg.security.require_signed_commands = b
+    s = _env("EIS_AUDIT_PATH")
+    if s is not None:
+        cfg.security.audit_path = s
+
     # planner / site model
     s = _env("EIS_SITE_FILE")
     if s is not None:
@@ -743,6 +997,105 @@ def _enforce_safety_floor(cfg: AppConfig) -> None:
         1.0, float(cfg.planner.staging_arrival_radius_m)
     )
 
+    _enforce_envelope_floor(cfg)
+    _enforce_unattended_floor(cfg)
+    _enforce_gimbal_floor(cfg)
+    cfg.security.max_command_age_ms = max(
+        1_000, min(300_000, int(cfg.security.max_command_age_ms))
+    )
+    cfg.security.session_key_env = (
+        str(cfg.security.session_key_env).strip() or "EIS_SESSION_KEY"
+    )
+
+
+def _safe(value: Any, fallback: float) -> float:
+    """Coerce to a finite float, degrading to ``fallback`` (the safe value)."""
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return float(fallback)
+    return result if math.isfinite(result) else float(fallback)
+
+
+def _enforce_envelope_floor(cfg: AppConfig) -> None:
+    """Envelope-monitor thresholds: config may only make the monitor STRICTER.
+
+    Distances that protect (separation, geofence margin, NFZ buffer) may only
+    grow; timers that delay a response (staleness tolerance, escalation dwell)
+    may only shrink; the drift multiple that decides hold may only tighten.
+    """
+    e = cfg.envelope
+    e.separation_m = max(ENVELOPE_SEPARATION_FLOOR_M, _safe(
+        e.separation_m, ENVELOPE_SEPARATION_FLOOR_M))
+    e.separation_stale_m = max(
+        ENVELOPE_SEPARATION_STALE_FLOOR_M,
+        e.separation_m,
+        _safe(e.separation_stale_m, ENVELOPE_SEPARATION_STALE_FLOOR_M),
+    )
+    e.peer_stale_s = max(0.1, min(
+        ENVELOPE_PEER_STALE_CAP_S, _safe(e.peer_stale_s, ENVELOPE_PEER_STALE_CAP_S)))
+    e.peer_hold_s = max(e.peer_stale_s, min(
+        ENVELOPE_PEER_HOLD_CAP_S, _safe(e.peer_hold_s, ENVELOPE_PEER_HOLD_CAP_S)))
+    e.escalate_after_s = max(0.1, min(
+        ENVELOPE_ESCALATE_CAP_S, _safe(e.escalate_after_s, ENVELOPE_ESCALATE_CAP_S)))
+    e.breach_multiple = max(1.0, min(
+        ENVELOPE_BREACH_MULTIPLE_CAP,
+        _safe(e.breach_multiple, ENVELOPE_BREACH_MULTIPLE_CAP),
+    ))
+    e.geofence_margin_m = max(ENVELOPE_GEOFENCE_MARGIN_FLOOR_M, _safe(
+        e.geofence_margin_m, ENVELOPE_GEOFENCE_MARGIN_FLOOR_M))
+    e.nfz_buffer_m = max(ENVELOPE_NFZ_BUFFER_FLOOR_M, _safe(
+        e.nfz_buffer_m, ENVELOPE_NFZ_BUFFER_FLOOR_M))
+    e.hysteresis_m = max(0.0, _safe(e.hysteresis_m, 2.0))
+    e.recovery_s = max(0.0, _safe(e.recovery_s, 2.0))
+    # Rates: the monitor runs at the control rate and publishes no faster than
+    # it ticks. Neither can be configured to zero (that would be an off switch).
+    e.hz = max(1.0, min(50.0, _safe(e.hz, ENVELOPE_HZ)))
+    e.publish_hz = max(0.5, min(e.hz, _safe(e.publish_hz, ENVELOPE_PUBLISH_HZ)))
+
+
+def _enforce_unattended_floor(cfg: AppConfig) -> None:
+    """UNATTENDED_ENVELOPE (ADR D23): config may only TIGHTEN, never widen.
+
+    A band that inverts under tightening (min pushed above max) collapses to
+    the hard band rather than becoming empty-and-silent: a refusal the
+    operator can read beats a configuration that quietly grounds the vehicle.
+    """
+    u = cfg.unattended
+    u.min_alt_m = max(UNATTENDED_MIN_ALT_FLOOR_M, _safe(
+        u.min_alt_m, UNATTENDED_MIN_ALT_FLOOR_M))
+    u.max_alt_m = min(UNATTENDED_MAX_ALT_CEIL_M, _safe(
+        u.max_alt_m, UNATTENDED_MAX_ALT_CEIL_M))
+    if u.min_alt_m > u.max_alt_m:
+        u.min_alt_m, u.max_alt_m = UNATTENDED_MIN_ALT_FLOOR_M, UNATTENDED_MAX_ALT_CEIL_M
+    u.max_laps = max(0.0, min(
+        UNATTENDED_MAX_LAPS_CAP, _safe(u.max_laps, UNATTENDED_MAX_LAPS_CAP)))
+    u.max_hold_s = max(0.0, min(
+        UNATTENDED_MAX_HOLD_CAP_S, _safe(u.max_hold_s, UNATTENDED_MAX_HOLD_CAP_S)))
+    try:
+        sorties = int(u.max_sorties_per_hour)
+    except (TypeError, ValueError):
+        sorties = UNATTENDED_MAX_SORTIES_PER_HOUR_CAP
+    u.max_sorties_per_hour = max(0, min(UNATTENDED_MAX_SORTIES_PER_HOUR_CAP, sorties))
+    u.max_wind_mps = max(0.0, min(
+        UNATTENDED_MAX_WIND_CAP_MPS, _safe(u.max_wind_mps, UNATTENDED_MAX_WIND_CAP_MPS)))
+    # Profiles are a subset, never an extension: an unknown or wider profile
+    # list falls back to the hard-allowed set rather than admitting it.
+    allowed = tuple(p for p in u.profiles if p in UNATTENDED_PROFILES_ALLOWED)
+    u.profiles = allowed or UNATTENDED_PROFILES_ALLOWED
+
+
+def _enforce_gimbal_floor(cfg: AppConfig) -> None:
+    """Gimbal travel: config may narrow it, never widen past -30..90 deg."""
+    g = cfg.gimbal
+    lo = max(GIMBAL_PITCH_MIN_DEG, _safe(g.pitch_min_deg, GIMBAL_PITCH_MIN_DEG))
+    hi = min(GIMBAL_PITCH_MAX_DEG, _safe(g.pitch_max_deg, GIMBAL_PITCH_MAX_DEG))
+    if lo > hi:
+        lo, hi = GIMBAL_PITCH_MIN_DEG, GIMBAL_PITCH_MAX_DEG
+    g.pitch_min_deg, g.pitch_max_deg = lo, hi
+    g.slew_rate_dps = max(1.0, min(
+        GIMBAL_SLEW_RATE_CAP_DPS, _safe(g.slew_rate_dps, 30.0)))
+
 
 __all__ = [
     "AppConfig",
@@ -756,8 +1109,29 @@ __all__ = [
     "SafetyConfig",
     "BatteryConfig",
     "PlannerConfig",
+    "EnvelopeConfig",
+    "UnattendedConfig",
+    "GimbalConfig",
+    "SecurityConfig",
     "load_config",
     "MAX_SPEED_CAP",
     "MIN_STANDOFF_FLOOR",
     "PROFILE_SPEED_FALLBACK",
+    "ENVELOPE_BREACH_MULTIPLE_CAP",
+    "ENVELOPE_ESCALATE_CAP_S",
+    "ENVELOPE_GEOFENCE_MARGIN_FLOOR_M",
+    "ENVELOPE_NFZ_BUFFER_FLOOR_M",
+    "ENVELOPE_PEER_HOLD_CAP_S",
+    "ENVELOPE_PEER_STALE_CAP_S",
+    "ENVELOPE_SEPARATION_FLOOR_M",
+    "ENVELOPE_SEPARATION_STALE_FLOOR_M",
+    "GIMBAL_PITCH_MAX_DEG",
+    "GIMBAL_PITCH_MIN_DEG",
+    "UNATTENDED_MAX_ALT_CEIL_M",
+    "UNATTENDED_MAX_HOLD_CAP_S",
+    "UNATTENDED_MAX_LAPS_CAP",
+    "UNATTENDED_MAX_SORTIES_PER_HOUR_CAP",
+    "UNATTENDED_MAX_WIND_CAP_MPS",
+    "UNATTENDED_MIN_ALT_FLOOR_M",
+    "UNATTENDED_PROFILES_ALLOWED",
 ]

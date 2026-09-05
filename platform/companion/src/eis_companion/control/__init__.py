@@ -10,6 +10,14 @@ unit-tests with no FC, camera, or detector:
   guidance     visual-servoing -> BODY-frame VelocitySetpoint (HARD standoff)
   manual       manual stick -> BODY-frame VelocitySetpoint (deadzone + watchdog)
   planner_exec MissionPlan executor -> GotoTarget / VelocitySetpoint per tick
+  failsafe     failure catalogue -> exactly one of none/hold/rtl/escalate/refuse
+  envelope     runtime envelope monitor -> state + constraint + action request
+  mode         attended/unattended state machine + UNATTENDED_ENVELOPE
+  gimbal       mount pitch: clamp, slew limit, deterministic auto-pointing
+
+``envelope`` and ``guidance`` deliberately know nothing about each other: the
+monitor constrains and never guides, and its verdict reaches the flight state
+only through ``failsafe``, routed by the orchestrator.
 """
 from __future__ import annotations
 
@@ -19,8 +27,25 @@ from .distance import (
     focal_px_from_vfov,
     DEFAULT_PERSON_HEIGHT_M,
 )
+from .envelope import (
+    Corridor,
+    EnvelopeDecision,
+    EnvelopeLimits,
+    EnvelopeMonitor,
+    EnvelopeSample,
+    PeerSample,
+    SiteGeometry,
+)
+from .failsafe import FailsafeDecision, FailsafeMachine, FailsafeSignals
+from .gimbal import GimbalController, GimbalLimits
 from .guidance import Guidance
 from .manual import ManualPilot
+from .mode import (
+    AttendanceMachine,
+    DispatchRequest,
+    UnattendedEnvelope,
+    check_unattended,
+)
 from .pid import PID
 from .planner_exec import (
     GotoTarget,
@@ -53,4 +78,20 @@ __all__ = [
     "PlannerOutput",
     "PlanOutputKind",
     "GotoTarget",
+    "FailsafeDecision",
+    "FailsafeMachine",
+    "FailsafeSignals",
+    "Corridor",
+    "EnvelopeDecision",
+    "EnvelopeLimits",
+    "EnvelopeMonitor",
+    "EnvelopeSample",
+    "PeerSample",
+    "SiteGeometry",
+    "AttendanceMachine",
+    "DispatchRequest",
+    "UnattendedEnvelope",
+    "check_unattended",
+    "GimbalController",
+    "GimbalLimits",
 ]
