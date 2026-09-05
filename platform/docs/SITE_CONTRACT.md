@@ -1,6 +1,7 @@
 # Site contract
 
-Runtime paths in this document are relative to [`platform/`](../platform/).
+Runtime paths in this document are relative to [`platform/`](..), this file's
+parent directory.
 
 The topology/site simulation (plant terrain, perimeter, structures, SITL world,
 home location) is owned by another teammate. Everything else consumes it only
