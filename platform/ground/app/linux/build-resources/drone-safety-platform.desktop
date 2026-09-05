@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Drone Safety Platform
+GenericName=Drone Ground Control
+Comment=Ground control center for the Drone Safety Platform person-following drone
+Exec=drone-safety-platform %U
+Icon=drone-safety-platform
+Terminal=false
+Categories=Utility;Science;
+Keywords=drone;gcs;mavlink;ardupilot;tracking;
+StartupWMClass=Drone Safety Platform
+# Reference copy. electron-builder generates the installed .desktop from the
+# `linux.desktop` block in electron-builder.yml; this file is for AppImage/
+# Flatpak users who want to register a launcher manually.

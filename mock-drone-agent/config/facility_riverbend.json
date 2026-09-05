@@ -1,0 +1,37 @@
+{
+  "facility_id": "riverbend-substation",
+  "name": "Riverbend 500kV Substation & Generating Station",
+  "base": {"lat": 39.9500, "lon": -75.1900},
+  "geofence": [
+    [39.9460, -75.1960],
+    [39.9460, -75.1840],
+    [39.9540, -75.1840],
+    [39.9540, -75.1960]
+  ],
+  "no_fly_zones": [
+    {
+      "id": "switchyard",
+      "description": "Live 500kV switchyard - EMI and arc-flash risk, no overflight",
+      "center": {"lat": 39.9520, "lon": -75.1862},
+      "radius_m": 70
+    },
+    {
+      "id": "stack",
+      "description": "Exhaust stack thermal plume - loss of lift",
+      "center": {"lat": 39.9478, "lon": -75.1930},
+      "radius_m": 50
+    }
+  ],
+  "limits": {
+    "min_alt_m": 10,
+    "max_alt_m": 120,
+    "max_waypoints": 12,
+    "max_hover_s": 120,
+    "max_mission_range_m": 4000,
+    "max_leg_m": 1500,
+    "min_battery_reserve_pct": 25,
+    "cruise_speed_mps": 12.0,
+    "battery_drain_pct_per_min": 4.0,
+    "anomaly_proximity_m": 60
+  }
+}

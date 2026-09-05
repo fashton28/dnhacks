@@ -2,10 +2,15 @@
   "Detection": {
     "$defs": {
       "ChangeType": {
+        "description": "What the wide-area layer believes changed. Scenario-shaped values are kept for the demo pipeline;\nthe generic values (vehicle, object, structure, ground_disturbance) are what a vision classifier emits.",
         "enum": [
           "intruder_vehicle",
           "fence_breach",
           "unattended_object",
+          "vehicle",
+          "object",
+          "structure",
+          "ground_disturbance",
           "unknown"
         ],
         "title": "ChangeType",
@@ -72,6 +77,19 @@
         "format": "date-time",
         "title": "Detected At",
         "type": "string"
+      },
+      "area_m2": {
+        "anyOf": [
+          {
+            "type": "number"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "description": "projected area; feeds confidence and the minimum-area gate",
+        "title": "Area M2"
       },
       "metadata": {
         "additionalProperties": {
@@ -176,6 +194,84 @@
   },
   "FlightPlan": {
     "$defs": {
+      "LatLon": {
+        "additionalProperties": false,
+        "properties": {
+          "lat": {
+            "maximum": 90,
+            "minimum": -90,
+            "title": "Lat",
+            "type": "number"
+          },
+          "lon": {
+            "maximum": 180,
+            "minimum": -180,
+            "title": "Lon",
+            "type": "number"
+          }
+        },
+        "required": [
+          "lat",
+          "lon"
+        ],
+        "title": "LatLon",
+        "type": "object"
+      },
+      "MissionSpec": {
+        "additionalProperties": false,
+        "description": "The Triage Agent's intent for one Detection. Contains no waypoints.",
+        "properties": {
+          "detection_id": {
+            "title": "Detection Id",
+            "type": "string"
+          },
+          "objective": {
+            "$ref": "#/$defs/Objective"
+          },
+          "survey_polygon": {
+            "description": "closed ring is implied; do not repeat the first point",
+            "items": {
+              "$ref": "#/$defs/LatLon"
+            },
+            "minItems": 3,
+            "title": "Survey Polygon",
+            "type": "array"
+          },
+          "max_altitude_m": {
+            "exclusiveMinimum": 0,
+            "title": "Max Altitude M",
+            "type": "number"
+          },
+          "standoff_m": {
+            "minimum": 0,
+            "title": "Standoff M",
+            "type": "number"
+          },
+          "rationale": {
+            "title": "Rationale",
+            "type": "string"
+          }
+        },
+        "required": [
+          "detection_id",
+          "objective",
+          "survey_polygon",
+          "max_altitude_m",
+          "standoff_m",
+          "rationale"
+        ],
+        "title": "MissionSpec",
+        "type": "object"
+      },
+      "Objective": {
+        "enum": [
+          "inspect",
+          "perimeter_sweep",
+          "standoff_observe"
+        ],
+        "title": "Objective",
+        "type": "string"
+      },
       "Waypoint": {
         "additionalProperties": false,
         "properties": {
@@ -236,6 +332,7 @@
         "type": "array"
       },
       "pattern": {
+        "description": "lawnmower | orbit | direct | square ...",
         "title": "Pattern",
         "type": "string"
       },
@@ -249,6 +346,17 @@
         "minimum": 0,
         "title": "Est Battery Pct",
         "type": "number"
+      },
+      "spec": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/MissionSpec"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null
       }
     },
     "required": [
@@ -266,7 +374,8 @@
       "Severity": {
         "enum": [
           "warning",
-          "violation"
+          "violation",
+          "hard"
         ],
         "title": "Severity",
         "type": "string"
@@ -283,6 +392,7 @@
         "additionalProperties": false,
         "properties": {
           "rule": {
+            "description": "geofence_containment | no_fly_intersection | altitude_ceiling | altitude_floor | battery_reserve | standoff_minimum | mission_duration_cap | ...",
             "title": "Rule",
             "type": "string"
           },
@@ -293,6 +403,18 @@
           "severity": {
             "$ref": "#/$defs/Severity",
             "default": "violation"
+          },
+          "waypoint_index": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Waypoint Index"
           }
         },
         "required": [
@@ -319,6 +441,12 @@
         },
         "title": "Violations",
         "type": "array"
+      },
+      "attempt": {
+        "default": 1,
+        "description": "repair attempts are capped at 3",
+        "title": "Attempt",
+        "type": "integer"
       }
     },
     "required": [
@@ -338,6 +466,53 @@
         ],
         "title": "IncidentVerdict",
         "type": "string"
+      },
+      "Observation": {
+        "additionalProperties": false,
+        "description": "One frame plus the vision model's reading of it.",
+        "properties": {
+          "mission_id": {
+            "title": "Mission Id",
+            "type": "string"
+          },
+          "drone_id": {
+            "title": "Drone Id",
+            "type": "string"
+          },
+          "frame_ref": {
+            "title": "Frame Ref",
+            "type": "string"
+          },
+          "waypoint_index": {
+            "title": "Waypoint Index",
+            "type": "integer"
+          },
+          "captured_at": {
+            "format": "date-time",
+            "title": "Captured At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "salient": {
+            "default": false,
+            "description": "true if this frame drove the verdict",
+            "title": "Salient",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "mission_id",
+          "drone_id",
+          "frame_ref",
+          "waypoint_index",
+          "captured_at",
+          "description"
+        ],
+        "title": "Observation",
+        "type": "object"
       }
     },
     "additionalProperties": false,
@@ -360,6 +535,26 @@
         },
         "title": "Evidence Refs",
         "type": "array"
+      },
+      "observations": {
+        "items": {
+          "$ref": "#/$defs/Observation"
+        },
+        "title": "Observations",
+        "type": "array"
+      },
+      "created_at": {
+        "anyOf": [
+          {
+            "format": "date-time",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Created At"
       }
     },
     "required": [
@@ -478,6 +673,12 @@
         "default": "",
         "description": "autopilot flight mode, free text (GUIDED, RTL, ...)",
         "title": "Mode",
+        "type": "string"
+      },
+      "message": {
+        "default": "",
+        "description": "last autopilot status text, e.g. a fence refusal",
+        "title": "Message",
         "type": "string"
       },
       "ts": {
@@ -651,10 +852,14 @@
   "Scenario": {
     "$defs": {
       "ScenarioKind": {
+        "description": "The five Scenarios in scope (CONTEXT.md, What we monitor). fence_breach is the earlier name of perimeter_opening.",
         "enum": [
           "intruder_vehicle",
-          "fence_breach",
-          "unattended_object"
+          "unattended_object",
+          "unattended_object_benign",
+          "authorized_activity",
+          "perimeter_opening",
+          "fence_breach"
         ],
         "title": "ScenarioKind",
         "type": "string"

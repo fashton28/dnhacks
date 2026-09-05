@@ -1,0 +1,11 @@
+{
+  "frame_id": "sim-overhead-001",
+  "captured_at": "2026-09-05T15:00:00Z",
+  "source": "authorised-simulator-overhead-camera",
+  "geo_bounds": {
+    "north_lat": 39.9520,
+    "south_lat": 39.9490,
+    "west_lon": -75.1920,
+    "east_lon": -75.1880
+  }
+}

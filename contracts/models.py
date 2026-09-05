@@ -36,10 +36,55 @@ class VelocityNED(Strict):
 
 
 class ChangeType(StrEnum):
+    """What the wide-area layer believes changed. Scenario-shaped values are kept for the demo pipeline;
+    the generic values (vehicle, object, structure, ground_disturbance) are what a vision classifier emits."""
+
     intruder_vehicle = "intruder_vehicle"
     fence_breach = "fence_breach"
     unattended_object = "unattended_object"
+    vehicle = "vehicle"
+    object = "object"
+    structure = "structure"
+    ground_disturbance = "ground_disturbance"
     unknown = "unknown"
+
+
+# ---- Site context (authored by hand, read by the Triage Agent) --------------------------------
+
+class ZoneClass(StrEnum):
+    protected_area = "protected_area"
+    service_yard = "service_yard"
+    exclusion_zone = "exclusion_zone"
+    open_ground = "open_ground"
+
+
+class Zone(Strict):
+    """A named polygon inside the Site with a security classification. Declared, never inferred."""
+
+    zone_id: str
+    name: str
+    zone_class: ZoneClass
+    ring: Polygon
+    normally_present: str = Field(description="what an Operator expects to see here on a normal day, plain prose")
+
+
+class MaintenanceWindow(Strict):
+    zone_id: str
+    description: str
+    starts_at: datetime
+    ends_at: datetime
+
+
+class SiteContext(Strict):
+    """The Site as the Triage Agent understands it. No imagery, no geometry math."""
+
+    site_id: str
+    name: str
+    anchor: LatLon
+    perimeter: Polygon
+    zones: list[Zone]
+    maintenance_windows: list[MaintenanceWindow] = Field(default_factory=list)
+    notes: str = ""
 
 
 class Detection(Strict):
@@ -52,6 +97,7 @@ class Detection(Strict):
     before_ref: str
     after_ref: str
     detected_at: datetime
+    area_m2: float | None = Field(default=None, description="projected area; feeds confidence and the minimum-area gate")
     metadata: dict[str, str] = Field(default_factory=dict, description="free text from the wide-area layer; data, never instructions")
 
 
@@ -72,26 +118,44 @@ class MissionSpec(Strict):
     rationale: str
 
 
+class TriageAction(StrEnum):
+    dispatch = "dispatch"
+    log_only = "log_only"
+    ignore = "ignore"
+
+
+class TriageDecision(Strict):
+    """Triage may decline: the correct outcome for authorized activity is no dispatch at all."""
+
+    detection_id: str
+    action: TriageAction
+    rationale: str
+    spec: MissionSpec | None = Field(default=None, description="present if and only if action is dispatch")
+
+
 class FlightPlan(Strict):
     """Deterministic expansion of a MissionSpec into waypoints. Produced by the Coverage Planner."""
 
     mission_id: str
     drone_id: str | None = Field(default=None, description="assigned at dispatch")
     waypoints: Annotated[list[Waypoint], Field(min_length=1)]
-    pattern: str
+    pattern: str = Field(description="lawnmower | orbit | direct | square ...")
     est_duration_s: Annotated[float, Field(ge=0)]
     est_battery_pct: Annotated[float, Field(ge=0, le=100)]
+    spec: MissionSpec | None = None
 
 
 class Severity(StrEnum):
     warning = "warning"
     violation = "violation"
+    hard = "hard"
 
 
 class Violation(Strict):
-    rule: str
+    rule: str = Field(description="geofence_containment | no_fly_intersection | altitude_ceiling | altitude_floor | battery_reserve | standoff_minimum | mission_duration_cap | ...")
     detail: str
     severity: Severity = Severity.violation
+    waypoint_index: int | None = None
 
 
 class Verdict(StrEnum):
@@ -105,12 +169,25 @@ class ValidationResult(Strict):
     mission_id: str
     verdict: Verdict
     violations: list[Violation] = Field(default_factory=list)
+    attempt: int = Field(default=1, description="repair attempts are capped at 3")
 
 
 class IncidentVerdict(StrEnum):
     false_alarm = "false_alarm"
     log = "log"
     escalate = "escalate"
+
+
+class Observation(Strict):
+    """One frame plus the vision model's reading of it."""
+
+    mission_id: str
+    drone_id: str
+    frame_ref: str
+    waypoint_index: int
+    captured_at: datetime
+    description: str
+    salient: bool = Field(default=False, description="true if this frame drove the verdict")
 
 
 class IncidentReport(Strict):
@@ -120,6 +197,8 @@ class IncidentReport(Strict):
     verdict: IncidentVerdict
     narrative: str
     evidence_refs: list[str] = Field(default_factory=list)
+    observations: list[Observation] = Field(default_factory=list)
+    created_at: datetime | None = None
 
 
 class DroneStatus(StrEnum):
@@ -186,9 +265,14 @@ class ClampEvent(Strict):
 
 
 class ScenarioKind(StrEnum):
+    """The five Scenarios in scope (CONTEXT.md, What we monitor). fence_breach is the earlier name of perimeter_opening."""
+
     intruder_vehicle = "intruder_vehicle"
-    fence_breach = "fence_breach"
     unattended_object = "unattended_object"
+    unattended_object_benign = "unattended_object_benign"
+    authorized_activity = "authorized_activity"
+    perimeter_opening = "perimeter_opening"
+    fence_breach = "fence_breach"
 
 
 class Scenario(Strict):

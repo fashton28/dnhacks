@@ -1,0 +1,27 @@
+# ARGUS. Python 3.11.
+# The stack from ARCHITECTURE.md section 8. Only pydantic is installed so far;
+# `pip install -r requirements.txt` brings a machine up to the full set.
+
+# Contracts
+pydantic>=2.13,<3
+
+# LLM
+anthropic>=0.69
+
+# Geometry
+shapely>=2.0
+pyproj>=3.6
+
+# Hub
+fastapi>=0.115
+uvicorn[standard]>=0.32
+websockets>=13
+
+# Wide-area layer
+opencv-python>=4.10
+numpy>=1.26
+pillow>=10.4
+
+# Tests
+pytest>=8.3
+httpx>=0.27

@@ -1,11 +1,41 @@
+# ---- Python ----
 .venv/
+venv/
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.eggs/
 .pytest_cache/
+.venv-test/
+.env
+# ---- Node / UI / Electron ----
+node_modules/
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+.vite/
+console/dist/
+console/public/assets/        # CC0 Poly Haven assets, fetched by scripts/fetch_assets.py
+# ---- ArduPilot SITL / logs ----
+platform/sim/ardupilot/
+*.tlog
+*.bin
+logs/
+recordings/
+*.log
+# ---- Runtime artefacts, never committed ----
 events.jsonl
 evidence/
-node_modules/
-console/dist/
-.DS_Store
+renders/
 scratch/
-console/public/assets/
+# ---- ML artefacts ----
+*.engine
+*.onnx
+weights/*.pt
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+dist-installer/

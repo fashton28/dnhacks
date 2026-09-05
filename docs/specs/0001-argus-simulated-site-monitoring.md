@@ -241,5 +241,5 @@ The Hub tests use FastAPI's test client and an in-process WebSocket client; the 
   The old line "the only thing missing is the airframe" is retired.
 - Defense in depth now means Safety Validator at dispatch, Safety Validator clamping under Manual Control, and the flight controller's own hard limits.
   All three should be shown in the demo.
-- Deadline is noon on 2026-09-06.
+- Deadline is noon.
   Anything not on the path to the three-minute demo and the red-team moment is a cut candidate at hour 12.

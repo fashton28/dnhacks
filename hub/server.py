@@ -373,12 +373,16 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         p = sc.params
         if sc.kind == "intruder_vehicle":
             scene.props.append(SceneProp(id=f"{sc.id}-vehicle", kind="vehicle", x=float(p.get("x", 130)), y=float(p.get("y", -135)), yaw_deg=float(p.get("heading_deg", 90))))
-        elif sc.kind == "fence_breach":
+        elif sc.kind in ("fence_breach", "perimeter_opening"):
             section = str(p.get("section", "fence_outer_s_07"))
             if section not in scene.open_fences:
                 scene.open_fences.append(section)
-        elif sc.kind == "unattended_object":
+        elif sc.kind == "unattended_object":  # crate beside the reactor, inside the protected area
             scene.props.append(SceneProp(id=f"{sc.id}-crate", kind="crate", x=float(p.get("x", 30)), y=float(p.get("y", -20)), yaw_deg=float(p.get("heading_deg", 0))))
+        elif sc.kind == "unattended_object_benign":  # the same crate, in the service yard by the maintenance shed
+            scene.props.append(SceneProp(id=f"{sc.id}-crate", kind="crate", x=float(p.get("x", -48)), y=float(p.get("y", -62)), yaw_deg=float(p.get("heading_deg", 20))))
+        elif sc.kind == "authorized_activity":  # marked maintenance vehicle in the service yard during a declared window
+            scene.props.append(SceneProp(id=f"{sc.id}-vehicle", kind="vehicle", x=float(p.get("x", -52)), y=float(p.get("y", -75)), yaw_deg=float(p.get("heading_deg", 0))))
         scene.scenario_ids.append(sc.id)
         app.state.audit.append("scenario_run", scenario=sc.model_dump(mode="json"))
         await reg().broadcast_scene()

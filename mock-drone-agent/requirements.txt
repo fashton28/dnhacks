@@ -1,0 +1,6 @@
+# Mock mode needs nothing at all — the stdlib is enough.
+# Install this only for live mode (real Claude API calls).
+anthropic>=0.70
+
+# The drone-control layer will also want:
+#   mavsdk        # PX4 / MAVLink control

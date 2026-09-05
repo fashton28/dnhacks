@@ -1,0 +1,18 @@
+<!-- @dsCard group="Spacing" viewport="700x180" name="Elevation & glows" subtitle="Shadows for popovers/modals only. Glows mark active/critical states." -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  html,body{margin:0;background:var(--bg-app)}
+  body{padding:24px 22px;font-family:var(--font-sans);display:flex;gap:20px;flex-wrap:wrap}
+  .cell{display:flex;flex-direction:column;align-items:center;gap:9px}
+  .box{width:96px;height:60px;background:var(--surface-overlay);border:1px solid var(--border-default);border-radius:var(--radius-md);display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--text-secondary)}
+  .t{font-family:var(--font-mono);font-size:9px;color:var(--text-tertiary)}
+</style></head>
+<body>
+<div class="cell"><div class="box" style="box-shadow:var(--shadow-raised)">raised</div><span class="t">--shadow-raised</span></div>
+<div class="cell"><div class="box" style="box-shadow:var(--shadow-popover)">popover</div><span class="t">--shadow-popover</span></div>
+<div class="cell"><div class="box" style="box-shadow:var(--shadow-modal)">modal</div><span class="t">--shadow-modal</span></div>
+<div class="cell"><div class="box" style="box-shadow:var(--glow-accent)">active</div><span class="t">--glow-accent</span></div>
+<div class="cell"><div class="box" style="box-shadow:var(--glow-critical)">critical</div><span class="t">--glow-critical</span></div>
+</body></html>

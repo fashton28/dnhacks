@@ -1,0 +1,15 @@
+{
+  "boundsLatLon": {
+    "north": -26.08451,
+    "south": -26.09619,
+    "east": 29.47994,
+    "west": 29.464259999999996
+  },
+  "widthPx": 512,
+  "heightPx": 512,
+  "generated": {
+    "by": "ground/satellite/scripts/make-tiles.mjs",
+    "siteFile": "site/site.stub.json",
+    "seed": 1592598566
+  }
+}

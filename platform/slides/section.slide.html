@@ -1,0 +1,27 @@
+<!-- @dsCard group="Slides" viewport="1280x720" name="Section divider" subtitle="Numbered section break on accent ink" -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  html,body{margin:0}
+  .slide{width:1280px;height:720px;background:var(--blue-ink);position:relative;overflow:hidden;font-family:var(--font-sans);color:var(--text-primary)}
+  .grid{position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.03) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.03) 1px,transparent 1px);background-size:64px 64px;mask-image:linear-gradient(120deg,#000,transparent 70%)}
+  .body{position:absolute;left:96px;top:0;bottom:0;display:flex;flex-direction:column;justify-content:center;gap:18px}
+  .num{font-family:var(--font-mono);font-size:22px;color:var(--accent-text);letter-spacing:.1em}
+  .line{width:64px;height:3px;background:var(--accent)}
+  h2{margin:0;font-size:68px;font-weight:700;letter-spacing:-.02em;line-height:1.05;max-width:780px}
+  .desc{font-size:19px;color:var(--text-secondary);max-width:560px;line-height:1.5}
+  .mark{position:absolute;right:80px;bottom:70px;width:120px;height:120px;opacity:.85}
+</style></head>
+<body>
+<div class="slide">
+  <div class="grid"></div>
+  <div class="body">
+    <span class="num">02</span>
+    <div class="line"></div>
+    <h2>Tracking &amp; standoff</h2>
+    <p class="desc">How the control center engages a target, holds a safe distance, and never lets the operator lose the stop button.</p>
+  </div>
+  <img class="mark" src="../assets/logo-mark.svg" alt="" />
+</div>
+</body></html>

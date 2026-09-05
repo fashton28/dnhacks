@@ -1,0 +1,65 @@
+/* ==========================================================================
+   Drone Safety Platform — Typography tokens
+   Geist for UI/labels. JetBrains Mono for every live numeric readout
+   (tabular figures so digits don't jitter as they change).
+   ========================================================================== */
+
+:root {
+  --font-sans: 'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+
+  /* ---- Size scale (px). Dense UI — small steps. -------------------------- */
+  --text-2xs:    10px;   /* micro labels, axis ticks                         */
+  --text-xs:     11px;   /* pill text, dense captions                        */
+  --text-sm:     12px;   /* secondary labels, table cells                    */
+  --text-base:   13px;   /* default body / control text                      */
+  --text-md:     14px;   /* emphasised body                                  */
+  --text-lg:     16px;   /* sub-headings                                     */
+  --text-xl:     20px;   /* panel titles                                     */
+  --text-2xl:    26px;   /* section titles                                   */
+  --text-3xl:    34px;   /* display                                          */
+
+  /* ---- Telemetry readout sizes (mono) ----------------------------------- */
+  --readout-sm:  15px;
+  --readout-md:  22px;
+  --readout-lg:  32px;
+  --readout-xl:  44px;   /* hero values (altitude, distance)                 */
+
+  /* ---- Weights ----------------------------------------------------------- */
+  --weight-light:   300;
+  --weight-regular: 400;
+  --weight-medium:  500;
+  --weight-semibold:600;
+  --weight-bold:    700;
+
+  /* ---- Line heights ------------------------------------------------------ */
+  --leading-tight:  1.1;
+  --leading-snug:   1.25;
+  --leading-normal: 1.45;
+
+  /* ---- Letter spacing ---------------------------------------------------- */
+  --tracking-label: 0.06em;   /* ALL-CAPS micro labels                       */
+  --tracking-tight: -0.01em;  /* large display                              */
+  --tracking-mono:  0.01em;
+
+  /* ---- Tabular numerals helper ------------------------------------------ */
+  --numeric: var(--font-mono);
+}
+
+/* Convenience utility classes (optional — components mostly use vars) */
+.eis-label {
+  font-family: var(--font-sans);
+  font-size: var(--text-2xs);
+  font-weight: var(--weight-semibold);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-tertiary);
+}
+
+.eis-readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+  letter-spacing: var(--tracking-mono);
+  color: var(--text-primary);
+}
