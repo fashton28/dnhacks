@@ -1,5 +1,5 @@
 /* ============================================================================
- * V01-V25 verifier fixtures.
+ * V01-V36 verifier fixtures.
  *
  * The cases live in the repo-root `verifier_fixtures/` directory as
  * self-describing JSON: a plan, a runtime-context patch, and the verdict plus
@@ -32,6 +32,8 @@ interface Fixture {
   siteOverride?: Partial<SiteModel>;
   plan: MissionPlan;
   telemetry?: Record<string, unknown>;
+  /** Present when the case's plan is the deterministic planner's own output. */
+  task?: { task: unknown; anomaly: unknown };
   expected: Expected;
 }
 
@@ -66,9 +68,17 @@ function siteFor(fixture: Fixture): SiteModel {
   return fixture.siteOverride ? { ...loaded, ...fixture.siteOverride } : loaded;
 }
 
-describe('V01-V25 verifier fixtures', () => {
+/* The documented case set. V26-V28 are RESERVED for the cue-budget wave, which
+ * has not landed on this branch — see verifier_fixtures/README.md. Add the ids
+ * here when they do, so a missing or unexpected case still fails loudly. */
+const EXPECTED_IDS = [
+  ...Array.from({ length: 25 }, (_, i) => `V${String(i + 1).padStart(2, '0')}`),
+  'V29', 'V30', 'V31', 'V32', 'V33', 'V34', 'V35', 'V36',
+];
+
+describe('V01-V36 verifier fixtures', () => {
   it('carries exactly the documented case set', () => {
-    expect(ids).toEqual(Array.from({ length: 25 }, (_, i) => `V${String(i + 1).padStart(2, '0')}`));
+    expect(ids).toEqual(EXPECTED_IDS);
     expect(fixtures.map((f) => f.id)).toEqual(ids);
     expect(fixtures.every((f) => f.description.length > 0 && f.covers.length > 0)).toBe(true);
   });

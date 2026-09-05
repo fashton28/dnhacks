@@ -1,0 +1,59 @@
+{
+  "id": "V34",
+  "scenario": "unattended_night_thermal",
+  "description": "Night with a failed thermal rail. The readiness check already refuses the dispatch; the attended check refuses it a second time in unattended terms, because a night mission with no thermal produces no observation worth flying for and there is nobody to judge that live.",
+  "covers": [
+    "night without thermal",
+    "unattended refusal",
+    "two independent refusals"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V34",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 40
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 40,
+    "mode": "unattended",
+    "isNight": true,
+    "sensors": {
+      "thermal": "failed"
+    },
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "readiness",
+      "attended"
+    ],
+    "reasonContains": {
+      "attended": [
+        "needs_operator",
+        "night mission"
+      ]
+    }
+  }
+}

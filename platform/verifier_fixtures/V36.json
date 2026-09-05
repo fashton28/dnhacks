@@ -1,0 +1,244 @@
+{
+  "id": "V36",
+  "scenario": "planner_via_point",
+  "description": "The deterministic planner's own output, checked in. The cue sits on the east fence beyond the switchyard NFZ, so the straight leg out and the straight leg home both cross the 25 m buffered polygon: the rule table routes around it with via-points on the way out and on the way back, at the mid-band altitude, one lap, and the 15 s hold that only fence_gap gets. It verifies pass with no correction - a corrected verdict on planner output would be a planner bug. Uses site/site.stub.json because the switchyard lives there.",
+  "covers": [
+    "deterministic planner output",
+    "via-point route",
+    "return route",
+    "fence_gap hold",
+    "pass without correction"
+  ],
+  "site": "../site/site.stub.json",
+  "task": {
+    "task": {
+      "taskId": "task-stub-east-fence-south",
+      "anomalyId": "stub-east-fence-south",
+      "lookFor": "fence_gap",
+      "question": "Is there a gap in the fence line at the cctv cue stub-east-fence-south?",
+      "urgency": "immediate",
+      "priority": 0.792,
+      "rationale": "Rank 1: cctv reliability 0.90; confidence 0.88; age 0 s.",
+      "source": "scripted"
+    },
+    "anomaly": {
+      "id": "stub-east-fence-south",
+      "lat": -26.092,
+      "lon": 29.4763,
+      "type": "breach",
+      "confidence": 0.88,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "cctv",
+      "observedAt": 1757116800000,
+      "ttl_s": 900,
+      "cameraId": "cam-east-south"
+    }
+  },
+  "plan": {
+    "requestId": "fixture-V36",
+    "anomalyId": "stub-east-fence-south",
+    "profile": "inspect",
+    "rationale": "Deterministic inspect of fence_gap at cue stub-east-fence-south for task task-stub-east-fence-south: Is there a gap in the fence line at the cctv cue stub-east-fence-south? Route, altitude, radius and duration come from the rule table, not from the cue.",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.09,
+        "lon": 29.4719,
+        "alt": 32.5,
+        "profile": "inspect"
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.091056,
+        "lon": 29.476192,
+        "alt": 32.5,
+        "profile": "inspect"
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.091919,
+        "lon": 29.476122,
+        "alt": 32.5,
+        "profile": "inspect"
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.092,
+        "lon": 29.4763,
+        "radius": 19.9,
+        "laps": 1
+      },
+      {
+        "tool": "hold",
+        "durationS": 15
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.091056,
+        "lon": 29.476192,
+        "alt": 32.5,
+        "profile": "inspect"
+      },
+      {
+        "tool": "rtl"
+      }
+    ],
+    "planTrace": [
+      {
+        "rule": "mode",
+        "effect": "attended: full site envelope"
+      },
+      {
+        "rule": "profile",
+        "effect": "lookFor=fence_gap selects the inspect profile"
+      },
+      {
+        "rule": "site_valid",
+        "effect": "site geometry and safety policy are valid"
+      },
+      {
+        "rule": "dispatch_state",
+        "effect": "nav, readiness, battery, wind, RF and sensor gates all pass"
+      },
+      {
+        "rule": "containment",
+        "effect": "the cue is inside the operational geofence"
+      },
+      {
+        "rule": "altitude",
+        "effect": "mid-point of the profile band intersected with the site band"
+      },
+      {
+        "rule": "orbit",
+        "effect": "orbit radius shrunk to clear the buffered no-fly zones and the geofence, never below standoff"
+      },
+      {
+        "rule": "laps",
+        "effect": "exactly 1 lap"
+      },
+      {
+        "rule": "departure",
+        "effect": "vertical climb to cruise altitude before the first translating leg"
+      },
+      {
+        "rule": "route",
+        "effect": "straight leg blocked; shortest via-point detour around 1 buffered no-fly zone(s)"
+      },
+      {
+        "rule": "return",
+        "effect": "direct return blocked; shortest via-point detour around 1 buffered no-fly zone(s)"
+      },
+      {
+        "rule": "hold",
+        "effect": "15 s hold, the only hold case"
+      },
+      {
+        "rule": "terminal",
+        "effect": "mission terminates with one rtl"
+      },
+      {
+        "rule": "time_budget",
+        "effect": "mission fits min(live-SoC range time, sortie cap)"
+      },
+      {
+        "rule": "corridor",
+        "effect": "lateral tolerance 10 m, radial tolerance 5 m"
+      }
+    ],
+    "corridor": {
+      "legs": [
+        {
+          "from": {
+            "lat": -26.09,
+            "lon": 29.4719
+          },
+          "to": {
+            "lat": -26.091056,
+            "lon": 29.476192
+          },
+          "lateral_tol_m": 10
+        },
+        {
+          "from": {
+            "lat": -26.091056,
+            "lon": 29.476192
+          },
+          "to": {
+            "lat": -26.091919,
+            "lon": 29.476122
+          },
+          "lateral_tol_m": 10
+        },
+        {
+          "from": {
+            "lat": -26.091919,
+            "lon": 29.476122
+          },
+          "to": {
+            "lat": -26.091919,
+            "lon": 29.476122
+          },
+          "lateral_tol_m": 10
+        },
+        {
+          "from": {
+            "lat": -26.091919,
+            "lon": 29.476122
+          },
+          "to": {
+            "lat": -26.091056,
+            "lon": 29.476192
+          },
+          "lateral_tol_m": 10
+        },
+        {
+          "from": {
+            "lat": -26.091056,
+            "lon": 29.476192
+          },
+          "to": {
+            "lat": -26.09,
+            "lon": 29.4719
+          },
+          "lateral_tol_m": 10
+        }
+      ],
+      "orbits": [
+        {
+          "center": {
+            "lat": -26.092,
+            "lon": 29.4763
+          },
+          "radius_m": 19.9,
+          "radial_tol_m": 5
+        }
+      ],
+      "alt_band_m": {
+        "min": 20,
+        "max": 45
+      },
+      "generated_from": "fixture-V36"
+    }
+  },
+  "telemetry": {
+    "anomaly": {
+      "id": "stub-east-fence-south",
+      "lat": -26.092,
+      "lon": 29.4763,
+      "type": "breach",
+      "confidence": 0.88,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "cctv",
+      "observedAt": 1757116800000,
+      "ttl_s": 900,
+      "cameraId": "cam-east-south"
+    },
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000
+  },
+  "expected": {
+    "verdict": "pass",
+    "failingChecks": []
+  }
+}
