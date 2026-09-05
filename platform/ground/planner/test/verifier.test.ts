@@ -60,6 +60,18 @@ describe('ordered fail-closed verifier', () => {
     expect(result.checks.find(({ name }) => name === 'range')?.ok).toBe(false);
   });
 
+  it.each([
+    { tool:'follow', track_id:1, profile:'follow' } as const,
+    { tool:'orbit', track_id:1, profile:'inspect' } as const,
+    { tool:'goto_relative', dx:1, dy:2, dz:3 } as const,
+  ])('fails closed at schema for unsupported $tool mission sequences', (tool) => {
+    const result = verifyMission(basic([tool, { tool:'rtl' }]), site(), ready());
+    expect(result.verdict).toBe('rejected');
+    expect(result.correctedPlan).toBeUndefined();
+    expect(result.checks[0]).toMatchObject({ name:'schema', ok:false });
+    expect(result.checks[0].reason).toMatch(/not admitted.*sequence-executor support/);
+  });
+
   it('requires explicit fault and sensor-health status', () => {
     const model = site();
     const plan = new ScriptedPlanner().passingPlan(model, anomaly);

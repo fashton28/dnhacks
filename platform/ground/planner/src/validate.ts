@@ -9,6 +9,15 @@ import {
 } from './contract';
 import { ObservationSummary } from './report';
 
+/** Tools whose geometry and duration can be proven for a complete mission
+ * sequence and decoded by the companion sequence executor. Moving-track and
+ * relative tools remain valid single planCommand operations in the shared
+ * contract, but are not admitted to MissionPlan sequences yet. */
+export const MISSION_SEQUENCE_TOOLS = [
+  'goto_gps', 'orbit_point', 'hold', 'rtl',
+] as const;
+const MISSION_SEQUENCE_TOOL_SET = new Set<string>(MISSION_SEQUENCE_TOOLS);
+
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
 }
@@ -131,6 +140,14 @@ export function validateMissionPlan(data: unknown): MissionPlan {
     throw new Error('invalid MissionPlan: tools must be a non-empty array');
   }
   const tools = d.tools.map((t, i) => validateTool(t, `invalid MissionPlan: tools[${i}]`));
+  const unsupported = tools.find((tool) => !MISSION_SEQUENCE_TOOL_SET.has(tool.tool));
+  if (unsupported) {
+    throw new Error(
+      `invalid MissionPlan: tool ${unsupported.tool} is not admitted to a mission sequence; ` +
+      'moving-track and relative tools require resolved geometry and sequence-executor support ' +
+      'before verification (use the single planCommand path)',
+    );
+  }
   return {
     requestId: d.requestId,
     anomalyId: d.anomalyId,

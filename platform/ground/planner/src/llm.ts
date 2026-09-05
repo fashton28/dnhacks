@@ -17,9 +17,6 @@ const PlanTool = z.discriminatedUnion('tool', [
   z.object({ tool: z.literal('orbit_point'), lat: z.number(), lon: z.number(), radius: z.number(), laps: z.number().nullable() }),
   z.object({ tool: z.literal('hold'), durationS: z.number().nullable() }),
   z.object({ tool: z.literal('rtl') }),
-  z.object({ tool: z.literal('follow'), track_id: z.number(), profile: Profile }),
-  z.object({ tool: z.literal('orbit'), track_id: z.number(), profile: Profile }),
-  z.object({ tool: z.literal('goto_relative'), dx: z.number(), dy: z.number(), dz: z.number() }),
 ]);
 
 export const MISSION_PLAN_INPUT_SCHEMA = z.object({
@@ -75,7 +72,7 @@ export class LlmPlanner {
     };
     const response = await this.parse({
       model: this.model,
-      instructions: 'Return exactly one schema-bound mission plan. End with rtl. Never add prose outside the object.',
+      instructions: 'Return exactly one schema-bound mission plan using only goto_gps, orbit_point, hold, and rtl. End with rtl. Never add prose outside the object.',
       input: `Anomaly:\n${JSON.stringify(anomaly)}\nConstraints:\n${constraints(site)}\n` +
         `Dispatch capabilities:\n${JSON.stringify(cap ?? {})}\nFlight budget:\n${JSON.stringify(budget)}\n` +
         `requestId=${requestId}\n${options.feedback ? `Verifier feedback from the one allowed retry:\n${options.feedback}` : ''}`,
