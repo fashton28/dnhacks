@@ -1,0 +1,19 @@
+{
+  "type": "telemetry",
+  "state": {
+    "drone_id": "drone-1",
+    "lat": 41.199461,
+    "lon": -98.4007163,
+    "alt": 0.0,
+    "heading_deg": 0.0,
+    "velocity_ned": {
+      "vx": 0,
+      "vy": 0,
+      "vz": 0
+    },
+    "battery_pct": 100.0,
+    "status": "idle",
+    "mission_id": null,
+    "ts": "2026-09-05T12:00:00Z"
+  }
+}

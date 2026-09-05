@@ -1,0 +1,10 @@
+{
+  "id": "scn-001",
+  "kind": "intruder_vehicle",
+  "params": {
+    "x": 130,
+    "y": -135,
+    "heading_deg": 90
+  },
+  "run_at": null
+}

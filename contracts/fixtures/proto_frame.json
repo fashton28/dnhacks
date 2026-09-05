@@ -1,0 +1,14 @@
+{
+  "type": "frame",
+  "drone_id": "drone-1",
+  "jpeg_b64": "/9j/",
+  "width": 400,
+  "height": 240,
+  "lat": 41.2,
+  "lon": -98.4,
+  "alt": 20.0,
+  "heading_deg": 90.0,
+  "gimbal_pitch_deg": 45.0,
+  "ts": "2026-09-05T12:00:00Z",
+  "cmd_id": "cmd-7"
+}

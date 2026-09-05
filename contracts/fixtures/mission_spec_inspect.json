@@ -1,0 +1,25 @@
+{
+  "detection_id": "det-001",
+  "objective": "inspect",
+  "survey_polygon": [
+    {
+      "lat": 41.1986974,
+      "lon": -98.3986867
+    },
+    {
+      "lat": 41.1986974,
+      "lon": -98.3982688
+    },
+    {
+      "lat": 41.198922,
+      "lon": -98.3982688
+    },
+    {
+      "lat": 41.198922,
+      "lon": -98.3986867
+    }
+  ],
+  "max_altitude_m": 30.0,
+  "standoff_m": 15.0,
+  "rationale": "Small new object adjacent to the south-east outer fence; low-altitude inspection pass to confirm vehicle and check the fence line."
+}

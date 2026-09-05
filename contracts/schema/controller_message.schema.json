@@ -1,0 +1,391 @@
+{
+  "$defs": {
+    "Ack": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "ack",
+          "default": "ack",
+          "title": "Type",
+          "type": "string"
+        },
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "ok": {
+          "title": "Ok",
+          "type": "boolean"
+        },
+        "detail": {
+          "default": "",
+          "title": "Detail",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "ok"
+      ],
+      "title": "Ack",
+      "type": "object"
+    },
+    "DroneState": {
+      "additionalProperties": false,
+      "description": "Telemetry snapshot of one Drone.",
+      "properties": {
+        "drone_id": {
+          "title": "Drone Id",
+          "type": "string"
+        },
+        "lat": {
+          "title": "Lat",
+          "type": "number"
+        },
+        "lon": {
+          "title": "Lon",
+          "type": "number"
+        },
+        "alt": {
+          "description": "metres above Site ground level",
+          "title": "Alt",
+          "type": "number"
+        },
+        "heading_deg": {
+          "exclusiveMaximum": 360,
+          "minimum": 0,
+          "title": "Heading Deg",
+          "type": "number"
+        },
+        "velocity_ned": {
+          "$ref": "#/$defs/VelocityNED"
+        },
+        "battery_pct": {
+          "maximum": 100,
+          "minimum": 0,
+          "title": "Battery Pct",
+          "type": "number"
+        },
+        "status": {
+          "$ref": "#/$defs/DroneStatus"
+        },
+        "mission_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Mission Id"
+        },
+        "gimbal_pitch_deg": {
+          "default": 45.0,
+          "description": "0 level, 90 straight down; drawn by the Renderer",
+          "maximum": 90,
+          "minimum": 0,
+          "title": "Gimbal Pitch Deg",
+          "type": "number"
+        },
+        "armed": {
+          "default": false,
+          "title": "Armed",
+          "type": "boolean"
+        },
+        "mode": {
+          "default": "",
+          "description": "autopilot flight mode, free text (GUIDED, RTL, ...)",
+          "title": "Mode",
+          "type": "string"
+        },
+        "ts": {
+          "format": "date-time",
+          "title": "Ts",
+          "type": "string"
+        }
+      },
+      "required": [
+        "drone_id",
+        "lat",
+        "lon",
+        "alt",
+        "heading_deg",
+        "velocity_ned",
+        "battery_pct",
+        "status",
+        "ts"
+      ],
+      "title": "DroneState",
+      "type": "object"
+    },
+    "DroneStatus": {
+      "enum": [
+        "idle",
+        "on_mission",
+        "manual_control",
+        "returning",
+        "offline"
+      ],
+      "title": "DroneStatus",
+      "type": "string"
+    },
+    "Frame": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "frame",
+          "default": "frame",
+          "title": "Type",
+          "type": "string"
+        },
+        "drone_id": {
+          "title": "Drone Id",
+          "type": "string"
+        },
+        "jpeg_b64": {
+          "title": "Jpeg B64",
+          "type": "string"
+        },
+        "width": {
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "title": "Height",
+          "type": "integer"
+        },
+        "lat": {
+          "title": "Lat",
+          "type": "number"
+        },
+        "lon": {
+          "title": "Lon",
+          "type": "number"
+        },
+        "alt": {
+          "title": "Alt",
+          "type": "number"
+        },
+        "heading_deg": {
+          "title": "Heading Deg",
+          "type": "number"
+        },
+        "gimbal_pitch_deg": {
+          "title": "Gimbal Pitch Deg",
+          "type": "number"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "cmd_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "set when this frame answers a capture_frame",
+          "title": "Cmd Id"
+        }
+      },
+      "required": [
+        "drone_id",
+        "jpeg_b64",
+        "width",
+        "height",
+        "lat",
+        "lon",
+        "alt",
+        "heading_deg",
+        "gimbal_pitch_deg",
+        "ts"
+      ],
+      "title": "Frame",
+      "type": "object"
+    },
+    "Hello": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "hello",
+          "default": "hello",
+          "title": "Type",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "drone",
+            "renderer"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "id": {
+          "description": "drone_id, or a renderer id",
+          "title": "Id",
+          "type": "string"
+        },
+        "sim": {
+          "enum": [
+            "ardupilot",
+            "fake",
+            "browser",
+            "headless"
+          ],
+          "title": "Sim",
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "id",
+        "sim"
+      ],
+      "title": "Hello",
+      "type": "object"
+    },
+    "Overhead": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "overhead",
+          "default": "overhead",
+          "title": "Type",
+          "type": "string"
+        },
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        },
+        "png_b64": {
+          "title": "Png B64",
+          "type": "string"
+        },
+        "width": {
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "title": "Height",
+          "type": "integer"
+        },
+        "footprint": {
+          "description": "[[lat, lon] x 4] corners: top-left, top-right, bottom-right, bottom-left",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "type": "array"
+          },
+          "title": "Footprint",
+          "type": "array"
+        },
+        "ts": {
+          "title": "Ts",
+          "type": "string"
+        },
+        "cmd_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Cmd Id"
+        }
+      },
+      "required": [
+        "ref",
+        "png_b64",
+        "width",
+        "height",
+        "footprint",
+        "ts"
+      ],
+      "title": "Overhead",
+      "type": "object"
+    },
+    "Telemetry": {
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "telemetry",
+          "default": "telemetry",
+          "title": "Type",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/DroneState"
+        }
+      },
+      "required": [
+        "state"
+      ],
+      "title": "Telemetry",
+      "type": "object"
+    },
+    "VelocityNED": {
+      "additionalProperties": false,
+      "properties": {
+        "vx": {
+          "description": "north, m/s",
+          "title": "Vx",
+          "type": "number"
+        },
+        "vy": {
+          "description": "east, m/s",
+          "title": "Vy",
+          "type": "number"
+        },
+        "vz": {
+          "description": "down, m/s (positive descends)",
+          "title": "Vz",
+          "type": "number"
+        }
+      },
+      "required": [
+        "vx",
+        "vy",
+        "vz"
+      ],
+      "title": "VelocityNED",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "ack": "#/$defs/Ack",
+      "frame": "#/$defs/Frame",
+      "hello": "#/$defs/Hello",
+      "overhead": "#/$defs/Overhead",
+      "telemetry": "#/$defs/Telemetry"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Hello"
+    },
+    {
+      "$ref": "#/$defs/Telemetry"
+    },
+    {
+      "$ref": "#/$defs/Frame"
+    },
+    {
+      "$ref": "#/$defs/Ack"
+    },
+    {
+      "$ref": "#/$defs/Overhead"
+    }
+  ]
+}

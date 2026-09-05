@@ -1,0 +1,6 @@
+{
+  "type": "hello",
+  "role": "drone",
+  "id": "drone-1",
+  "sim": "fake"
+}

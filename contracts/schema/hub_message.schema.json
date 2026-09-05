@@ -1,0 +1,401 @@
+{
+  "$defs": {
+    "CaptureFrame": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "capture_frame",
+          "default": "capture_frame",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd_id"
+      ],
+      "title": "CaptureFrame",
+      "type": "object"
+    },
+    "CaptureOverhead": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "capture_overhead",
+          "default": "capture_overhead",
+          "title": "Type",
+          "type": "string"
+        },
+        "ref": {
+          "title": "Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "ref"
+      ],
+      "title": "CaptureOverhead",
+      "type": "object"
+    },
+    "Goto": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "goto",
+          "default": "goto",
+          "title": "Type",
+          "type": "string"
+        },
+        "lat": {
+          "title": "Lat",
+          "type": "number"
+        },
+        "lon": {
+          "title": "Lon",
+          "type": "number"
+        },
+        "alt": {
+          "title": "Alt",
+          "type": "number"
+        },
+        "speed_mps": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Speed Mps"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "lat",
+        "lon",
+        "alt"
+      ],
+      "title": "Goto",
+      "type": "object"
+    },
+    "Hover": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "hover",
+          "default": "hover",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd_id"
+      ],
+      "title": "Hover",
+      "type": "object"
+    },
+    "LookAt": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "look_at",
+          "default": "look_at",
+          "title": "Type",
+          "type": "string"
+        },
+        "pitch_deg": {
+          "description": "0 is level, 90 is straight down",
+          "title": "Pitch Deg",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "pitch_deg"
+      ],
+      "title": "LookAt",
+      "type": "object"
+    },
+    "RenderFrame": {
+      "additionalProperties": false,
+      "description": "Hub -> Renderer: render this Drone's camera now and answer with a frame tagged with cmd_id.",
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "render_frame",
+          "default": "render_frame",
+          "title": "Type",
+          "type": "string"
+        },
+        "drone_id": {
+          "title": "Drone Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "drone_id"
+      ],
+      "title": "RenderFrame",
+      "type": "object"
+    },
+    "Reset": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "reset",
+          "default": "reset",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd_id"
+      ],
+      "title": "Reset",
+      "type": "object"
+    },
+    "ReturnHome": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "return_home",
+          "default": "return_home",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "cmd_id"
+      ],
+      "title": "ReturnHome",
+      "type": "object"
+    },
+    "Scene": {
+      "additionalProperties": false,
+      "description": "Hub -> Renderer: the current scene state to draw.",
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "scene",
+          "default": "scene",
+          "title": "Type",
+          "type": "string"
+        },
+        "state": {
+          "$ref": "#/$defs/SceneState"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "state"
+      ],
+      "title": "Scene",
+      "type": "object"
+    },
+    "SceneProp": {
+      "additionalProperties": false,
+      "description": "One object a Scenario placed on the Site, drawn by every Renderer.",
+      "properties": {
+        "id": {
+          "title": "Id",
+          "type": "string"
+        },
+        "kind": {
+          "description": "vehicle | crate | person",
+          "title": "Kind",
+          "type": "string"
+        },
+        "x": {
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "title": "Y",
+          "type": "number"
+        },
+        "yaw_deg": {
+          "default": 0.0,
+          "title": "Yaw Deg",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "x",
+        "y"
+      ],
+      "title": "SceneProp",
+      "type": "object"
+    },
+    "SceneState": {
+      "additionalProperties": false,
+      "description": "What Scenarios have changed on the Site: props present and fence sections opened.",
+      "properties": {
+        "props": {
+          "items": {
+            "$ref": "#/$defs/SceneProp"
+          },
+          "title": "Props",
+          "type": "array"
+        },
+        "open_fences": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Open Fences",
+          "type": "array"
+        },
+        "scenario_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Scenario Ids",
+          "type": "array"
+        }
+      },
+      "title": "SceneState",
+      "type": "object"
+    },
+    "SetVelocity": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "set_velocity",
+          "default": "set_velocity",
+          "title": "Type",
+          "type": "string"
+        },
+        "velocity_ned": {
+          "$ref": "#/$defs/VelocityNED"
+        },
+        "yaw_rate_dps": {
+          "default": 0.0,
+          "title": "Yaw Rate Dps",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "velocity_ned"
+      ],
+      "title": "SetVelocity",
+      "type": "object"
+    },
+    "VelocityNED": {
+      "additionalProperties": false,
+      "properties": {
+        "vx": {
+          "description": "north, m/s",
+          "title": "Vx",
+          "type": "number"
+        },
+        "vy": {
+          "description": "east, m/s",
+          "title": "Vy",
+          "type": "number"
+        },
+        "vz": {
+          "description": "down, m/s (positive descends)",
+          "title": "Vz",
+          "type": "number"
+        }
+      },
+      "required": [
+        "vx",
+        "vy",
+        "vz"
+      ],
+      "title": "VelocityNED",
+      "type": "object"
+    }
+  },
+  "discriminator": {
+    "mapping": {
+      "capture_frame": "#/$defs/CaptureFrame",
+      "capture_overhead": "#/$defs/CaptureOverhead",
+      "goto": "#/$defs/Goto",
+      "hover": "#/$defs/Hover",
+      "look_at": "#/$defs/LookAt",
+      "render_frame": "#/$defs/RenderFrame",
+      "reset": "#/$defs/Reset",
+      "return_home": "#/$defs/ReturnHome",
+      "scene": "#/$defs/Scene",
+      "set_velocity": "#/$defs/SetVelocity"
+    },
+    "propertyName": "type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Goto"
+    },
+    {
+      "$ref": "#/$defs/Hover"
+    },
+    {
+      "$ref": "#/$defs/SetVelocity"
+    },
+    {
+      "$ref": "#/$defs/LookAt"
+    },
+    {
+      "$ref": "#/$defs/CaptureFrame"
+    },
+    {
+      "$ref": "#/$defs/ReturnHome"
+    },
+    {
+      "$ref": "#/$defs/RenderFrame"
+    },
+    {
+      "$ref": "#/$defs/Scene"
+    },
+    {
+      "$ref": "#/$defs/CaptureOverhead"
+    },
+    {
+      "$ref": "#/$defs/Reset"
+    }
+  ]
+}

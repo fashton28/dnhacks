@@ -1,0 +1,15 @@
+{
+  "props": [
+    {
+      "id": "prop-1",
+      "kind": "vehicle",
+      "x": 130,
+      "y": -135,
+      "yaw_deg": 90
+    }
+  ],
+  "open_fences": [],
+  "scenario_ids": [
+    "scn-001"
+  ]
+}
