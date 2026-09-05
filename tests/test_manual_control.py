@@ -20,15 +20,15 @@ async def _wait(c: httpx.AsyncClient, drone: str, pred, n=200):
 
 
 async def test_manual_velocity_toward_fence_is_clamped_with_rule_named(hub: HubHandle):
-    # start 5 m inside the east geofence edge (x = 160), airborne via a goto first
-    await hub.add_fake_drone("drone-1", home=(150.0, 0.0))
-    lat, lon = enu_to_latlon(150.0, 0.0)
+    # start 10 m inside the east geofence edge (x = 220), airborne via a goto first
+    await hub.add_fake_drone("drone-1", home=(210.0, 0.0))
+    lat, lon = enu_to_latlon(210.0, 0.0)
     async with httpx.AsyncClient(base_url=hub.http) as c:
         assert (await c.post("/drones/drone-1/command", json={"type": "goto", "lat": lat, "lon": lon, "alt": 15})).json()["ok"]
         await _wait(c, "drone-1", lambda s: s["alt"] > 14)
         r = await c.post("/drones/drone-1/manual/start")
         assert r.status_code == 200 and r.json()["paused_mission"] is None
-        # fly east (NED vy) at 3 m/s: 1.5 s lookahead puts it past x=160 within a few commands
+        # fly east (NED vy) at 3 m/s: 1.5 s lookahead puts it past x=220 within a few commands
         clamps = 0
         for _ in range(40):
             r = (await c.post("/drones/drone-1/manual/command", json={"vy": 3.0})).json()
@@ -41,7 +41,7 @@ async def test_manual_velocity_toward_fence_is_clamped_with_rule_named(hub: HubH
         s = (await c.get("/drones/drone-1")).json()
         from contracts.site import latlon_to_enu
         x, _ = latlon_to_enu(s["lat"], s["lon"])
-        assert x <= 160.5, f"drone left the geofence: x={x}"
+        assert x <= 220.5, f"drone left the geofence: x={x}"
         # climbing past the ceiling is clamped too
         r = (await c.post("/drones/drone-1/manual/command", json={"vz": -5.0})).json()
         s = await _wait(c, "drone-1", lambda s: s["alt"] > 55, n=400)

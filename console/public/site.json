@@ -2200,7 +2200,7 @@
   "px": 1024
  },
  "limits": {
-  "geofence_half": 160.0,
+  "geofence_half": 220.0,
   "alt_ceiling_m": 60.0,
   "alt_floor_m": 5.0,
   "no_fly": {

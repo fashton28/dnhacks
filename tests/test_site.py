@@ -24,7 +24,7 @@ def test_generator_outputs_agree(tmp_path):
 def test_site_limits_load_and_clamp():
     from sim.common.site_limits import SiteLimits
     lim = SiteLimits.load()
-    assert lim.inside(0, 0) and not lim.inside(500, 0)
+    assert lim.inside(0, 0) and lim.inside(200, 0) and not lim.inside(500, 0)
     x, y, clamped = lim.clamp_point(500, 0)
     assert clamped and lim.inside(x, y)
     assert lim.clamp_alt(100)[0] == 60

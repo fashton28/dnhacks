@@ -52,6 +52,7 @@ from contracts.protocol import (
 )
 from contracts.site import SITE_NAME
 from hub.audit import AuditLog
+from hub.autonomy import Autonomy
 from hub.detections import DetectionStore
 from hub.manual import ManualControl
 from hub.safety import validate
@@ -63,6 +64,7 @@ from sim.common.site_limits import SiteLimits
 class HubSettings(BaseModel):
     audit_path: Path | None = Path("events.jsonl")
     evidence_dir: Path | None = Path("evidence")
+    runs_dir: Path = Path("runs")
     speed_factor: float = 1.0
 
 
@@ -90,6 +92,12 @@ class OverheadBody(BaseModel):
     ref: str
 
 
+class DetectBody(BaseModel):
+    before_ref: str
+    after_ref: str
+    min_area_m2: float = 4.0
+
+
 class ManualBody(BaseModel):
     vx: float = 0
     vy: float = 0
@@ -113,6 +121,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.detections = DetectionStore()
         app.state.limits = SiteLimits.load()
         app.state.settings = settings
+        app.state.autonomy = Autonomy(app, asyncio.get_running_loop(), settings.runs_dir)
 
         async def stale_loop() -> None:
             while True:
@@ -488,6 +497,37 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         if det is None:
             raise HTTPException(404, f"unknown detection {detection_id}")
         return det
+    # ---- wide-area layer and autonomy ---------------------------------------------------------
+    @app.post("/widearea/detect", response_model=list[Detection])
+    async def widearea_detect(body: DetectBody) -> list[Detection]:
+        from widearea.detect import detect, footprint_from_meta
+        ev = settings.evidence_dir
+        if ev is None:
+            raise HTTPException(409, "evidence storage disabled")
+        before, after = ev / body.before_ref, ev / body.after_ref
+        if not before.exists() or not after.exists():
+            raise HTTPException(404, "before/after overhead image not found; capture them first")
+        found = await asyncio.to_thread(detect, before, after, footprint_from_meta(after.with_suffix(".json")), before_ref=body.before_ref, after_ref=body.after_ref, min_area_m2=body.min_area_m2)
+        for d in found:
+            dets().add(d)
+            app.state.audit.append("detection_received", detection_id=d.id, change_type=d.change_type.value, confidence=d.confidence, source="overhead-change-detection")
+            reg().publish({"type": "detection", **d.model_dump(mode="json")})
+        app.state.audit.append("widearea_detect", before=body.before_ref, after=body.after_ref, detections=len(found))
+        return found
+
+    @app.post("/detections/{detection_id}/dispatch")
+    async def dispatch_detection(detection_id: str) -> dict[str, Any]:
+        if dets().get(detection_id) is None:
+            raise HTTPException(404, "unknown detection")
+        app.state.audit.append("dispatch_requested", detection_id=detection_id, llm_mode=app.state.autonomy.mode)
+        outcome = await app.state.autonomy.dispatch(detection_id)
+        app.state.audit.append("dispatch_outcome", detection_id=detection_id, mission_id=outcome["mission_id"], flown=outcome["flown"], decision=outcome["triage"].get("decision"))
+        return outcome
+
+    @app.get("/autonomy")
+    async def autonomy_status() -> dict[str, Any]:
+        a = app.state.autonomy
+        return {"llm_mode": a.mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes)}
 
     @app.post("/drones/{drone_id}/render")
     async def render_drone(drone_id: str) -> dict[str, Any]:

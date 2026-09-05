@@ -39,3 +39,4 @@ Thumbs.db
 .idea/
 .vscode/
 dist-installer/
+runs/

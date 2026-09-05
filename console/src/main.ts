@@ -81,6 +81,20 @@ let selected: string | null = null;
 let scene: SceneState = { props: [], open_fences: [], scenario_ids: [] };
 let missionSpec: MissionSpecView = null;
 let validation: ValidationView = null;
+const detections: any[] = [];
+const switchTab = (name: string) => document.querySelector<HTMLButtonElement>(`.tab[data-tab="${name}"]`)?.click();
+let baselineRef: string | null = null;
+let dispatching = false;
+function refreshDispatchButton(): void {
+  const b = $<HTMLButtonElement>("dispatch");
+  b.disabled = detections.length === 0 || dispatching;
+  b.textContent = dispatching ? "Dispatching…" : detections.length ? `Dispatch ${detections[detections.length - 1].id}` : "Dispatch";
+}
+function onDetection(d: any): void {
+  detections.push(d);
+  log(`DETECTION ${d.id}: ${d.change_type} ~${Math.round(d.area_m2 ?? 0)} m² confidence ${d.confidence}`, "warn");
+  refreshDispatchButton();
+}
 
 function renderDroneView(s: DroneState): void {
   world.aimDroneCamera(droneCam, s);
@@ -165,6 +179,13 @@ liveFeed((ev) => {
     case "clamp": log(`Safety Validator clamped ${ev.drone_id}: ${ev.rule}`, "warn"); showClamp(ev.rule); break;
     case "manual": log(`${ev.drone_id}: Manual Control ${ev.active ? "taken" : "released"}${ev.mission_id ? ` (Mission ${ev.mission_id})` : ""}`, "warn"); break;
     case "overhead": log(`Overhead image stored: ${ev.ref}`, "good"); break;
+    case "detection": onDetection(ev.detection ?? ev); break;
+    case "mission_spec": missionSpec = { objective: ev.spec.objective, rationale: ev.spec.rationale, max_altitude_m: ev.spec.max_altitude_m, standoff_m: ev.spec.standoff_m }; log(`Triage Agent proposed a plan (attempt ${ev.spec.attempt ?? 1}): ${ev.spec.rationale}`); refreshMission(); switchTab("mission"); break;
+    case "validation": validation = { verdict: ev.result.verdict, violations: ev.result.violations }; log(ev.result.verdict === "accept" ? `Safety Validator: ACCEPT (${ev.result.checks_passed ?? ""} checks)` : `Safety Validator: REJECT ${ev.result.violations.map((v: any) => v.rule).join(", ")}`, ev.result.verdict === "accept" ? "good" : "warn"); refreshMission(); break;
+    case "triage": log(`Triage: ${String(ev.decision).toUpperCase()} (confidence ${ev.confidence}) ${ev.rationale ?? ""}`, ev.decision === "escalate" ? "warn" : "good"); break;
+    case "incident": log(`INCIDENT REPORT [${ev.severity}] ${ev.title}: ${ev.recommended_action}`, ev.severity === "high" || ev.severity === "critical" ? "bad" : "warn"); break;
+    case "dispatch_outcome": log(`Dispatch outcome for ${ev.detection_id}: ${ev.flown ? "flown by " + ev.drone_id : "NOT FLOWN"} after ${ev.attempts} attempt(s), triage ${ev.triage?.decision}`, ev.flown ? "good" : "warn"); dispatching = false; refreshDispatchButton(); break;
+    case "autonomy": if (["plan_abandoned", "waypoint_reached", "observation"].includes(ev.event.type)) log(`agent ${ev.event.type}: ${ev.event.type === "observation" ? ev.event.payload.caption : JSON.stringify(ev.event.payload).slice(0, 140)}`); break;
     case "ack": if (!ev.ok) log(`${ev.drone_id} refused command: ${ev.detail}`, "bad"); break;
   }
 }, (ok) => setPill("hub-status", ok, ok ? "hub live" : "hub reconnecting"));
@@ -367,6 +388,25 @@ document.querySelectorAll<HTMLButtonElement>("button[data-scenario]").forEach((b
   try { await api("/scenarios/run", { id: `scn-${Date.now().toString(36)}`, kind, params: {} }); log(`Scenario: ${kind.replace("_", " ")}`, "warn"); } catch (err) { log(String(err), "bad"); }
 });
 $("reset-scene").onclick = async () => { try { await api("/scenarios/reset", {}); log("Site reset to baseline"); } catch (err) { log(String(err), "bad"); } };
+$("baseline").onclick = async () => {
+  baselineRef = `overhead/baseline-${Date.now()}.png`;
+  await api("/overhead/capture", { ref: baselineRef });
+  log(`Baseline captured: ${baselineRef}`, "good");
+};
+$("detect").onclick = async () => {
+  if (!baselineRef) { log("Capture a Baseline first.", "warn"); return; }
+  const afterRef = `overhead/after-${Date.now()}.png`;
+  await api("/overhead/capture", { ref: afterRef });
+  const dets: any[] = await api("/widearea/detect", { before_ref: baselineRef, after_ref: afterRef });
+  if (dets.length === 0) log("Change detection: no change above the minimum area.", "good");
+};
+$("dispatch").onclick = async () => {
+  if (detections.length === 0) return;
+  const d = detections[detections.length - 1];
+  dispatching = true; refreshDispatchButton(); switchTab("mission");
+  log(`Dispatching ${d.id} to the Triage Agent…`);
+  api(`/detections/${d.id}/dispatch`, {}).catch((err) => { log(String(err), "bad"); dispatching = false; refreshDispatchButton(); });
+};
 $("capture-overhead").onclick = async () => { try { const r: any = await api("/overhead/capture", { ref: `overhead/${Date.now()}.png` }); log(`Overhead captured: ${r.ref}`, "good"); } catch (err) { log(String(err), "bad"); } };
 $("return-home").onclick = () => { if (selected) returnHome(selected); };
 $("fly-square").onclick = async () => {
