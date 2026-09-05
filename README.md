@@ -10,6 +10,7 @@ This repository keeps the integrated flight platform and the team's complementar
 - [`mock-drone-agent/`](mock-drone-agent/) — mock-agent scenarios, schemas, and reports.
 - [`docs/`](docs/) — cross-component architecture decisions, site policy, failure modes, and specifications.
 - [`docs/REPOSITORY_REVIEW.md`](docs/REPOSITORY_REVIEW.md) — provenance evidence, contract discrepancies, and adapter guidance.
+- [`docs/BASIC_DEMO_PENDING.md`](docs/BASIC_DEMO_PENDING.md) — basic demo gates, teammate progress, and video evidence plan.
 
 ## Platform commands
 
