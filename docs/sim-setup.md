@@ -82,7 +82,8 @@ Both are served by the Hub and driven by the same live feed.
   Keep one Console tab open (or run `scripts/headless_renderer.py`): without a Renderer there is no Drone video and no evidence frames.
   `?embed=1` shows only the World view (used by the dashboard's World view tab).
 
-Hub endpoints added for the dashboard: `GET /drones/{id}/mjpeg` (multipart JPEG stream of the Drone view), `GET /overheads` (captured overhead images), `GET /autonomy`, `POST /detections/{id}/dispatch`.
+Hub endpoints added for the dashboard: `GET /drones/{id}/mjpeg` (multipart JPEG stream of the Drone view), `GET /overheads` (captured overhead images), `GET /autonomy`, `POST /detections/{id}/dispatch`, and `GET/POST /drones/{id}/camera` (vision mode rgb/thermal/lidar and field of view 20 to 110 degrees; the Renderer draws that Drone accordingly and the live feed publishes `camera` events).
+Camera gimbal pitch is a Drone command: `POST /drones/{id}/command {type: look_at, pitch_deg}` from -30 (up) to 90 (straight down).
 
 ## How the simulation is wired
 
