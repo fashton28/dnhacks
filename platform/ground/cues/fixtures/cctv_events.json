@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "rail": "cctv",
+  "timebase": "relative",
+  "provenance": "Scripted VMS event fixture for the Komati stub site. No video management system is connected, no camera was watched, and no image was captured; camera and zone ids resolve against site/site.stub.json. The offline/online and failed beats script the 'camera offline' and 'VMS down' failure modes.",
+  "events": [
+    {
+      "atMs": 0,
+      "payload": {
+        "id": "vms-1001",
+        "cameraId": "cam-east-south",
+        "zone": "switchyard-approach",
+        "class": "person",
+        "ts": 0
+      }
+    },
+    {
+      "atMs": 4000,
+      "payload": {
+        "id": "vms-1002",
+        "cameraId": "cam-east-north",
+        "zone": "east-fence-north",
+        "class": "vehicle",
+        "ts": 3500
+      }
+    },
+    {
+      "atMs": 12000,
+      "kind": "cameraOffline",
+      "cameraId": "cam-east-north",
+      "detail": "VMS reports the stream lost"
+    },
+    {
+      "atMs": 16000,
+      "payload": {
+        "id": "vms-1003",
+        "cameraId": "cam-east-north",
+        "zone": "east-fence-north",
+        "class": "person",
+        "ts": 15500
+      }
+    },
+    {
+      "atMs": 22000,
+      "kind": "cameraOnline",
+      "cameraId": "cam-east-north"
+    },
+    {
+      "atMs": 30000,
+      "kind": "health",
+      "state": "failed",
+      "detail": "VMS connection lost; no events are arriving"
+    }
+  ]
+}

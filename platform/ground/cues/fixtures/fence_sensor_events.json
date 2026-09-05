@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "rail": "fence_sensor",
+  "timebase": "relative",
+  "provenance": "Scripted perimeter intrusion-detection fixture. No PIDS controller is integrated in this run and no fence was instrumented; segment ids are invented and zone names resolve against site/site.stub.json.",
+  "events": [
+    {
+      "atMs": 1500,
+      "payload": {
+        "sensorId": "pids-seg-14",
+        "ts": 1200,
+        "event": "cut",
+        "confidence": 0.78,
+        "cameraId": "cam-east-south",
+        "zone": "east-fence-south"
+      }
+    },
+    {
+      "atMs": 9000,
+      "payload": {
+        "sensorId": "pids-seg-14",
+        "ts": 8700,
+        "event": "climb",
+        "confidence": 0.64,
+        "cameraId": "cam-east-south",
+        "zone": "east-fence-south"
+      }
+    }
+  ]
+}
