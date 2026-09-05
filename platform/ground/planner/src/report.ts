@@ -60,6 +60,29 @@ function describeTool(t: PlanTool): string {
   }
 }
 
+/** Keep large or untrusted image payloads out of operator-facing markdown. */
+function describeThumbnail(value: string): string {
+  if (!value) return 'No thumbnail evidence reference was supplied.';
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(value)) {
+    return 'An embedded image thumbnail is attached to the anomaly.';
+  }
+  const normalized = value.replaceAll('\\', '/');
+  if (normalized.length <= 160 && !normalized.includes('..') && /^[a-zA-Z0-9._/-]+$/.test(normalized)) {
+    return `Thumbnail evidence reference: \`${normalized}\`.`;
+  }
+  return 'A thumbnail evidence reference was supplied and omitted from the narrative.';
+}
+
+function describeFrame(label: string, value?: string): string {
+  if (!value) return `- ${label} frame: unavailable`;
+  if (/^data:image\/[a-z0-9.+-]+;base64,/i.test(value)) return `- ${label} frame: embedded image attached`;
+  const normalized = value.replaceAll('\\', '/');
+  if (normalized.length <= 160 && !normalized.includes('..') && /^[a-zA-Z0-9._/-]+$/.test(normalized)) {
+    return `- ${label} frame reference: \`${normalized}\``;
+  }
+  return `- ${label} frame reference: supplied and omitted from the narrative`;
+}
+
 /**
  * Write the scripted incident report for a completed observation mission.
  * `missionId` is the plan's requestId (ground-side correlation only).
@@ -99,8 +122,8 @@ export function writeIncidentReport(
 
   const modalities = observation.modalities?.length ? observation.modalities.join(', ') : 'not supplied';
   const frameCitations = [
-    observation.frames?.rgb ? `- RGB frame: [evidence](${observation.frames.rgb})` : '- RGB frame: unavailable',
-    observation.frames?.thermal ? `- Thermal frame: [evidence](${observation.frames.thermal})` : '- Thermal frame: unavailable',
+    describeFrame('RGB', observation.frames?.rgb),
+    describeFrame('Thermal', observation.frames?.thermal),
   ].join('\n');
   const geometry = [
     ...(observation.geometry?.fenceGaps ?? []).map((gap) =>
@@ -118,7 +141,7 @@ export function writeIncidentReport(
 
 Satellite change detection flagged a \`${anomaly.type}\` anomaly at ` +
     `(${anomaly.lat.toFixed(6)}, ${anomaly.lon.toFixed(6)}) with confidence ` +
-    `${(anomaly.confidence * 100).toFixed(0)}% (thumbnail: \`${anomaly.thumbnail}\`).
+    `${(anomaly.confidence * 100).toFixed(0)}%. ${describeThumbnail(anomaly.thumbnail)}
 
 ## What flew
 

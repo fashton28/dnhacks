@@ -59,4 +59,15 @@ describe('writeIncidentReport', () => {
     const b = writeIncidentReport(anomaly, plan, { detected: true, confidence: 0.5 });
     expect(b).toEqual(a);
   });
+
+  it('does not dump embedded image bytes into markdown', () => {
+    const embedded = { ...anomaly, thumbnail: `data:image/png;base64,${'A'.repeat(20_000)}` };
+    const report = writeIncidentReport(embedded, plan, {
+      detected: true, observationAvailable: true, classification: 'confirmed', confidence: 0.9,
+      frames: { rgb: embedded.thumbnail, thermal: embedded.thumbnail },
+    });
+    expect(report.markdown).toContain('embedded image thumbnail is attached');
+    expect(report.markdown).not.toContain('data:image');
+    expect(report.markdown.length).toBeLessThan(5_000);
+  });
 });
