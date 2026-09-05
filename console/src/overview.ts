@@ -276,7 +276,14 @@ export function createOverview(el: HTMLElement, opts: OverviewOptions): Overview
     (map.getSource("tracks") as maplibregl.GeoJSONSource | undefined)?.setData({ type: "FeatureCollection", features } as any);
   }
 
+  // Telemetry arrives at 10 Hz per Drone; MapLibre setData is expensive, so batch updates to ~6 Hz.
+  const pendingStates = new Map<string, DroneState>();
+  let flushTimer: number | null = null;
   function updateDrone(s: DroneState) {
+    pendingStates.set(s.drone_id, s);
+    if (flushTimer === null) flushTimer = window.setTimeout(() => { flushTimer = null; const batch = [...pendingStates.values()]; pendingStates.clear(); batch.forEach(applyDrone); }, 160);
+  }
+  function applyDrone(s: DroneState) {
     let d = drones.get(s.drone_id);
     if (!d) {
       const wrap = document.createElement("div");

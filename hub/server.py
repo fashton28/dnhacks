@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
@@ -480,6 +480,43 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         a = app.state.autonomy
         return {"llm_mode": a.mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes)}
 
+    @app.get("/drones/{drone_id}/mjpeg")
+    async def drone_mjpeg(drone_id: str, fps: float = 8.0) -> StreamingResponse:
+        """Live Drone view as an MJPEG stream (for <img> tags, e.g. the ground-control dashboard's video panel).
+
+        Frames come from the connected Renderer: the Console streams the selected Drone at 10 Hz; for any other Drone
+        the Hub asks the Renderer to render on demand while a client is watching.
+        """
+        if drone_id not in reg().drones:
+            raise HTTPException(404, f"unknown drone {drone_id}")
+        boundary = "argusframe"
+
+        async def gen():
+            last_ts: str | None = None
+            last_request = 0.0
+            period = 1.0 / max(1.0, min(fps, 15.0))
+            while True:
+                conn = reg().drones.get(drone_id)
+                if conn is None:
+                    break
+                fr = conn.last_frame
+                now = asyncio.get_running_loop().time()
+                if (fr is None or fr.ts == last_ts) and reg().renderers and now - last_request > period:
+                    last_request = now
+                    try:
+                        fr = await reg().ask_renderer(RenderFrame(cmd_id=reg().new_cmd_id(), drone_id=drone_id), timeout=2.0)
+                        conn.last_frame = fr
+                    except Exception:  # noqa: BLE001
+                        fr = conn.last_frame
+                if fr is not None and fr.ts != last_ts:
+                    last_ts = fr.ts
+                    jpg = base64.b64decode(fr.jpeg_b64)
+                    yield (f"--{boundary}\r\nContent-Type: image/jpeg\r\nContent-Length: {len(jpg)}\r\n\r\n").encode() + jpg + b"\r\n"
+                await asyncio.sleep(period)
+
+        return StreamingResponse(gen(), media_type=f"multipart/x-mixed-replace; boundary={boundary}",
+                                 headers={"Cache-Control": "no-cache, no-store", "X-Accel-Buffering": "no"})
+
     @app.post("/drones/{drone_id}/render")
     async def render_drone(drone_id: str) -> dict[str, Any]:
         if drone_id not in reg().drones:
@@ -492,11 +529,14 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> str:
-        return f"<h1>ARGUS Hub</h1><p>{SITE_NAME}</p><p>{datetime.now(UTC).isoformat()}</p><ul><li><a href='/console/'>Console</a></li><li><a href='/docs'>API docs</a></li><li><a href='/drones'>Drones</a></li><li><a href='/missions'>Missions</a></li></ul>"
+        return f"<h1>ARGUS Hub</h1><p>{SITE_NAME}</p><p>{datetime.now(UTC).isoformat()}</p><ul><li><a href='/console/'>Console</a></li><li><a href='/gcs/'>Ground control dashboard</a></li><li><a href='/docs'>API docs</a></li><li><a href='/drones'>Drones</a></li><li><a href='/missions'>Missions</a></li></ul>"
 
     console_dist = Path(__file__).resolve().parent.parent / "console" / "dist"
     if console_dist.exists():
         app.mount("/console", StaticFiles(directory=console_dist, html=True), name="console")
+    gcs_dist = Path(__file__).resolve().parent.parent / "platform" / "ground" / "ui" / "dist"
+    if gcs_dist.exists():
+        app.mount("/gcs", StaticFiles(directory=gcs_dist, html=True), name="gcs")
     if settings.evidence_dir is not None and settings.evidence_dir.exists():
         app.mount("/evidence", StaticFiles(directory=settings.evidence_dir), name="evidence")
 

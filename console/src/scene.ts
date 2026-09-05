@@ -84,7 +84,9 @@ const mat = {
 
 export class SiteScene {
   scene = new THREE.Scene();
-  fences = new Map<string, THREE.Mesh>();
+  /** Fence sections live in one InstancedMesh; this maps section id to its instance. */
+  fenceMatrices = new Map<string, { index: number; matrix: THREE.Matrix4 }>();
+  fenceMesh: THREE.InstancedMesh | null = null;
   drones = new Map<string, THREE.Group>();
   props = new THREE.Group();
   anchor: { lat: number; lon: number };
@@ -95,6 +97,7 @@ export class SiteScene {
   private models = new Map<string, Promise<THREE.Group>>();
   private animated: { update(t: number): void }[] = [];
   private composer: EffectComposer | null = null;
+  private frameCounter = 0;
   private composerSize = new THREE.Vector2();
   private woodOpts!: WoodlandOptions;
 
@@ -127,7 +130,7 @@ export class SiteScene {
     const sun = new THREE.DirectionalLight(0xfff0d8, 2.1);
     sun.position.set(-260, 360, 140);   // roughly the HDRI's sun: west-south-west, 48 degrees up
     sun.castShadow = true;
-    sun.shadow.mapSize.set(4096, 4096);
+    sun.shadow.mapSize.set(2048, 2048);
     const cam = sun.shadow.camera as THREE.OrthographicCamera;
     cam.left = cam.bottom = -240; cam.right = cam.top = 240; cam.near = 50; cam.far = 1200;
     sun.shadow.bias = -0.0003;
@@ -289,23 +292,23 @@ export class SiteScene {
     railGeo.rotateZ(Math.PI / 2);
     const posts: THREE.Matrix4[] = [];
     const rails: THREE.Matrix4[] = [];
-    for (const ring of ["outer", "inner"]) {
-      for (const s of this.site.fences[ring].sections) {
-        const mesh = new THREE.Mesh(new THREE.PlaneGeometry(s.length, s.height), wire);
-        mesh.position.copy(enuToThree(s.x, s.y, s.height / 2));
-        mesh.rotation.y = -s.yaw;
-        mesh.name = s.id;
-        mesh.castShadow = true;
-        this.scene.add(mesh);
-        this.fences.set(s.id, mesh);
-        // posts every 2.5 m and a top rail, so the fence line reads from altitude
-        for (const k of [-1, -0.5, 0, 0.5, 1]) {
-          const dx = s.yaw === 0 ? k * s.length / 2 : 0, dy = s.yaw === 0 ? 0 : k * s.length / 2;
-          posts.push(new THREE.Matrix4().compose(enuToThree(s.x + dx, s.y + dy, (s.height + 0.15) / 2), new THREE.Quaternion(), new THREE.Vector3(1, s.height + 0.15, 1)));
-        }
-        rails.push(new THREE.Matrix4().compose(enuToThree(s.x, s.y, s.height + 0.05), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -s.yaw), new THREE.Vector3(s.length, 1, 1)));
+    // all fence sections in one InstancedMesh; an open section is hidden by collapsing its instance matrix
+    const sections = [...this.site.fences.outer.sections, ...this.site.fences.inner.sections];
+    const wireMesh = new THREE.InstancedMesh(new THREE.PlaneGeometry(1, 1), wire, sections.length);
+    wireMesh.name = "fences";
+    wireMesh.castShadow = true;
+    sections.forEach((s: any, i: number) => {
+      const m4 = new THREE.Matrix4().compose(enuToThree(s.x, s.y, s.height / 2), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -s.yaw), new THREE.Vector3(s.length, s.height, 1));
+      this.fenceMatrices.set(s.id, { index: i, matrix: m4 });
+      wireMesh.setMatrixAt(i, m4);
+      for (const k of [-1, -0.5, 0, 0.5, 1]) {
+        const dx = s.yaw === 0 ? k * s.length / 2 : 0, dy = s.yaw === 0 ? 0 : k * s.length / 2;
+        posts.push(new THREE.Matrix4().compose(enuToThree(s.x + dx, s.y + dy, (s.height + 0.15) / 2), new THREE.Quaternion(), new THREE.Vector3(1, s.height + 0.15, 1)));
       }
-    }
+      rails.push(new THREE.Matrix4().compose(enuToThree(s.x, s.y, s.height + 0.05), new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -s.yaw), new THREE.Vector3(s.length, 1, 1)));
+    });
+    this.fenceMesh = wireMesh;
+    this.scene.add(wireMesh);
     const postMesh = new THREE.InstancedMesh(postGeo, mat.fencePost, posts.length);
     posts.forEach((m4, i) => postMesh.setMatrixAt(i, m4));
     postMesh.castShadow = true;
@@ -402,13 +405,16 @@ export class SiteScene {
     if (!this.composer) {
       this.composer = new EffectComposer(renderer);
       this.composer.addPass(new RenderPass(this.scene, camera));
-      const bloom = new UnrealBloomPass(size.clone(), 0.22, 0.5, 0.92);
+      const bloom = new UnrealBloomPass(size.clone().multiplyScalar(0.5), 0.22, 0.5, 0.92);  // bloom at half resolution
       this.composer.addPass(bloom);
       this.composer.addPass(new OutputPass());
       this.composerSize.copy(size);
     }
     if (!this.composerSize.equals(size)) { this.composer.setSize(size.x, size.y); this.composerSize.copy(size); }
     (this.composer.passes[0] as RenderPass).camera = camera;
+    // shadows every other frame: the sun is static and nothing moves fast enough to notice
+    renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = (this.frameCounter++ & 1) === 0;
     this.composer.render();
   }
 
@@ -459,7 +465,11 @@ export class SiteScene {
   }
 
   setScene(state: SceneState): void {
-    for (const [id, mesh] of this.fences) mesh.visible = !state.open_fences.includes(id);
+    if (this.fenceMesh) {
+      const hidden = new THREE.Matrix4().makeScale(0, 0, 0);
+      for (const [id, f] of this.fenceMatrices) this.fenceMesh.setMatrixAt(f.index, state.open_fences.includes(id) ? hidden : f.matrix);
+      this.fenceMesh.instanceMatrix.needsUpdate = true;
+    }
     this.props.clear();
     for (const p of state.props) this.propModel(p).then((o) => this.props.add(o));
   }

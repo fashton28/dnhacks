@@ -19,12 +19,47 @@
 import { validateSite } from '@planner/site';
 import type { SiteModel } from '@planner/site';
 import stubSite from '../../../../site/site.stub.json';
+import { isHubMode, hubHttpBase } from '@/dataSource/hubConfig';
+
+/** ARGUS Hub mode: build the SiteModel from the Hub's generated site.geojson + site.json
+ *  (Meridian Station) so the mission map, geofence and no-fly zones match the fleet. */
+async function siteFromHub(): Promise<SiteModel> {
+  const base = hubHttpBase();
+  const [geo, site] = await Promise.all([
+    fetch(`${base}/console/site.geojson`).then((r) => r.json()),
+    fetch(`${base}/console/site.json`).then((r) => r.json()),
+  ]);
+  type Feature = { properties: Record<string, unknown>; geometry: { type: string; coordinates: unknown } };
+  const feats: Feature[] = geo.features;
+  const find = (kind: string) => feats.find((f) => f.properties.kind === kind);
+  const ring = (f: Feature | undefined): [number, number][] => {
+    const coords = (f?.geometry.coordinates as [number, number][][] | undefined)?.[0] ?? [];
+    const open = coords.length > 1 && coords[0][0] === coords[coords.length - 1][0] && coords[0][1] === coords[coords.length - 1][1] ? coords.slice(0, -1) : coords;
+    return open.map(([lon, lat]) => [lat, lon]);
+  };
+  const geofence = find('geofence');
+  const noFly = find('no_fly_zone');
+  const pad = site.fleet?.[0] ?? { lat: site.anchor.lat, lon: site.anchor.lon };
+  const pads = (site.pads ?? []) as { id: string; x: number; y: number }[];
+  const padLatLon = (i: number) => site.fleet?.[i] ?? pad;
+  return validateSite({
+    home: { lat: pad.lat, lon: pad.lon, alt_m: site.anchor?.alt_msl ?? 0 },
+    perimeter: ring(geofence),
+    nfz: noFly ? [{ name: String(noFly.properties.name ?? 'no-fly'), polygon: ring(noFly), ceiling_m: Number(geofence?.properties.alt_ceiling_m ?? 60) }] : [],
+    alt_band_m: { min: Number(geofence?.properties.alt_floor_m ?? 5), max: Number(geofence?.properties.alt_ceiling_m ?? 60) },
+    staging: pads.slice(0, site.fleet?.length ?? 0).map((p, i) => ({ id: p.id, lat: padLatLon(i).lat, lon: padLatLon(i).lon, image: 'evidence/overhead/baseline.png', truth: 'false_alarm' })),
+  });
+}
 
 export type { SiteModel, SiteNfz, SiteStagingPoint, LatLon } from '@planner/site';
 
 let sitePromise: Promise<SiteModel> | null = null;
 
 async function resolveSite(): Promise<SiteModel> {
+  // 0. ARGUS Hub: the Site the fleet actually flies over.
+  if (isHubMode()) {
+    try { return await siteFromHub(); } catch (err) { console.warn('[eis-site] ARGUS Hub site failed, falling back:', err); }
+  }
   // 1. Electron bridge (present only inside the shells). The shells return the
   //    raw JSON text (site:load reads the file); accept a pre-parsed object too.
   const bridge = typeof window !== 'undefined' ? window.eis?.loadSiteFile : undefined;

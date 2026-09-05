@@ -12,6 +12,8 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const params = new URLSearchParams(location.search);
 const isHeadless = params.get("headless") === "1";
 if (isHeadless) document.body.classList.add("headless");
+const isEmbed = params.get("embed") === "1";
+if (isEmbed) document.body.classList.add("embed");
 
 const feed = new LogFeed($("log"));
 const log = (msg: string, level: "info" | "good" | "warn" | "bad" = "info") => feed.push(msg, level);
@@ -25,7 +27,11 @@ const renderer = new THREE.WebGLRenderer({ canvas: worldCanvas, antialias: true,
 const world = new SiteScene(site, renderer, isHeadless ? "low" : "high");
 renderer.shadowMap.enabled = true;
 renderer.shadowMap.type = THREE.PCFShadowMap;
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+// Resolution: cap the device pixel ratio and adapt it to hold ~60 fps (Retina at 2x costs 4x the pixels of 1x).
+const MAX_RATIO = Math.min(window.devicePixelRatio, 1.5);
+let pixelRatio = MAX_RATIO;
+let lastRatioChange = 0;
+renderer.setPixelRatio(pixelRatio);
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.95;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -116,6 +122,20 @@ function frameMessage(s: DroneState, cmdId: string | null) {
   return { type: "frame", drone_id: s.drone_id, jpeg_b64: jpeg, width: droneCanvas.width, height: droneCanvas.height, lat: s.lat, lon: s.lon, alt: s.alt,
            heading_deg: s.heading_deg, gimbal_pitch_deg: s.gimbal_pitch_deg, ts: new Date().toISOString(), cmd_id: cmdId };
 }
+/** Streaming variant: encodes off the main thread with toBlob and sends when ready; never stalls the render loop. */
+let streamBusy = false;
+function streamFrame(s: DroneState): void {
+  if (streamBusy || document.hidden) return;
+  streamBusy = true;
+  const meta = { drone_id: s.drone_id, width: droneCanvas.width, height: droneCanvas.height, lat: s.lat, lon: s.lon, alt: s.alt, heading_deg: s.heading_deg, gimbal_pitch_deg: s.gimbal_pitch_deg, ts: new Date().toISOString() };
+  droneCanvas.toBlob((blob) => {
+    if (!blob) { streamBusy = false; return; }
+    const reader = new FileReader();
+    reader.onloadend = () => { streamBusy = false; const url = String(reader.result); link.send({ type: "frame", ...meta, jpeg_b64: url.slice(url.indexOf(",") + 1), cmd_id: null }); };
+    reader.onerror = () => { streamBusy = false; };
+    reader.readAsDataURL(blob);
+  }, "image/jpeg", 0.65);
+}
 
 // overhead capture: orthographic top-down of the whole footprint
 const ovSize = site.overhead.px as number;
@@ -190,6 +210,7 @@ liveFeed((ev) => {
   }
 }, (ok) => setPill("hub-status", ok, ok ? "hub live" : "hub reconnecting"));
 
+let lastFleetRefresh = 0;
 function onDrone(s: DroneState): void {
   const prev = drones.get(s.drone_id);
   drones.set(s.drone_id, s);
@@ -199,7 +220,7 @@ function onDrone(s: DroneState): void {
   if (s.message?.startsWith("REFUSED") && lastRefused.get(s.drone_id) !== s.message) { lastRefused.set(s.drone_id, s.message); log(`${s.drone_id}: onboard fence ${s.message}`, "bad"); }
   if (selected === null && s.status !== "offline" && (storedSelection === null || storedSelection === s.drone_id)) select(s.drone_id, { quiet: true });
   if (selected === null && !selectFallback) selectFallback = window.setTimeout(() => { if (selected === null && drones.size) select(sortedDrones()[0].drone_id, { quiet: true }); }, 2500);
-  refreshFleet();
+  if (performance.now() - lastFleetRefresh > 200 || (prev && prev.status !== s.status)) { lastFleetRefresh = performance.now(); refreshFleet(); }
   if (s.drone_id === selected) refreshSelected();
 }
 
@@ -421,14 +442,18 @@ $("fly-square").onclick = async () => {
 };
 
 // ---- render loop ---------------------------------------------------------------------------------
-let frames = 0, lastFps = performance.now(), lastStream = 0, lastHud = 0;
+let frames = 0, lastFps = performance.now(), lastStream = 0, lastDroneRender = 0, lastHud = 0;
 function resize(): void {
   const w = worldCanvas.clientWidth, h = worldCanvas.clientHeight;
-  const dpr = Math.min(window.devicePixelRatio, 2);
+  const dpr = pixelRatio;
   if (w > 0 && h > 0 && (worldCanvas.width !== Math.floor(w * dpr) || worldCanvas.height !== Math.floor(h * dpr))) {
     renderer.setSize(w, h, false); worldCam.aspect = w / h; worldCam.updateProjectionMatrix(); overview.resize();
   }
 }
+// ---- perf instrumentation: per-stage ms averaged over the last second, on window.__argusPerf ----
+const perf = { world: 0, drone: 0, stream: 0, ui: 0, frames: 0, lastReport: performance.now(), report: { world: 0, drone: 0, stream: 0, ui: 0, fps: 0 } };
+(window as any).__argusPerf = perf;
+function stage<T>(key: "world" | "drone" | "stream" | "ui", fn: () => T): T { const t = performance.now(); const r = fn(); (perf as any)[key] += performance.now() - t; return r; }
 function loop(now: number): void {
   requestAnimationFrame(loop);
   resize();
@@ -445,16 +470,30 @@ function loop(now: number): void {
     worldCam.position.add(delta);
   }
   controls.update();
-  world.update(now / 1000);
-  world.renderWorld(renderer, worldCam);
+  stage("world", () => { world.update(now / 1000); world.renderWorld(renderer, worldCam); });
   if (selected && drones.has(selected)) {
     const s = drones.get(selected)!;
-    renderDroneView(s);
+    // the Drone view is a camera feed: 15 Hz is plenty and frees the GPU for the World view
+    if (now - lastDroneRender > 66) { lastDroneRender = now; stage("drone", () => renderDroneView(s)); }
     const streaming = s.alt > 0.3;
-    if (streaming && now - lastStream > 100) { lastStream = now; link.send(frameMessage(s, null)); }
-    if (now - lastHud > 250) { lastHud = now; renderHud($("hud"), s, streaming, vision.mode); }
+    if (streaming && now - lastStream > 125) { lastStream = now; stage("stream", () => streamFrame(s)); }
+    if (now - lastHud > 250) { lastHud = now; stage("ui", () => renderHud($("hud"), s, streaming, vision.mode)); }
   }
-  frames++;
-  if (now - lastFps > 1000) { $("fps").textContent = `${frames} fps`; frames = 0; lastFps = now; $("clock").textContent = new Date().toLocaleTimeString(); }
+  frames++; perf.frames++;
+  if (now - lastFps > 1000) {
+    $("fps").textContent = `${frames} fps`;
+    // adaptive resolution: step the pixel ratio down when we cannot hold ~50 fps, back up when there is headroom
+    if (!document.hidden && now - lastRatioChange > 3000) {
+      if (frames < 45 && pixelRatio > 1.0) { pixelRatio = Math.max(1.0, +(pixelRatio - 0.25).toFixed(2)); lastRatioChange = now; }
+      else if (frames > 58 && pixelRatio < MAX_RATIO) { pixelRatio = Math.min(MAX_RATIO, +(pixelRatio + 0.25).toFixed(2)); lastRatioChange = now; }
+      $("fps").title = `render scale ${pixelRatio}x`;
+    }
+    frames = 0; lastFps = now; $("clock").textContent = new Date().toLocaleTimeString();
+  }
+  if (now - perf.lastReport > 1000) {
+    const n = Math.max(1, perf.frames);
+    perf.report = { world: +(perf.world / n).toFixed(2), drone: +(perf.drone / n).toFixed(2), stream: +(perf.stream / n).toFixed(2), ui: +(perf.ui / n).toFixed(2), fps: perf.frames };
+    perf.world = perf.drone = perf.stream = perf.ui = 0; perf.frames = 0; perf.lastReport = now;
+  }
 }
 requestAnimationFrame(loop);

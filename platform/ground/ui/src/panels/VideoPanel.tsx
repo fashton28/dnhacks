@@ -75,9 +75,15 @@ function HudVal({ label, value, unit, color }: HudValProps): React.ReactElement 
   );
 }
 
+/** MJPEG (multipart/x-mixed-replace) streams render in an <img>, not a <video>. */
+function isMjpeg(url: string | undefined): url is string {
+  return !!url && /mjpeg/i.test(url);
+}
+
 /** True for live sources we can render in a <video> element via WHEP/WebRTC/HTTP. */
 function isLiveUrl(url: string | undefined): url is string {
   if (!url) return false;
+  if (isMjpeg(url)) return false;
   return /^(https?|webrtc|whep):/i.test(url);
 }
 
@@ -176,7 +182,8 @@ export function VideoPanel({
 
   const live = isLiveUrl(videoUrl);
   const rtsp = isRtsp(videoUrl);
-  const useCanvas = !live && !rtsp;
+  const mjpeg = isMjpeg(videoUrl);
+  const useCanvas = (!live && !rtsp) && !mjpeg;
 
   // resize observer (only needed for the mock canvas scene)
   React.useEffect(() => {
@@ -308,6 +315,15 @@ export function VideoPanel({
       {/* mock canvas scene */}
       {useCanvas && (
         <canvas ref={canvasRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', display: connected ? 'block' : 'none' }} />
+      )}
+
+      {/* MJPEG stream (ARGUS Hub Drone view) */}
+      {mjpeg && (
+        <img
+          src={videoUrl}
+          alt="Drone view"
+          style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', background: '#000', display: 'block' }}
+        />
       )}
 
       {/* live video element */}

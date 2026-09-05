@@ -40,7 +40,8 @@ import {
   effectivePlan,
 } from '@/store';
 import type { PlanProposal, ReportResolution } from '@/store';
-import { dataSource } from '@/dataSource';
+import { dataSource, isHubMode, consoleUrl } from '@/dataSource';
+import type { FleetEntry } from '@/dataSource';
 import { getSiteModel } from '@/site';
 
 import { Toast, Tabs, Badge } from '@/components';
@@ -75,8 +76,18 @@ import {
    plant geometry is never hardcoded (docs/SITE_CONTRACT.md). */
 const FALLBACK_HOME = { lat: 37.7699, lon: -122.4666 };
 
-/* Center-column view: classic flight ops vs the mission (security) workspace. */
-type CenterView = 'flight' | 'mission';
+/* Center-column view: classic flight ops, the mission (security) workspace, or the ARGUS 3D World view. */
+type CenterView = 'flight' | 'mission' | 'world';
+
+/** Hub-only extensions of the frozen DataSource (fleet list + vehicle selection). */
+interface FleetCapable {
+  onFleet(cb: (rows: FleetEntry[]) => void): () => void;
+  setVehicle(id: string): void;
+  getVehicle(): string;
+}
+function fleetCapable(ds: unknown): ds is FleetCapable {
+  return !!ds && typeof (ds as FleetCapable).onFleet === 'function' && typeof (ds as FleetCapable).setVehicle === 'function';
+}
 
 /* Which modal (if any) is currently open. */
 type ModalKind =
@@ -144,6 +155,8 @@ function GroundControl(): JSX.Element {
   const [manualActive, setManualActive] = useState(false);
   const [controllerOn, setControllerOn] = useState(false);
   const [centerView, setCenterView] = useState<CenterView>('flight');
+  const [fleet, setFleet] = useState<FleetEntry[]>([]);
+  const [vehicleId, setVehicleId] = useState<string>(DEFAULT_VEHICLE_ID);
 
   /* Mission (anomaly → plan → verification → report) state + audit trail. */
   const mission = useMission();
@@ -205,6 +218,9 @@ function GroundControl(): JSX.Element {
     const offAck = ds.onAck((a: CommandAck) => {
       if (!a.success) pushToast({ severity: 'error', title: `${a.command} failed`, message: a.message });
     });
+    const offFleet = fleetCapable(ds)
+      ? ds.onFleet((rows) => { setFleet(rows); setVehicleId(ds.getVehicle()); })
+      : () => {};
 
     /* mission channels (anomaly → plan → verification → incident report) */
     const offAn = ds.onAnomaly(m => {
@@ -232,7 +248,7 @@ function GroundControl(): JSX.Element {
 
     return () => {
       cancelled = true;
-      offC(); offT(); offK(); offTxt(); offAck();
+      offC(); offT(); offK(); offTxt(); offAck(); offFleet();
       offAn(); offPl(); offVf(); offRp();
       ds.disconnect();
     };
@@ -263,10 +279,18 @@ function GroundControl(): JSX.Element {
   /* ----- command helper --------------------------------------------------- */
   const cmd: SendCmd = useCallback(
     (command, params) => {
-      void ds.sendCommand({ type: 'command', vehicleId: DEFAULT_VEHICLE_ID, command, params });
+      void ds.sendCommand({ type: 'command', vehicleId, command, params });
     },
-    [ds],
+    [ds, vehicleId],
   );
+
+  /* ARGUS fleet: follow another Drone (telemetry, video and commands switch together). */
+  const selectVehicle = useCallback((id: string) => {
+    if (fleetCapable(ds)) ds.setVehicle(id);
+    setVehicleId(id);
+    setTrail([]);
+    setHistory({ alt: [], bat: [] });
+  }, [ds]);
 
   /* ----- safety flows ----------------------------------------------------- */
   const doArm = () => {
@@ -419,6 +443,9 @@ function GroundControl(): JSX.Element {
         onOpenFailsafe={() => setModal('failsafe')}
         onOpenPid={() => setModal('pid')}
         onOpenLogs={() => setModal('logbrowser')}
+        fleet={fleet}
+        selectedVehicle={vehicleId}
+        onSelectVehicle={selectVehicle}
       />
 
       {trackingActive && (
@@ -466,6 +493,7 @@ function GroundControl(): JSX.Element {
               items={[
                 { id: 'flight', label: 'Flight ops' },
                 { id: 'mission', label: 'Mission' },
+                ...(isHubMode() ? [{ id: 'world', label: 'ARGUS World view' }] : []),
               ]}
             />
             {centerView === 'flight' && mission.anomalies.length > 0 && (
@@ -476,7 +504,16 @@ function GroundControl(): JSX.Element {
             {mission.executing && <Badge tone="accent" mono>MISSION EXECUTING</Badge>}
           </div>
 
-          {centerView === 'flight' ? (
+          {centerView === 'world' ? (
+            <div style={{ flex: 1, minHeight: 0, borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', background: '#000' }}>
+              <iframe
+                title="ARGUS World view"
+                src={consoleUrl(config)}
+                style={{ width: '100%', height: '100%', border: 0, display: 'block' }}
+                allow="fullscreen"
+              />
+            </div>
+          ) : centerView === 'flight' ? (
             <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: '1.55fr 1fr', gap: 10 }}>
               <div style={{ borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', minHeight: 0 }}>
                 <VideoPanel

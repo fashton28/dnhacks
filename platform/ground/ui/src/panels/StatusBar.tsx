@@ -48,6 +48,10 @@ export interface StatusBarProps {
   onOpenFailsafe?: () => void;
   onOpenPid?: () => void;
   onOpenLogs?: () => void;
+  /** ARGUS fleet: when present, a selector picks which Drone the dashboard follows. */
+  fleet?: { vehicleId: string; status: string; batteryPct: number }[];
+  selectedVehicle?: string;
+  onSelectVehicle?: (id: string) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -67,6 +71,9 @@ export function StatusBar({
   onOpenFailsafe,
   onOpenPid,
   onOpenLogs,
+  fleet,
+  selectedVehicle,
+  onSelectVehicle,
 }: StatusBarProps) {
   const b = tel?.battery?.remaining ?? 100;
   const armed = tel?.armed ?? false;
@@ -111,6 +118,25 @@ export function StatusBar({
       >
         {connLabel}
       </StatusPill>
+
+      {/* ARGUS fleet selector */}
+      {fleet && fleet.length > 0 && (
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.1em', color: 'var(--text-tertiary)' }}>DRONE</span>
+          <select
+            aria-label="Select Drone"
+            value={selectedVehicle ?? fleet[0].vehicleId}
+            onChange={(e) => onSelectVehicle?.(e.target.value)}
+            style={{ fontFamily: 'var(--font-mono)', fontSize: 12, padding: '3px 6px', background: 'var(--surface-sunken, #0b0e12)', color: 'var(--text-primary)', border: '1px solid var(--border-default)', borderRadius: 6 }}
+          >
+            {fleet.map((v) => (
+              <option key={v.vehicleId} value={v.vehicleId}>
+                {v.vehicleId} · {v.status.replace('_', ' ')} · {Math.round(v.batteryPct)}%
+              </option>
+            ))}
+          </select>
+        </span>
+      )}
 
       {/* Host / SITL badge */}
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: -6 }}>
