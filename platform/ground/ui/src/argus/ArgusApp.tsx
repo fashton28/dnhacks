@@ -55,6 +55,13 @@ function agentPlanToRoute(mission_id: string, plan: AgentPlan): MissionPlan {
 }
 
 export default function ArgusApp(): JSX.Element {
+  const worldFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const selectedForWorld = useArgus((s) => s.selected);
+  useEffect(() => {
+    if (!selectedForWorld) return;
+    const post = () => worldFrameRef.current?.contentWindow?.postMessage({ type: 'argus-select', drone_id: selectedForWorld }, '*');
+    post(); const t = setTimeout(post, 1500); return () => clearTimeout(t);
+  }, [selectedForWorld]);
   useArgusDocument();
   const settings = useSettings();
   const st = useArgus;
@@ -347,7 +354,7 @@ export default function ArgusApp(): JSX.Element {
           <div style={center === 'world'
             ? { flex: 1, minHeight: 0, borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', background: '#000' }
             : { position: 'absolute', left: -100, top: -100, width: 8, height: 8, overflow: 'hidden', opacity: 0.01, pointerEvents: 'none' }}>
-            <iframe title="ARGUS World view" src={consoleUrl(settings.connection)} style={{ width: '100%', height: '100%', border: 0, display: 'block' }} allow="fullscreen" />
+            <iframe ref={worldFrameRef} title="ARGUS World view" src={consoleUrl(settings.connection)} style={{ width: '100%', height: '100%', border: 0, display: 'block' }} allow="fullscreen" />
           </div>
           {center === 'world' ? null : center === 'flight' ? (
             <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: 'minmax(0, 1.45fr) minmax(0, 1fr)', gap: 8 }}>
