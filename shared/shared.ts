@@ -26,18 +26,37 @@ export type Mode =
  *  ever active. The UI may also track manual state locally for instant feedback. */
 export type ControlSource = 'auto' | 'tracking' | 'manual' | 'planner';
 
+export const DEFAULT_VEHICLE_ID = 'eis-1' as const;
+export type NavSource = 'gps' | 'optflow' | 'extnav';
+export type FailsafeState = 'none' | 'hold' | 'rtl' | 'escalate' | 'refuse';
+export interface FailsafeStatus { state: FailsafeState; reason: string; }
+export interface GpsHealth { fix: number; sats: number; hdop: number; }
+export type ChargeState = 'charging' | 'charged' | 'discharging' | 'fault' | 'unknown';
+export interface BatteryState {
+  soc_pct: number; voltage_v: number; current_a: number; cell_delta_v: number;
+  temp_c: number; remaining_s: number; charge_state: ChargeState; fault?: string;
+  voltage: number; current: number; remaining: number;
+}
+export interface SortieState { elapsed_s: number; cap_s: number; must_rtl_by_s: number; }
+
 export interface Telemetry {
   type: 'telemetry';
   ts: number;                       // epoch ms
+  vehicleId: string;
   armed: boolean;
   mode: Mode;
-  controlSource?: ControlSource;    // additive; authoritative active control source
+  controlSource: ControlSource;
+  navSource: NavSource;
+  gpsHealth: GpsHealth;
+  failsafeState: FailsafeState;
+  failsafeReason: string;
   attitude: { roll: number; pitch: number; yaw: number };   // degrees
   position: { lat: number; lon: number; relAlt: number; absAlt: number }; // m
   velocity: { groundspeed: number; verticalSpeed: number }; // m/s
   heading: number;                  // degrees 0..360
-  battery: { voltage: number; current: number; remaining: number }; // V, A, %
+  battery: BatteryState;
   gps: { fixType: number; satellites: number; hdop: number };
+  sortie: SortieState | null;
   home: { lat: number; lon: number; distance: number };     // distance m
   link: { rssi: number; latencyMs: number };
 }
@@ -54,6 +73,7 @@ export interface DetectedTarget {
 export interface TrackingStatus {
   type: 'tracking';
   ts: number;
+  vehicleId: string;
   state: TrackingState;
   targets: DetectedTarget[];
   lockedTargetId: number | null;
@@ -65,6 +85,7 @@ export interface TrackingStatus {
 export interface StatusText {
   type: 'statusText';
   ts: number;
+  vehicleId: string;
   severity: 'info' | 'warning' | 'error' | 'critical';
   text: string;
 }
@@ -74,11 +95,14 @@ export interface StatusText {
  * ------------------------------------------------------------------------- */
 
 /** Named speed profile for planned missions. */
-export type MissionProfile = 'slow' | 'standard' | 'fast';
+export type MissionProfile = 'follow' | 'inspect' | 'survey' | 'slow' | 'standard' | 'fast';
 
 /** Cruise speed per profile, m/s. These MUST stay under the companion
  *  config.py hard max-speed cap (8 m/s — DEFAULTS.maxSpeedCap). */
 export const PROFILE_SPEED_MPS: Record<MissionProfile, number> = {
+  follow: 2.0,
+  inspect: 4.0,
+  survey: 6.0,
   slow: 2.0,
   standard: 4.0,
   fast: 6.0,
@@ -90,7 +114,9 @@ export interface GotoGpsTool {
   lat: number;
   lon: number;
   alt: number;               // m, relative
+  alt_m?: number;
   profile?: MissionProfile;  // optional speed override for this leg
+  speed_mps?: number;
 }
 
 export interface OrbitPointTool {
@@ -98,18 +124,25 @@ export interface OrbitPointTool {
   lat: number;
   lon: number;
   radius: number;            // m
+  radius_m?: number;
+  laps?: number;
 }
 
 export interface HoldTool {
   tool: 'hold';
   durationS?: number;        // seconds; omitted = indefinite
+  duration_s?: number;
 }
 
 export interface RtlTool {
   tool: 'rtl';
 }
 
-export type PlanTool = GotoGpsTool | OrbitPointTool | HoldTool | RtlTool;
+export interface FollowTool { tool: 'follow'; track_id: number; profile: MissionProfile; trackId?: number; }
+export interface OrbitTool { tool: 'orbit'; track_id: number; profile: MissionProfile; trackId?: number; }
+export interface GotoRelativeTool { tool: 'goto_relative'; dx: number; dy: number; dz: number; }
+export type PlanTool = FollowTool | OrbitTool | GotoRelativeTool | GotoGpsTool | OrbitPointTool | HoldTool | RtlTool;
+export type AnomalySource = 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey' | 'cctv';
 
 /** A detected site anomaly. `type` here is the anomaly KIND (e.g. 'change'),
  *  NOT a message discriminant — the wire wrapper nests the payload precisely
@@ -121,6 +154,7 @@ export interface Anomaly {
   type: string;        // anomaly kind, e.g. 'change'
   confidence: number;  // 0..1
   thumbnail: string;   // repo-relative path or data URL
+  source: AnomalySource;
 }
 
 export interface MissionPlan {
@@ -169,10 +203,11 @@ export type CommandName =
   | 'engageTracking' | 'disengageTracking' | 'selectTarget'
   | 'setStandoff' | 'setMaxSpeed' | 'emergencyStop'
   | 'engageManual' | 'disengageManual'
-  | 'executePlan' | 'abortPlan';
+  | 'executePlan' | 'abortPlan' | 'continueMission';
 
 export interface Command {
   type: 'command';
+  vehicleId: string;
   command: CommandName;
   params?: {
     altitude?: number;     // takeoff, m
@@ -190,6 +225,7 @@ export interface Command {
 export interface CommandAck {
   type: 'ack';
   ts: number;
+  vehicleId: string;
   command: CommandName;
   success: boolean;
   message: string;
@@ -210,6 +246,7 @@ export interface ManualInput {
 export interface ManualInputMessage extends ManualInput {
   type: 'manualInput';
   ts: number;
+  vehicleId: string;
 }
 
 /* Planner wire/event messages. Payloads are NESTED (e.g. `anomaly.type` is the
@@ -219,25 +256,100 @@ export interface ManualInputMessage extends ManualInput {
 export interface AnomalyMessage {
   type: 'anomaly';
   ts: number;
+  vehicleId: string;
   anomaly: Anomaly;
 }
 
 export interface MissionPlanMessage {
   type: 'missionPlan';
   ts: number;
+  vehicleId: string;
   plan: MissionPlan;
 }
 
 export interface VerificationMessage {
   type: 'verification';
   ts: number;
+  vehicleId: string;
   verification: Verification;
 }
 
 export interface IncidentReportMessage {
   type: 'incidentReport';
   ts: number;
+  vehicleId: string;
   report: IncidentReport;
+}
+
+export type SensorModality = 'rgb' | 'thermal' | 'lidar' | 'fused';
+export type SensorHealth = 'ok' | 'degraded' | 'failed';
+export interface ObservationTrack {
+  id: number; class: string; bearing_deg: number; range_m: number; conf: number;
+  modality: SensorModality; thermal_delta_c?: number;
+}
+export interface ObservationGeometry {
+  fence_gaps: Array<{ lat: number; lon: number; width_m: number }>;
+  new_structures: Array<{ lat: number; lon: number; footprint_m2: number; height_m: number }>;
+}
+export interface ObservationMessage {
+  type: 'observation'; ts: number; vehicleId: string; tracks: ObservationTrack[]; scene: string;
+  sensors: { rgb: SensorHealth; thermal: SensorHealth; lidar: SensorHealth };
+  geometry: ObservationGeometry;
+  /** Data URL or repo-relative staged-image path for recognizer/UI use. */
+  frames?: { rgb?: string; thermal?: string };
+  missionId?: string;
+  stagingId?: string;
+}
+export interface CapabilityProfile {
+  profile: MissionProfile; min_standoff_m: number; max_standoff_m: number;
+  max_speed_mps: number; max_altitude_m: number;
+}
+export interface CapabilitiesMessage {
+  type: 'capabilities'; ts: number; vehicleId: string; profiles: CapabilityProfile[];
+  sensors: SensorModality[]; night_capable: boolean; max_sortie_s: number; dispatch_min_soc_pct: number;
+}
+export type PlannerToolName = PlanTool['tool'];
+export type PlanCommandArgs =
+  | { track_id: number } | { dx: number; dy: number; dz: number }
+  | { lat: number; lon: number; alt_m: number; speed_mps?: number }
+  | { lat: number; lon: number; radius_m: number; laps?: number }
+  | { duration_s?: number } | Record<string, never>;
+export interface PlanCommandMessage {
+  type: 'planCommand'; ts: number; vehicleId: string; requestId: string;
+  tool: PlannerToolName; args: PlanCommandArgs; profile: MissionProfile;
+}
+export interface PlanCommandAckMessage {
+  type: 'planCommandAck'; ts: number; vehicleId: string; requestId: string;
+  status: 'accepted' | 'rejected' | 'clamped'; reason: string;
+}
+export interface PlanHeartbeatMessage { type: 'planHeartbeat'; ts: number; vehicleId: string; }
+export interface ReadinessMessage {
+  type: 'readiness'; ts: number; vehicleId: string; ready: boolean; reasons: string[]; eta_ready_s: number;
+}
+export type HealthComponent = 'link' | 'planner' | 'gps' | 'battery' | 'wind' | 'camera' | 'thermal' | 'lidar' | 'site_model' | 'mesh' | 'sdr';
+export interface HealthEventMessage {
+  type: 'healthEvent'; ts: number; vehicleId: string; component: HealthComponent; state: string; detail: string;
+}
+export type RfSource = 'sdr' | 'rf_drone';
+export type RfEventKind = 'gnss_interference' | 'drone_link' | 'remote_id' | 'hostile_drone';
+export interface RfEventMessage {
+  type: 'rfEvent'; ts: number; vehicleId: string; source: RfSource; kind: RfEventKind; band: string;
+  power_delta_db?: number; lat?: number; lon?: number; pilot_lat?: number; pilot_lon?: number; confidence: number;
+}
+export interface SpectrumBand { name: string; floor_db: number; p95_db: number; peak_mhz: number; occ_bw_mhz: number; }
+export interface SpectrumMessage {
+  type: 'spectrum'; ts: number; vehicleId: string; bands: SpectrumBand[]; state: 'warming' | 'nominal' | 'degraded';
+}
+export interface FleetVehicle {
+  vehicleId: string; battery: BatteryState; controlSource: ControlSource; failsafe: FailsafeStatus;
+  readiness: Omit<ReadinessMessage, 'type' | 'ts' | 'vehicleId'>;
+}
+export interface FleetMessage { type: 'fleet'; ts: number; vehicleId: string; vehicles: FleetVehicle[]; }
+export interface SimulationToggles {
+  simulateGpsLoss: boolean; simulateRfInterference: boolean; simulateHostileDrone: boolean;
+  simulateLinkLoss: boolean; simulateCameraFail: boolean; simulateCharging: boolean;
+  simulateBatteryFault: boolean; simulateSortieExpiry: boolean; simulateThermalFail: boolean;
+  simulateLidarFail: boolean; simulateNight: boolean;
 }
 
 export type ConnectionState =
@@ -253,9 +365,12 @@ export interface ConnectionConfig {
 /** Any message the companion may push to the ground over the control socket. */
 export type InboundMessage =
   | Telemetry | TrackingStatus | StatusText | CommandAck
-  | AnomalyMessage | MissionPlanMessage | VerificationMessage | IncidentReportMessage;
+  | AnomalyMessage | MissionPlanMessage | VerificationMessage | IncidentReportMessage
+  | ObservationMessage | CapabilitiesMessage | PlanCommandAckMessage | ReadinessMessage
+  | HealthEventMessage | RfEventMessage | SpectrumMessage | FleetMessage;
 /** Any message the ground may send to the companion over the control socket. */
-export type OutboundMessage = Command | ManualInputMessage;
+export type OutboundMessage =
+  | Command | ManualInputMessage | PlanCommandMessage | PlanHeartbeatMessage | RfEventMessage;
 
 export type Unsubscribe = () => void;
 
@@ -286,6 +401,7 @@ export interface DataSource {
 
 /* Default connection + tuning constants, shared so UI and backend agree. */
 export const DEFAULTS = {
+  vehicleId: DEFAULT_VEHICLE_ID,
   controlPort: 8765,
   videoPort: 8554,
   standoffDistance: 5,      // m  (PRD §9)

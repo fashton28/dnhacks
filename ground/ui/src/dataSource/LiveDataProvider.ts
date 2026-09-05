@@ -28,6 +28,7 @@ import type {
   Unsubscribe,
   VerificationMessage,
 } from '@/contract';
+import { DEFAULT_VEHICLE_ID } from '@/contract';
 import type { MissionDataSource } from './types';
 
 const ACK_TIMEOUT_MS = 4000;
@@ -213,6 +214,7 @@ export class LiveDataProvider implements MissionDataSource {
       p.resolve({
         type: 'ack',
         ts: Date.now(),
+        vehicleId: DEFAULT_VEHICLE_ID,
         command: p.command,
         success: false,
         message: 'Link closed before ack',
@@ -278,6 +280,7 @@ export class LiveDataProvider implements MissionDataSource {
       const failure: CommandAck = {
         type: 'ack',
         ts: Date.now(),
+        vehicleId: cmd.vehicleId,
         command: cmd.command,
         success: false,
         message: 'Command timed out — no ack received',
@@ -297,7 +300,7 @@ export class LiveDataProvider implements MissionDataSource {
       this.pending.push({ command: cmd.command, resolve, timer });
 
       try {
-        this.ws.send(JSON.stringify({ type: 'command', command: cmd.command, params: cmd.params }));
+        this.ws.send(JSON.stringify(cmd));
       } catch {
         clearTimeout(timer);
         const idx = this.pending.findIndex((p) => p.timer === timer);
@@ -313,6 +316,7 @@ export class LiveDataProvider implements MissionDataSource {
       this.ws.send(
         JSON.stringify({
           type: 'manualInput',
+          vehicleId: DEFAULT_VEHICLE_ID,
           throttle: input.throttle,
           yaw: input.yaw,
           pitch: input.pitch,

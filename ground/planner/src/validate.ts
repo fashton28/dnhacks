@@ -4,7 +4,9 @@
  * (tool_use input). Throws descriptive Errors on invalid input.
  * ========================================================================== */
 
-import { Anomaly, MissionPlan, MissionProfile, PlanTool, PROFILE_SPEED_MPS } from './contract';
+import {
+  Anomaly, AnomalySource, MissionPlan, MissionProfile, PlanTool, PROFILE_SPEED_MPS,
+} from './contract';
 import { ObservationSummary } from './report';
 
 function isFiniteNumber(v: unknown): v is number {
@@ -21,29 +23,66 @@ function validateTool(v: unknown, ctx: string): PlanTool {
   }
   const t = v as Record<string, unknown>;
   switch (t.tool) {
+    case 'follow':
+    case 'orbit': {
+      const trackId = t.track_id ?? t.trackId;
+      if (!isFiniteNumber(trackId) || !isProfile(t.profile)) {
+        throw new Error(`${ctx} (${t.tool}) requires numeric track_id and a valid profile`);
+      }
+      return {
+        tool: t.tool,
+        track_id: trackId,
+        profile: t.profile,
+        ...(t.trackId !== undefined ? { trackId } : {}),
+      };
+    }
+    case 'goto_relative': {
+      if (!isFiniteNumber(t.dx) || !isFiniteNumber(t.dy) || !isFiniteNumber(t.dz)) {
+        throw new Error(`${ctx} (goto_relative) requires numeric dx, dy, dz`);
+      }
+      return { tool: 'goto_relative', dx: t.dx, dy: t.dy, dz: t.dz };
+    }
     case 'goto_gps': {
-      if (!isFiniteNumber(t.lat) || !isFiniteNumber(t.lon) || !isFiniteNumber(t.alt)) {
-        throw new Error(`${ctx} (goto_gps) requires numeric lat, lon, alt`);
+      const alt = t.alt_m ?? t.alt;
+      if (!isFiniteNumber(t.lat) || !isFiniteNumber(t.lon) || !isFiniteNumber(alt)) {
+        throw new Error(`${ctx} (goto_gps) requires numeric lat, lon, alt_m (or legacy alt)`);
       }
       if (t.profile !== undefined && !isProfile(t.profile)) {
         throw new Error(`${ctx} (goto_gps) has invalid profile ${JSON.stringify(t.profile)}`);
       }
-      const out: PlanTool = { tool: 'goto_gps', lat: t.lat, lon: t.lon, alt: t.alt };
+      if (t.speed_mps !== undefined && !isFiniteNumber(t.speed_mps)) {
+        throw new Error(`${ctx} (goto_gps) speed_mps must be numeric when present`);
+      }
+      const out: PlanTool = { tool: 'goto_gps', lat: t.lat, lon: t.lon, alt };
+      if (t.alt_m !== undefined) out.alt_m = alt;
       if (t.profile !== undefined) out.profile = t.profile as MissionProfile;
+      if (t.speed_mps !== undefined) out.speed_mps = t.speed_mps as number;
       return out;
     }
     case 'orbit_point': {
-      if (!isFiniteNumber(t.lat) || !isFiniteNumber(t.lon) || !isFiniteNumber(t.radius)) {
-        throw new Error(`${ctx} (orbit_point) requires numeric lat, lon, radius`);
+      const radius = t.radius_m ?? t.radius;
+      if (!isFiniteNumber(t.lat) || !isFiniteNumber(t.lon) || !isFiniteNumber(radius)) {
+        throw new Error(`${ctx} (orbit_point) requires numeric lat, lon, radius_m (or legacy radius)`);
       }
-      return { tool: 'orbit_point', lat: t.lat, lon: t.lon, radius: t.radius };
+      if (t.laps !== undefined && !isFiniteNumber(t.laps)) {
+        throw new Error(`${ctx} (orbit_point) laps must be numeric when present`);
+      }
+      return {
+        tool: 'orbit_point', lat: t.lat, lon: t.lon, radius,
+        ...(t.radius_m !== undefined ? { radius_m: radius } : {}),
+        ...(t.laps !== undefined ? { laps: t.laps as number } : {}),
+      };
     }
     case 'hold': {
-      if (t.durationS !== undefined && !isFiniteNumber(t.durationS)) {
-        throw new Error(`${ctx} (hold) durationS must be a number when present`);
+      const duration = t.duration_s ?? t.durationS;
+      if (duration !== undefined && !isFiniteNumber(duration)) {
+        throw new Error(`${ctx} (hold) duration_s must be a number when present`);
       }
-      return t.durationS !== undefined
-        ? { tool: 'hold', durationS: t.durationS as number }
+      return duration !== undefined
+        ? {
+            tool: 'hold', durationS: duration,
+            ...(t.duration_s !== undefined ? { duration_s: duration } : {}),
+          }
         : { tool: 'hold' };
     }
     case 'rtl':
@@ -105,9 +144,18 @@ export function validateAnomaly(data: unknown): Anomaly {
   if (typeof d.thumbnail !== 'string') {
     throw new Error('invalid Anomaly: thumbnail must be a string');
   }
+  const sources: AnomalySource[] = [
+    'sentinel2', 'sar', 'sdr', 'rf_drone', 'drone_survey', 'cctv',
+  ];
+  // Pre-Phase1 anomaly files are interpreted as optical satellite cues.
+  const source = d.source === undefined ? 'sentinel2' : d.source;
+  if (typeof source !== 'string' || !sources.includes(source as AnomalySource)) {
+    throw new Error(`invalid Anomaly: source must be one of ${sources.join('|')}`);
+  }
   return {
     id: d.id, lat: d.lat, lon: d.lon,
     type: d.type, confidence: d.confidence, thumbnail: d.thumbnail,
+    source: source as AnomalySource,
   };
 }
 

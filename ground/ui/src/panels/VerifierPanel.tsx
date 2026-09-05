@@ -28,6 +28,12 @@ const VERDICT_TONE: Record<Verification['verdict'], 'nominal' | 'caution' | 'dan
 
 function describeTool(t: PlanTool): string {
   switch (t.tool) {
+    case 'follow':
+      return `follow track ${t.track_id} [${t.profile}]`;
+    case 'orbit':
+      return `orbit track ${t.track_id} [${t.profile}]`;
+    case 'goto_relative':
+      return `relative ${t.dx}, ${t.dy}, ${t.dz} m`;
     case 'goto_gps':
       return `goto ${t.lat.toFixed(5)}, ${t.lon.toFixed(5)} @ ${t.alt} m` + (t.profile ? ` [${t.profile}]` : '');
     case 'orbit_point':

@@ -30,12 +30,18 @@ Mode = Literal[
 ]
 
 ControlSource = Literal["auto", "tracking", "manual", "planner"]
+DEFAULT_VEHICLE_ID = "eis-1"
+NavSource = Literal["gps", "optflow", "extnav"]
+FailsafeState = Literal["none", "hold", "rtl", "escalate", "refuse"]
+ChargeState = Literal["charging", "charged", "discharging", "fault", "unknown"]
 TrackingState = Literal["idle", "searching", "locked", "lost"]
 Severity = Literal["info", "warning", "error", "critical"]
 ConnectionState = Literal["disconnected", "connecting", "connected", "error"]
 
 # Mission planner enums (mirror shared.ts inline literal unions)
-MissionProfile = Literal["slow", "standard", "fast"]
+MissionProfile = Literal[
+    "follow", "inspect", "survey", "slow", "standard", "fast",
+]
 VerificationVerdict = Literal["pass", "corrected", "rejected"]
 IncidentVerdict = Literal["false_alarm", "log", "escalate"]
 
@@ -52,7 +58,7 @@ CommandName = Literal[
     "engageTracking", "disengageTracking", "selectTarget",
     "setStandoff", "setMaxSpeed", "emergencyStop",
     "engageManual", "disengageManual",
-    "executePlan", "abortPlan",
+    "executePlan", "abortPlan", "continueMission",
 ]
 
 
@@ -76,16 +82,40 @@ class Velocity(TypedDict):
     verticalSpeed: float
 
 
-class Battery(TypedDict):
+class BatteryRequired(TypedDict):
+    soc_pct: float
+    voltage_v: float
+    current_a: float
+    cell_delta_v: float
+    temp_c: float
+    remaining_s: float
+    charge_state: ChargeState
+    # Compatibility aliases retained while existing panels migrate.
     voltage: float
     current: float
     remaining: float
+
+
+class Battery(BatteryRequired, total=False):
+    fault: str
 
 
 class Gps(TypedDict):
     fixType: int
     satellites: int
     hdop: float
+
+
+class GpsHealth(TypedDict):
+    fix: int
+    sats: int
+    hdop: float
+
+
+class SortieState(TypedDict):
+    elapsed_s: float
+    cap_s: float
+    must_rtl_by_s: float
 
 
 class Home(TypedDict):
@@ -99,18 +129,24 @@ class Link(TypedDict):
     latencyMs: float
 
 
-class Telemetry(TypedDict, total=False):
+class Telemetry(TypedDict):
     type: Literal["telemetry"]
     ts: int
+    vehicleId: str
     armed: bool
     mode: Mode
-    controlSource: ControlSource  # optional / additive
+    controlSource: ControlSource
+    navSource: NavSource
+    gpsHealth: GpsHealth
+    failsafeState: FailsafeState
+    failsafeReason: str
     attitude: Attitude
     position: Position
     velocity: Velocity
     heading: float
     battery: Battery
     gps: Gps
+    sortie: Optional[SortieState]
     home: Home
     link: Link
 
@@ -125,6 +161,7 @@ class DetectedTarget(TypedDict):
 class TrackingStatus(TypedDict):
     type: Literal["tracking"]
     ts: int
+    vehicleId: str
     state: TrackingState
     targets: list
     lockedTargetId: Optional[int]
@@ -136,6 +173,7 @@ class TrackingStatus(TypedDict):
 class StatusTextMsg(TypedDict):
     type: Literal["statusText"]
     ts: int
+    vehicleId: str
     severity: Severity
     text: str
 
@@ -147,19 +185,24 @@ class GotoGpsTool(TypedDict, total=False):
     lat: float
     lon: float
     alt: float                 # m, relative
+    alt_m: float               # canonical wire alias
     profile: MissionProfile    # optional speed override for this leg
+    speed_mps: float
 
 
-class OrbitPointTool(TypedDict):
+class OrbitPointTool(TypedDict, total=False):
     tool: Literal["orbit_point"]
     lat: float
     lon: float
     radius: float              # m
+    radius_m: float            # canonical wire alias
+    laps: float
 
 
 class HoldTool(TypedDict, total=False):
     tool: Literal["hold"]
     durationS: float           # seconds; omitted = indefinite
+    duration_s: float          # canonical wire alias
 
 
 class RtlTool(TypedDict):
@@ -167,7 +210,34 @@ class RtlTool(TypedDict):
 
 
 # One step of a mission plan, discriminated on "tool".
-PlanTool = Union[GotoGpsTool, OrbitPointTool, HoldTool, RtlTool]
+class FollowTool(TypedDict, total=False):
+    tool: Literal["follow"]
+    track_id: int
+    profile: MissionProfile
+    trackId: int               # compatibility alias
+
+
+class OrbitTool(TypedDict, total=False):
+    tool: Literal["orbit"]
+    track_id: int
+    profile: MissionProfile
+    trackId: int               # compatibility alias
+
+
+class GotoRelativeTool(TypedDict):
+    tool: Literal["goto_relative"]
+    dx: float
+    dy: float
+    dz: float
+
+
+PlanTool = Union[
+    FollowTool, OrbitTool, GotoRelativeTool,
+    GotoGpsTool, OrbitPointTool, HoldTool, RtlTool,
+]
+AnomalySource = Literal[
+    "sentinel2", "sar", "sdr", "rf_drone", "drone_survey", "cctv",
+]
 
 
 class Anomaly(TypedDict):
@@ -180,6 +250,7 @@ class Anomaly(TypedDict):
     type: str          # anomaly kind, e.g. "change"
     confidence: float  # 0..1
     thumbnail: str     # repo-relative path or data URL
+    source: AnomalySource
 
 
 class MissionPlan(TypedDict):
@@ -210,9 +281,13 @@ class IncidentReport(TypedDict):
     markdown: str
 
 
-class Command(TypedDict, total=False):
+class CommandRequired(TypedDict):
     type: Literal["command"]
+    vehicleId: str
     command: CommandName
+
+
+class Command(CommandRequired, total=False):
     params: dict  # per-command bag; executePlan carries {"plan": MissionPlan}
 
 
@@ -223,14 +298,16 @@ class CommandAck(TypedDict):
     participates in ack matching."""
     type: Literal["ack"]
     ts: int
+    vehicleId: str
     command: CommandName
     success: bool
     message: str
 
 
-class ManualInputMessage(TypedDict, total=False):
+class ManualInputMessage(TypedDict):
     type: Literal["manualInput"]
     ts: int
+    vehicleId: str
     throttle: float  # climb/descend, -1..1
     yaw: float       # yaw rate,     -1..1
     pitch: float     # forward/back, -1..1
@@ -245,25 +322,260 @@ class ManualInputMessage(TypedDict, total=False):
 class AnomalyMessage(TypedDict):
     type: Literal["anomaly"]
     ts: int
+    vehicleId: str
     anomaly: Anomaly
 
 
 class MissionPlanMessage(TypedDict):
     type: Literal["missionPlan"]
     ts: int
+    vehicleId: str
     plan: MissionPlan
 
 
 class VerificationMessage(TypedDict):
     type: Literal["verification"]
     ts: int
+    vehicleId: str
     verification: Verification
 
 
 class IncidentReportMessage(TypedDict):
     type: Literal["incidentReport"]
     ts: int
+    vehicleId: str
     report: IncidentReport
+
+
+# --- Sensor, RF, readiness, health, fleet, and planner messages -----------
+
+SensorModality = Literal["rgb", "thermal", "lidar", "fused"]
+SensorHealth = Literal["ok", "degraded", "failed"]
+
+
+ObservationTrackRequired = TypedDict("ObservationTrackRequired", {
+    "id": int,
+    "class": str,
+    "bearing_deg": float,
+    "range_m": float,
+    "conf": float,
+    "modality": SensorModality,
+})
+
+
+class ObservationTrack(ObservationTrackRequired, total=False):
+    thermal_delta_c: float
+
+
+class FenceGap(TypedDict):
+    lat: float
+    lon: float
+    width_m: float
+
+
+class NewStructure(TypedDict):
+    lat: float
+    lon: float
+    footprint_m2: float
+    height_m: float
+
+
+class ObservationGeometry(TypedDict):
+    fence_gaps: list
+    new_structures: list
+
+
+class ObservationSensors(TypedDict):
+    rgb: SensorHealth
+    thermal: SensorHealth
+    lidar: SensorHealth
+
+
+class ObservationMessageRequired(TypedDict):
+    type: Literal["observation"]
+    ts: int
+    vehicleId: str
+    tracks: list
+    scene: str
+    sensors: ObservationSensors
+    geometry: ObservationGeometry
+
+
+class ObservationFrames(TypedDict, total=False):
+    # Values are data URLs or repo-relative staged-image paths.
+    rgb: str
+    thermal: str
+
+
+class ObservationMessage(ObservationMessageRequired, total=False):
+    frames: ObservationFrames
+    missionId: str
+    stagingId: str
+
+
+class CapabilityProfile(TypedDict):
+    profile: MissionProfile
+    min_standoff_m: float
+    max_standoff_m: float
+    max_speed_mps: float
+    max_altitude_m: float
+
+
+class CapabilitiesMessage(TypedDict):
+    type: Literal["capabilities"]
+    ts: int
+    vehicleId: str
+    profiles: list
+    sensors: list
+    night_capable: bool
+    max_sortie_s: float
+    dispatch_min_soc_pct: float
+
+
+PlannerToolName = Literal[
+    "follow", "orbit", "goto_relative", "goto_gps", "orbit_point", "hold", "rtl",
+]
+PlanCommandStatus = Literal["accepted", "rejected", "clamped"]
+
+
+class PlanCommandMessage(TypedDict):
+    type: Literal["planCommand"]
+    ts: int
+    vehicleId: str
+    requestId: str
+    tool: PlannerToolName
+    args: dict
+    profile: MissionProfile
+
+
+class PlanCommandAckMessage(TypedDict):
+    type: Literal["planCommandAck"]
+    ts: int
+    vehicleId: str
+    requestId: str
+    status: PlanCommandStatus
+    reason: str
+
+
+class PlanHeartbeatMessage(TypedDict):
+    type: Literal["planHeartbeat"]
+    ts: int
+    vehicleId: str
+
+
+class ReadinessMessage(TypedDict):
+    type: Literal["readiness"]
+    ts: int
+    vehicleId: str
+    ready: bool
+    reasons: list
+    eta_ready_s: float
+
+
+HealthComponent = Literal[
+    "link", "planner", "gps", "battery", "wind", "camera", "thermal", "lidar",
+    "site_model", "mesh", "sdr",
+]
+
+
+class HealthEventMessage(TypedDict):
+    type: Literal["healthEvent"]
+    ts: int
+    vehicleId: str
+    component: HealthComponent
+    state: str
+    detail: str
+
+
+RfSource = Literal["sdr", "rf_drone"]
+RfEventKind = Literal[
+    "gnss_interference", "drone_link", "remote_id", "hostile_drone",
+]
+
+
+class RfEventRequired(TypedDict):
+    type: Literal["rfEvent"]
+    ts: int
+    vehicleId: str
+    source: RfSource
+    kind: RfEventKind
+    band: str
+    confidence: float
+
+
+class RfEventMessage(RfEventRequired, total=False):
+    power_delta_db: float
+    lat: float
+    lon: float
+    pilot_lat: float
+    pilot_lon: float
+
+
+class SpectrumBand(TypedDict):
+    name: str
+    floor_db: float
+    p95_db: float
+    peak_mhz: float
+    occ_bw_mhz: float
+
+
+class SpectrumMessage(TypedDict):
+    type: Literal["spectrum"]
+    ts: int
+    vehicleId: str
+    bands: list
+    state: Literal["warming", "nominal", "degraded"]
+
+
+class FleetReadiness(TypedDict):
+    ready: bool
+    reasons: list
+    eta_ready_s: float
+
+
+class FleetFailsafe(TypedDict):
+    state: FailsafeState
+    reason: str
+
+
+class FleetVehicle(TypedDict):
+    vehicleId: str
+    battery: Battery
+    controlSource: ControlSource
+    failsafe: FleetFailsafe
+    readiness: FleetReadiness
+
+
+class FleetMessage(TypedDict):
+    type: Literal["fleet"]
+    ts: int
+    vehicleId: str
+    vehicles: list
+
+
+class SimulationToggles(TypedDict):
+    simulateGpsLoss: bool
+    simulateRfInterference: bool
+    simulateHostileDrone: bool
+    simulateLinkLoss: bool
+    simulateCameraFail: bool
+    simulateCharging: bool
+    simulateBatteryFault: bool
+    simulateSortieExpiry: bool
+    simulateThermalFail: bool
+    simulateLidarFail: bool
+    simulateNight: bool
+
+
+InboundMessage = Union[
+    Telemetry, TrackingStatus, StatusTextMsg, CommandAck,
+    AnomalyMessage, MissionPlanMessage, VerificationMessage, IncidentReportMessage,
+    ObservationMessage, CapabilitiesMessage, PlanCommandAckMessage, ReadinessMessage,
+    HealthEventMessage, RfEventMessage, SpectrumMessage, FleetMessage,
+]
+OutboundMessage = Union[
+    Command, ManualInputMessage, PlanCommandMessage, PlanHeartbeatMessage, RfEventMessage,
+]
 
 
 def now_ms() -> int:
@@ -308,6 +620,7 @@ class Defaults:
     manual_watchdog_ms: int = 500    # zero setpoint + hold if no stick frame
     ground_link_timeout_ms: int = 2000  # deadman
     deadzone: float = 0.09
+    vehicle_id: str = DEFAULT_VEHICLE_ID
 
 
 DEFAULTS = Defaults()
@@ -316,6 +629,9 @@ DEFAULTS = Defaults()
 # keys are wire values shared with the TS mirrors). These MUST stay under the
 # config.py hard max-speed cap (8.0 m/s -- Defaults.max_speed_cap).
 PROFILE_SPEED_MPS: dict[MissionProfile, float] = {
+    "follow": 2.0,
+    "inspect": 4.0,
+    "survey": 6.0,
     "slow": 2.0,
     "standard": 4.0,
     "fast": 6.0,

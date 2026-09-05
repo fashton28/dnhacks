@@ -19,6 +19,7 @@ export interface Anomaly {
   type: string;        // anomaly kind, e.g. 'change'
   confidence: number;  // 0..1
   thumbnail: string;   // repo-relative path or data URL
+  source: 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey' | 'cctv';
 }
 
 /** Geographic bounding box of a tile, degrees WGS84. */
