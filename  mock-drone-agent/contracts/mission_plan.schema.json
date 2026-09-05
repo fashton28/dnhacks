@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MissionPlan",
+  "description": "THE INTERFACE CONTRACT. The LLM layer produces this; the drone-control layer consumes it via execute_mission(plan). Everyone reads this file; only change it by agreeing with the whole team.",
+  "type": "object",
+  "properties": {
+    "mission_id": {
+      "type": "string",
+      "description": "Assigned by the orchestrator, not the LLM. e.g. 'm-20260905-0001'."
+    },
+    "anomaly_id": {
+      "type": "string",
+      "description": "The anomaly this mission investigates."
+    },
+    "created_at": {
+      "type": "string",
+      "description": "ISO-8601 UTC timestamp."
+    },
+    "planner": {
+      "type": "string",
+      "description": "What produced this plan: a model id like 'claude-opus-5', or 'mock'."
+    },
+    "priority": {
+      "type": "string",
+      "enum": ["low", "medium", "high"]
+    },
+    "reasoning": {
+      "type": "string",
+      "description": "Plain-language justification. Shown in the dashboard and the incident report."
+    },
+    "waypoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/waypoint"}
+    }
+  },
+  "required": ["mission_id", "anomaly_id", "created_at", "planner", "priority", "reasoning", "waypoints"],
+  "additionalProperties": false,
+  "$defs": {
+    "waypoint": {
+      "type": "object",
+      "description": "One step of the mission. Altitudes are metres above ground level at the base. Coordinates are WGS84 decimal degrees.",
+      "properties": {
+        "lat": {"type": "number", "description": "Latitude, decimal degrees."},
+        "lon": {"type": "number", "description": "Longitude, decimal degrees."},
+        "alt_m": {"type": "number", "description": "Altitude above ground level, metres."},
+        "action": {
+          "type": "string",
+          "enum": ["flyto", "hover"],
+          "description": "'flyto' transits to the point. 'hover' holds position and collects sensor observations."
+        },
+        "duration_s": {
+          "type": "number",
+          "description": "Seconds to hold. Must be 0 for 'flyto'."
+        },
+        "purpose": {
+          "type": "string",
+          "description": "One short line: why this waypoint exists. e.g. 'observe fence line from the north'."
+        }
+      },
+      "required": ["lat", "lon", "alt_m", "action", "duration_s", "purpose"],
+      "additionalProperties": false
+    }
+  }
+}
