@@ -116,6 +116,15 @@ class Scene(Command):
     state: SceneState
 
 
+class RendererSettings(Command):
+    """Hub -> Renderer: how to draw a Drone's camera: sensor mode and field of view. Set by any front end via the Hub."""
+
+    type: Literal["renderer_settings"] = "renderer_settings"
+    drone_id: str
+    mode: Literal["rgb", "thermal", "lidar"] = "rgb"
+    fov_deg: float = Field(default=70.0, ge=20.0, le=110.0)
+
+
 class CaptureOverhead(Command):
     type: Literal["capture_overhead"] = "capture_overhead"
     ref: str
@@ -126,9 +135,9 @@ class Reset(Command):
 
 
 DroneCommand = Annotated[Union[Goto, Hover, SetVelocity, LookAt, CaptureFrame, ReturnHome], Field(discriminator="type")]
-RendererCommand = Annotated[Union[RenderFrame, Scene, CaptureOverhead, Reset], Field(discriminator="type")]
+RendererCommand = Annotated[Union[RenderFrame, Scene, RendererSettings, CaptureOverhead, Reset], Field(discriminator="type")]
 HubMessage = Annotated[
-    Union[Goto, Hover, SetVelocity, LookAt, CaptureFrame, ReturnHome, RenderFrame, Scene, CaptureOverhead, Reset],
+    Union[Goto, Hover, SetVelocity, LookAt, CaptureFrame, ReturnHome, RenderFrame, Scene, RendererSettings, CaptureOverhead, Reset],
     Field(discriminator="type"),
 ]
 drone_command = TypeAdapter(DroneCommand)

@@ -166,6 +166,49 @@
       "title": "RenderFrame",
       "type": "object"
     },
+    "RendererSettings": {
+      "additionalProperties": false,
+      "description": "Hub -> Renderer: how to draw a Drone's camera: sensor mode and field of view. Set by any front end via the Hub.",
+      "properties": {
+        "cmd_id": {
+          "title": "Cmd Id",
+          "type": "string"
+        },
+        "type": {
+          "const": "renderer_settings",
+          "default": "renderer_settings",
+          "title": "Type",
+          "type": "string"
+        },
+        "drone_id": {
+          "title": "Drone Id",
+          "type": "string"
+        },
+        "mode": {
+          "default": "rgb",
+          "enum": [
+            "rgb",
+            "thermal",
+            "lidar"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "fov_deg": {
+          "default": 70.0,
+          "maximum": 110.0,
+          "minimum": 20.0,
+          "title": "Fov Deg",
+          "type": "number"
+        }
+      },
+      "required": [
+        "cmd_id",
+        "drone_id"
+      ],
+      "title": "RendererSettings",
+      "type": "object"
+    },
     "Reset": {
       "additionalProperties": false,
       "properties": {
@@ -361,6 +404,7 @@
       "hover": "#/$defs/Hover",
       "look_at": "#/$defs/LookAt",
       "render_frame": "#/$defs/RenderFrame",
+      "renderer_settings": "#/$defs/RendererSettings",
       "reset": "#/$defs/Reset",
       "return_home": "#/$defs/ReturnHome",
       "scene": "#/$defs/Scene",
@@ -392,6 +436,9 @@
     },
     {
       "$ref": "#/$defs/Scene"
+    },
+    {
+      "$ref": "#/$defs/RendererSettings"
     },
     {
       "$ref": "#/$defs/CaptureOverhead"

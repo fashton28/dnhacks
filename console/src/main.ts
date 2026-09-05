@@ -102,7 +102,16 @@ function onDetection(d: any): void {
   refreshDispatchButton();
 }
 
+// Per-Drone camera settings brokered by the Hub (vision mode and field of view); applied whenever that Drone's view is drawn.
+type CamSettings = { mode: "rgb" | "thermal" | "lidar"; fov_deg: number };
+const cameraSettings = new Map<string, CamSettings>();
+function applyCamera(droneId: string): void {
+  const st = cameraSettings.get(droneId) ?? { mode: "rgb", fov_deg: 70 };
+  if (vision.mode !== st.mode) vision.mode = st.mode;
+  if (Math.abs(droneCam.fov - st.fov_deg) > 0.01) { droneCam.fov = st.fov_deg; droneCam.updateProjectionMatrix(); }
+}
 function renderDroneView(s: DroneState): void {
+  applyCamera(s.drone_id);
   world.aimDroneCamera(droneCam, s);
   const g = world.drones.get(s.drone_id);
   if (g) g.visible = false;
@@ -175,6 +184,10 @@ const link = new RendererLink(rendererId, isHeadless ? "headless" : "browser", (
     reply({ type: "ack", cmd_id: cmd.cmd_id, ok: true });
     reply(overheadMessage(cmd.ref, cmd.cmd_id));
     log(`Renderer: overhead captured ${cmd.ref}`);
+  } else if (cmd.type === "renderer_settings") {
+    cameraSettings.set(cmd.drone_id, { mode: cmd.mode, fov_deg: cmd.fov_deg });
+    if (cmd.drone_id === selected) reflectVision(cmd.mode);
+    reply({ type: "ack", cmd_id: cmd.cmd_id, ok: true });
   } else if (cmd.type === "scene") {
     scene = cmd.state; world.setScene(scene); overview.setScene(scene);
     reply({ type: "ack", cmd_id: cmd.cmd_id, ok: true });
@@ -195,6 +208,7 @@ liveFeed((ev) => {
       break;
     case "drone_state": onDrone(ev.state); break;
     case "scene": scene = ev.state; world.setScene(scene); overview.setScene(scene); break;
+    case "camera": cameraSettings.set(ev.drone_id, { mode: ev.mode, fov_deg: ev.fov_deg }); if (ev.drone_id === selected) reflectVision(ev.mode); break;
     case "mission": onMission(ev.mission); break;
     case "clamp": log(`Safety Validator clamped ${ev.drone_id}: ${ev.rule}`, "warn"); showClamp(ev.rule); break;
     case "manual": log(`${ev.drone_id}: Manual Control ${ev.active ? "taken" : "released"}${ev.mission_id ? ` (Mission ${ev.mission_id})` : ""}`, "warn"); break;
@@ -414,15 +428,23 @@ $("fit-site").onclick = fitSite;
 
 // ---- vision mode switch -------------------------------------------------------------------------------
 const VISION: ("rgb" | "thermal" | "lidar")[] = ["rgb", "thermal", "lidar"];
-function setVision(mode: "rgb" | "thermal" | "lidar"): void {
-  vision.mode = mode;
+function reflectVision(mode: "rgb" | "thermal" | "lidar"): void {
   document.querySelectorAll<HTMLButtonElement>("#vision-seg button").forEach((b) => b.classList.toggle("on", b.dataset.mode === mode));
   const frame = document.querySelector<HTMLElement>(".drone-frame");
   if (frame) frame.className = `drone-frame${mode !== "rgb" ? ` mode-${mode}` : ""}`;
   if (selected && drones.has(selected)) renderHud($("hud"), drones.get(selected), (drones.get(selected)!.alt > 0.3), mode);
 }
+function setVision(mode: "rgb" | "thermal" | "lidar"): void {
+  if (selected) {
+    const cur = cameraSettings.get(selected) ?? { mode: "rgb", fov_deg: 70 };
+    cameraSettings.set(selected, { ...cur, mode });
+    api(`/drones/${selected}/camera`, { mode }).catch((err) => log(String(err), "bad"));
+  }
+  reflectVision(mode);
+
+}
 document.querySelectorAll<HTMLButtonElement>("#vision-seg button").forEach((b) => b.onclick = () => setVision(b.dataset.mode as any));
-const cycleVision = () => setVision(VISION[(VISION.indexOf(vision.mode) + 1) % VISION.length]);
+const cycleVision = () => { const cur = (selected && cameraSettings.get(selected)?.mode) || "rgb"; setVision(VISION[(VISION.indexOf(cur) + 1) % VISION.length]); };
 
 // ---- help dialog ----------------------------------------------------------------------------------------
 const help = document.getElementById("help") as HTMLDialogElement | null;

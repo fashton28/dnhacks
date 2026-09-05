@@ -44,6 +44,7 @@ from contracts.protocol import (
     LookAt,
     Overhead,
     RenderFrame,
+    RendererSettings,
     ReturnHome,
     Scene,
     SetVelocity,
@@ -97,6 +98,11 @@ class DetectBody(BaseModel):
     before_ref: str
     after_ref: str
     min_area_m2: float = 4.0
+
+
+class CameraBody(BaseModel):
+    mode: str | None = None
+    fov_deg: float | None = None
 
 
 class ManualBody(BaseModel):
@@ -194,6 +200,8 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         conn = reg().add_renderer(hello.id, ws, hello.sim)
         app.state.audit.append("renderer_connected", renderer_id=hello.id, sim=hello.sim)
         await ws.send_text(Scene(cmd_id=reg().new_cmd_id(), state=reg().scene).model_dump_json())
+        for did, st in app.state.camera_settings.items():
+            await ws.send_text(RendererSettings(cmd_id=reg().new_cmd_id(), drone_id=did, mode=st["mode"], fov_deg=st["fov_deg"]).model_dump_json())
         try:
             while True:
                 raw = await ws.receive_text()
@@ -369,6 +377,38 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         if mission_id not in runner().missions:
             raise HTTPException(404, "unknown mission")
         return (await runner().abort(mission_id)).model_dump(mode="json")
+
+    # ---- Camera settings for the Renderer (vision mode, field of view) --------------------------------
+    app.state.camera_settings = {}
+
+    async def push_camera(drone_id: str) -> None:
+        st = app.state.camera_settings.setdefault(drone_id, {"mode": "rgb", "fov_deg": 70.0})
+        msg = RendererSettings(cmd_id=reg().new_cmd_id(), drone_id=drone_id, mode=st["mode"], fov_deg=st["fov_deg"]).model_dump_json()
+        for c in list(reg().renderers.values()):
+            try:
+                await c.ws.send_text(msg)
+            except Exception:  # noqa: BLE001
+                pass
+        reg().publish({"type": "camera", "drone_id": drone_id, **st})
+
+    @app.get("/drones/{drone_id}/camera")
+    async def get_camera(drone_id: str) -> dict[str, Any]:
+        return {"drone_id": drone_id, **app.state.camera_settings.get(drone_id, {"mode": "rgb", "fov_deg": 70.0})}
+
+    @app.post("/drones/{drone_id}/camera")
+    async def set_camera(drone_id: str, body: CameraBody) -> dict[str, Any]:
+        if drone_id not in reg().drones:
+            raise HTTPException(404, f"unknown drone {drone_id}")
+        st = app.state.camera_settings.setdefault(drone_id, {"mode": "rgb", "fov_deg": 70.0})
+        if body.mode is not None:
+            if body.mode not in ("rgb", "thermal", "lidar"):
+                raise HTTPException(422, "mode must be rgb, thermal or lidar")
+            st["mode"] = body.mode
+        if body.fov_deg is not None:
+            st["fov_deg"] = max(20.0, min(110.0, body.fov_deg))
+        app.state.audit.append("camera_settings", drone_id=drone_id, **st)
+        await push_camera(drone_id)
+        return {"drone_id": drone_id, **st}
 
     # ---- Manual Control ---------------------------------------------------------------------------
     @app.post("/drones/{drone_id}/manual/start")
