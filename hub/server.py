@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import os
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ValidationError
@@ -527,7 +528,26 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             raise HTTPException(409, str(e)) from e
         return fr.model_dump(mode="json", exclude={"jpeg_b64"})
 
-    @app.get("/", response_class=HTMLResponse)
+    @app.get("/overheads")
+    async def list_overheads() -> list[dict[str, Any]]:
+        """Captured overhead images (wide-area layer inputs), newest last."""
+        ev = settings.evidence_dir
+        if ev is None or not (ev / "overhead").exists():
+            return []
+        out = []
+        for meta in sorted((ev / "overhead").glob("*.json"), key=lambda p: p.stat().st_mtime):
+            try:
+                m = json.loads(meta.read_text())
+            except Exception:  # noqa: BLE001
+                continue
+            out.append({"ref": m.get("ref", f"overhead/{meta.stem}.png"), "ts": m.get("ts"), "footprint": m.get("footprint"), "width": m.get("width"), "height": m.get("height")})
+        return out
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse(url="/gcs/" if gcs_dist.exists() else "/console/")
+
+    @app.get("/hub", response_class=HTMLResponse)
     async def index() -> str:
         return f"<h1>ARGUS Hub</h1><p>{SITE_NAME}</p><p>{datetime.now(UTC).isoformat()}</p><ul><li><a href='/console/'>Console</a></li><li><a href='/gcs/'>Ground control dashboard</a></li><li><a href='/docs'>API docs</a></li><li><a href='/drones'>Drones</a></li><li><a href='/missions'>Missions</a></li></ul>"
 

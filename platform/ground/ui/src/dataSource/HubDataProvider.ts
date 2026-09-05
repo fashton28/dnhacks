@@ -43,7 +43,7 @@ import type { MissionDataSource } from './types';
 import { hubHttpBase, hubWsBase } from './hubConfig';
 
 /* ---- Hub wire shapes (contracts/models.py, hub/server.py) ------------------ */
-interface HubDroneState {
+export interface HubDroneState {
   drone_id: string;
   lat: number;
   lon: number;
@@ -59,7 +59,7 @@ interface HubDroneState {
   message: string;
   ts: string;
 }
-interface HubDetection {
+export interface HubDetection {
   id: string;
   polygon: { lat: number; lon: number }[];
   confidence: number;
@@ -69,15 +69,15 @@ interface HubDetection {
   area_m2: number | null;
   metadata: Record<string, string>;
 }
-interface HubMission {
+export interface HubMission {
   mission_id: string;
   drone_id: string;
   phase: string;
   next_waypoint: number;
   error: string | null;
 }
-interface AgentWaypoint { lat: number; lon: number; alt_m: number; action: string; duration_s?: number; purpose?: string }
-interface AgentPlan { anomaly_id: string; priority: string; reasoning: string; waypoints: AgentWaypoint[] }
+export interface AgentWaypoint { lat: number; lon: number; alt_m: number; action: string; duration_s?: number; purpose?: string }
+export interface AgentPlan { anomaly_id: string; priority: string; reasoning: string; waypoints: AgentWaypoint[] }
 
 /** One row of the fleet list published to the vehicle selector. */
 export interface FleetEntry {
@@ -130,6 +130,7 @@ export class HubDataProvider implements MissionDataSource {
   private lVerify: Listeners<VerificationMessage> = new Set();
   private lReport: Listeners<IncidentReportMessage> = new Set();
   private lFleet: Listeners<FleetEntry[]> = new Set();
+  private lRaw: Listeners<Record<string, unknown>> = new Set();
 
   /* ---- DataSource ------------------------------------------------------------ */
   async connect(config: ConnectionConfig): Promise<void> {
@@ -161,6 +162,14 @@ export class HubDataProvider implements MissionDataSource {
 
   /* ---- Fleet extension (beyond the frozen contract) ------------------------- */
   onFleet = sub(this.lFleet);
+  /** Every live Hub event, untranslated (for the ARGUS panels that speak the Hub's own vocabulary). */
+  onRawEvent = sub(this.lRaw);
+  /** Hub HTTP base for direct REST calls from ARGUS panels. */
+  httpBase(): string { return this.http; }
+  /** Fire-and-forget REST helpers for ARGUS operations. */
+  async postJson(path: string, body: unknown): Promise<{ ok: boolean; status: number; text: string; json?: any }> { return this.post(path, body); }
+  async getJson(path: string): Promise<{ ok: boolean; json?: unknown }> { return this.get(path); }
+  isManualActive(): boolean { return this.manualActive; }
 
   /** Follow another Drone: telemetry, video and commands switch to it. */
   setVehicle(id: string): void {
@@ -213,8 +222,8 @@ export class HubDataProvider implements MissionDataSource {
         }
         case 'disengageManual': {
           this.stopManualLoop();
-          const r = await this.post(`/drones/${id}/manual/end`, { action: 'hover' });
-          return ack(r.ok, r.ok ? 'Manual Control released; holding position' : r.text);
+          const r = await this.post(`/drones/${id}/manual/end`, { action: 'resume' });
+          return ack(r.ok, r.ok ? (r.json?.mission_id ? `Manual Control released; Mission ${r.json.mission_id} resumes` : 'Manual Control released; holding position') : r.text);
         }
         case 'abortPlan': {
           const m = this.activeMissionFor(id);
@@ -274,6 +283,7 @@ export class HubDataProvider implements MissionDataSource {
 
   private handle(ev: Record<string, unknown>): void {
     const now = Date.now();
+    emit(this.lRaw, ev);
     switch (ev.type) {
       case 'snapshot': {
         for (const s of (ev.drones as HubDroneState[]) ?? []) this.ingestState(s);

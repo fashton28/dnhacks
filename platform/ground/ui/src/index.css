@@ -224,3 +224,9 @@ input[type=range] { -webkit-appearance: none; appearance: none; background: tran
 @keyframes eis-toast { from { opacity: 0; transform: translateX(12px) } to { opacity: 1; transform: none } }
 @keyframes eis-fade { from { opacity: 0 } to { opacity: 1 } }
 @keyframes eis-rise { from { opacity: 0; transform: translateY(8px) scale(.99) } to { opacity: 1; transform: none } }
+
+/* ---- ARGUS operator console: laptop breakpoints ------------------------- */
+@media (max-width: 1320px), (max-height: 760px) {
+  .argus-grid { grid-template-columns: 222px 1fr 236px !important; gap: 6px !important; padding: 6px !important; }
+  .argus-hint { display: none; }
+}

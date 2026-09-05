@@ -70,6 +70,20 @@ make smoke
 Starts a Hub, one SITL and Bridge at speedup 5, flies the square fixture and asserts the Drone came home.
 Add a headless Renderer for evidence frames: `uv run python scripts/headless_renderer.py --hub http://127.0.0.1:8011` in another terminal, then `--expect-frames`.
 
+## Two front ends
+
+Both are served by the Hub and driven by the same live feed.
+
+- **Ground-control dashboard** (default): http://localhost:8000/ (also `/gcs/`).
+  The team's React GCS from `platform/ground/ui`, connected through `HubDataProvider`: Fleet cards, Operations (Baseline, Detect change, Dispatch, Return home, Scenarios, Manual Control), MJPEG Drone video, situational map, instruments, Mission tab (Detections, MissionSpec, Safety Validator, Incident Report), event log, embedded World view.
+  Build it with `cd platform/ground/ui && npm ci && npx vite build`; the Hub serves `platform/ground/ui/dist`.
+- **ARGUS Console**: http://localhost:8000/console/.
+  The Three.js World view, satellite Overview, Drone view with RGB/thermal/LiDAR, and the Renderer role that produces every camera frame.
+  Keep one Console tab open (or run `scripts/headless_renderer.py`): without a Renderer there is no Drone video and no evidence frames.
+  `?embed=1` shows only the World view (used by the dashboard's World view tab).
+
+Hub endpoints added for the dashboard: `GET /drones/{id}/mjpeg` (multipart JPEG stream of the Drone view), `GET /overheads` (captured overhead images), `GET /autonomy`, `POST /detections/{id}/dispatch`.
+
 ## How the simulation is wired
 
 - `sim/site/gen_site.py` is the one source of Site numbers.
