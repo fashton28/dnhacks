@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "rail": "sar",
+  "timebase": "relative",
+  "provenance": "Scripted replay of the ground/satellite SAR log-ratio detector over the baked chips in data/tiles/komati (provenance kind 'synthetic', claim 'Generated demonstration intensities; not Umbra imagery'). Use the sarSource() bridge to run the real detector instead.",
+  "events": [
+    {
+      "atMs": 800,
+      "payload": {
+        "id": "sar-change-1",
+        "lat": -26.09015625,
+        "lon": 29.472075,
+        "type": "sar_log_ratio_change",
+        "confidence": 0.5017166,
+        "thumbnail": "data/tiles/komati/sar-after.json",
+        "source": "sar",
+        "observedAt": -7200000
+      }
+    }
+  ]
+}

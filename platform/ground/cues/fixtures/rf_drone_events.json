@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "rail": "rf_drone",
+  "timebase": "relative",
+  "provenance": "Scripted passive RF-drone fixture, Guardian-shaped. Receive-only: no radio was operated and no live RF was observed. Records mirror platform/rf_events.json plus a Remote ID broadcast used to exercise blue-force whitelisting.",
+  "events": [
+    {
+      "atMs": 0,
+      "payload": {
+        "ts": 0,
+        "source": "rf_drone",
+        "kind": "drone_link",
+        "band": "2.4GHz",
+        "power_delta_db": 12.0,
+        "confidence": 0.72
+      }
+    },
+    {
+      "atMs": 2000,
+      "payload": {
+        "ts": 1800,
+        "source": "rf_drone",
+        "kind": "remote_id",
+        "band": "2.4GHz",
+        "remote_id": "EIS-1-SN-0001",
+        "lat": -26.0901,
+        "lon": 29.4721,
+        "confidence": 0.95
+      }
+    },
+    {
+      "atMs": 6000,
+      "payload": {
+        "ts": 5800,
+        "source": "rf_drone",
+        "kind": "hostile_drone",
+        "band": "2.4GHz",
+        "power_delta_db": 18.0,
+        "lat": -26.0913,
+        "lon": 29.4702,
+        "pilot_lat": -26.0928,
+        "pilot_lon": 29.4688,
+        "confidence": 0.9
+      }
+    }
+  ]
+}

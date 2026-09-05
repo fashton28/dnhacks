@@ -1,0 +1,30 @@
+{
+  "name": "eis-cues",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Drone Safety Platform — cue rails behind one CueAdapter. Node + browser core (no Electron, no DOM): scripted fixture replay, per-rail health, TTL expiry, rate limiting and whitelists for the sentinel2 / sar / sdr / rf_drone / cctv / fence_sensor / drone_survey rails. Emits only the existing `anomaly` and `healthEvent` wire messages.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./node": {
+      "types": "./dist/node/index.d.ts",
+      "default": "./dist/node/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.9"
+  }
+}

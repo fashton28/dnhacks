@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "rail": "sdr",
+  "timebase": "relative",
+  "provenance": "Scripted capture of the ground/sdr/sidecar.py NDJSON output shape. Receive-only and no device was attached; the values are generated, not measured. The located rfEvent at 100 s is scripted beyond the shipped sidecar, which reports GNSS interference only and therefore carries no position.",
+  "events": [
+    {
+      "atMs": 0,
+      "payload": {
+        "type": "healthEvent",
+        "ts": 0,
+        "vehicleId": "eis-1",
+        "component": "sdr",
+        "state": "warming",
+        "detail": "collecting 60-second receive baseline"
+      }
+    },
+    {
+      "atMs": 1000,
+      "payload": {
+        "type": "spectrum",
+        "ts": 900,
+        "vehicleId": "eis-1",
+        "state": "warming",
+        "bands": [
+          { "name": "GPS L1", "floor_db": -102.4, "p95_db": -97.1, "peak_mhz": 1575.42, "occ_bw_mhz": 0.4 }
+        ]
+      }
+    },
+    {
+      "atMs": 65000,
+      "payload": {
+        "type": "healthEvent",
+        "ts": 64800,
+        "vehicleId": "eis-1",
+        "component": "sdr",
+        "state": "nominal",
+        "detail": "receive spectrum within rolling baseline"
+      }
+    },
+    {
+      "atMs": 66000,
+      "payload": {
+        "type": "spectrum",
+        "ts": 65900,
+        "vehicleId": "eis-1",
+        "state": "nominal",
+        "bands": [
+          { "name": "GPS L1", "floor_db": -102.1, "p95_db": -96.8, "peak_mhz": 1575.42, "occ_bw_mhz": 0.4 }
+        ]
+      }
+    },
+    {
+      "atMs": 90000,
+      "payload": {
+        "type": "rfEvent",
+        "ts": 89500,
+        "vehicleId": "eis-1",
+        "source": "sdr",
+        "kind": "gnss_interference",
+        "band": "GPS L1",
+        "power_delta_db": 9.2,
+        "confidence": 0.81
+      }
+    },
+    {
+      "atMs": 100000,
+      "payload": {
+        "type": "rfEvent",
+        "ts": 99500,
+        "vehicleId": "eis-1",
+        "source": "sdr",
+        "kind": "drone_link",
+        "band": "2.4GHz",
+        "power_delta_db": 14.0,
+        "lat": -26.0895,
+        "lon": 29.4735,
+        "confidence": 0.66
+      }
+    }
+  ]
+}
