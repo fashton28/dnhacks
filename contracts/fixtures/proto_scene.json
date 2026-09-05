@@ -1,0 +1,21 @@
+{
+  "type": "scene",
+  "cmd_id": "cmd-12",
+  "state": {
+    "props": [
+      {
+        "id": "prop-1",
+        "kind": "vehicle",
+        "x": 130,
+        "y": -135,
+        "yaw_deg": 90
+      }
+    ],
+    "open_fences": [
+      "fence_outer_s_07"
+    ],
+    "scenario_ids": [
+      "scn-001"
+    ]
+  }
+}

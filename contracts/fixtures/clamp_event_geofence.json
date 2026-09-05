@@ -1,0 +1,24 @@
+{
+  "drone_id": "drone-1",
+  "original": {
+    "drone_id": "drone-1",
+    "velocity_ned": {
+      "vx": 3.0,
+      "vy": 0.0,
+      "vz": 0.0
+    },
+    "yaw_rate_dps": 0.0,
+    "ts": "2026-09-05T12:00:00Z"
+  },
+  "clamped": {
+    "drone_id": "drone-1",
+    "velocity_ned": {
+      "vx": 0.0,
+      "vy": 0.0,
+      "vz": 0.0
+    },
+    "yaw_rate_dps": 0.0,
+    "ts": "2026-09-05T12:00:00Z"
+  },
+  "rule": "geofence"
+}

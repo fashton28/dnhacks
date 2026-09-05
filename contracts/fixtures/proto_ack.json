@@ -1,0 +1,6 @@
+{
+  "type": "ack",
+  "cmd_id": "cmd-1",
+  "ok": true,
+  "detail": ""
+}

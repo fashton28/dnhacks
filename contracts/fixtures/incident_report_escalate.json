@@ -1,0 +1,9 @@
+{
+  "mission_id": "msn-001",
+  "verdict": "escalate",
+  "narrative": "A dark pickup truck is parked against the south-east outer fence. The inner fence section directly behind it is displaced roughly one metre, leaving a gap. No persons visible. Recommend immediate security response.",
+  "evidence_refs": [
+    "evidence/msn-001/wp3.jpg",
+    "evidence/msn-001/wp4.jpg"
+  ]
+}

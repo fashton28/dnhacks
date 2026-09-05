@@ -1,0 +1,4464 @@
+{
+ "type": "FeatureCollection",
+ "name": "Meridian Station",
+ "anchor": {
+  "lat": 41.2,
+  "lon": -98.4,
+  "alt_msl": 550.0
+ },
+ "features": [
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "site_footprint",
+    "name": "Meridian Station"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -98.4035817,
+       41.1973051
+      ],
+      [
+       -98.3964183,
+       41.1973051
+      ],
+      [
+       -98.3964183,
+       41.2026949
+      ],
+      [
+       -98.4035817,
+       41.2026949
+      ],
+      [
+       -98.4035817,
+       41.1973051
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "geofence",
+    "alt_ceiling_m": 60.0,
+    "alt_floor_m": 5.0
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -98.4019103,
+       41.1985627
+      ],
+      [
+       -98.3980897,
+       41.1985627
+      ],
+      [
+       -98.3980897,
+       41.2014373
+      ],
+      [
+       -98.4019103,
+       41.2014373
+      ],
+      [
+       -98.4019103,
+       41.1985627
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_outer"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -98.4016715,
+       41.1987424
+      ],
+      [
+       -98.3983285,
+       41.1987424
+      ],
+      [
+       -98.3983285,
+       41.2012576
+      ],
+      [
+       -98.4016715,
+       41.2012576
+      ],
+      [
+       -98.4016715,
+       41.1987424
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_inner"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -98.4013133,
+       41.1990119
+      ],
+      [
+       -98.3986867,
+       41.1990119
+      ],
+      [
+       -98.3986867,
+       41.2009881
+      ],
+      [
+       -98.4013133,
+       41.2009881
+      ],
+      [
+       -98.4013133,
+       41.1990119
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "protected_area"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -98.4013133,
+       41.1990119
+      ],
+      [
+       -98.3986867,
+       41.1990119
+      ],
+      [
+       -98.3986867,
+       41.2009881
+      ],
+      [
+       -98.4013133,
+       41.2009881
+      ],
+      [
+       -98.4013133,
+       41.1990119
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "no_fly_zone",
+    "name": "reactor_exclusion"
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -98.3994627,
+       41.2004941
+      ],
+      [
+       -98.3994731,
+       41.2005729
+      ],
+      [
+       -98.3995036,
+       41.2006488
+      ],
+      [
+       -98.3995533,
+       41.2007187
+      ],
+      [
+       -98.3996201,
+       41.2007799
+      ],
+      [
+       -98.3997015,
+       41.2008302
+      ],
+      [
+       -98.3997944,
+       41.2008675
+      ],
+      [
+       -98.3998952,
+       41.2008905
+      ],
+      [
+       -98.4,
+       41.2008983
+      ],
+      [
+       -98.4001048,
+       41.2008905
+      ],
+      [
+       -98.4002056,
+       41.2008675
+      ],
+      [
+       -98.4002985,
+       41.2008302
+      ],
+      [
+       -98.4003799,
+       41.2007799
+      ],
+      [
+       -98.4004467,
+       41.2007187
+      ],
+      [
+       -98.4004964,
+       41.2006488
+      ],
+      [
+       -98.4005269,
+       41.2005729
+      ],
+      [
+       -98.4005373,
+       41.2004941
+      ],
+      [
+       -98.4005269,
+       41.2004152
+      ],
+      [
+       -98.4004964,
+       41.2003394
+      ],
+      [
+       -98.4004467,
+       41.2002695
+      ],
+      [
+       -98.4003799,
+       41.2002082
+      ],
+      [
+       -98.4002985,
+       41.200158
+      ],
+      [
+       -98.4002056,
+       41.2001206
+      ],
+      [
+       -98.4001048,
+       41.2000976
+      ],
+      [
+       -98.4,
+       41.2000898
+      ],
+      [
+       -98.3998952,
+       41.2000976
+      ],
+      [
+       -98.3997944,
+       41.2001206
+      ],
+      [
+       -98.3997015,
+       41.200158
+      ],
+      [
+       -98.3996201,
+       41.2002082
+      ],
+      [
+       -98.3995533,
+       41.2002695
+      ],
+      [
+       -98.3995036,
+       41.2003394
+      ],
+      [
+       -98.3994731,
+       41.2004152
+      ],
+      [
+       -98.3994627,
+       41.2004941
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "gate",
+    "name": "south_gate"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -98.4,
+     41.1987424
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "overhead_footprint",
+    "width_px": 1024,
+    "height_px": 1024
+   },
+   "geometry": {
+    "type": "Polygon",
+    "coordinates": [
+     [
+      [
+       -98.4020296,
+       41.1984729
+      ],
+      [
+       -98.3979704,
+       41.1984729
+      ],
+      [
+       -98.3979704,
+       41.2015271
+      ],
+      [
+       -98.4020296,
+       41.2015271
+      ],
+      [
+       -98.4020296,
+       41.1984729
+      ]
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "helipad",
+    "name": "pad_1",
+    "drone_id": "drone-1"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -98.3995821,
+     41.1992364
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "helipad",
+    "name": "pad_2",
+    "drone_id": "drone-2"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -98.3994389,
+     41.1992364
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "helipad",
+    "name": "pad_3",
+    "drone_id": "drone-3"
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -98.3992956,
+     41.1992364
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "helipad",
+    "name": "pad_4",
+    "drone_id": null
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -98.3991523,
+     41.1992364
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "helipad",
+    "name": "pad_5",
+    "drone_id": null
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -98.3990091,
+     41.1992364
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "helipad",
+    "name": "pad_6",
+    "drone_id": null
+   },
+   "geometry": {
+    "type": "Point",
+    "coordinates": [
+     -98.3988658,
+     41.1992364
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1987424
+     ],
+     [
+      -98.4015521,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2012576
+     ],
+     [
+      -98.4015521,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1987424
+     ],
+     [
+      -98.4016715,
+      41.1988322
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1987424
+     ],
+     [
+      -98.3983285,
+      41.1988322
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4015521,
+      41.1987424
+     ],
+     [
+      -98.4014327,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4015521,
+      41.2012576
+     ],
+     [
+      -98.4014327,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1988322
+     ],
+     [
+      -98.4016715,
+      41.198922
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1988322
+     ],
+     [
+      -98.3983285,
+      41.198922
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4014327,
+      41.1987424
+     ],
+     [
+      -98.4013133,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4014327,
+      41.2012576
+     ],
+     [
+      -98.4013133,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.198922
+     ],
+     [
+      -98.4016715,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.198922
+     ],
+     [
+      -98.3983285,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1987424
+     ],
+     [
+      -98.4011939,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2012576
+     ],
+     [
+      -98.4011939,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1990119
+     ],
+     [
+      -98.4016715,
+      41.1991017
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1990119
+     ],
+     [
+      -98.3983285,
+      41.1991017
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4011939,
+      41.1987424
+     ],
+     [
+      -98.4010745,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4011939,
+      41.2012576
+     ],
+     [
+      -98.4010745,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1991017
+     ],
+     [
+      -98.4016715,
+      41.1991915
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1991017
+     ],
+     [
+      -98.3983285,
+      41.1991915
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4010745,
+      41.1987424
+     ],
+     [
+      -98.4009551,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4010745,
+      41.2012576
+     ],
+     [
+      -98.4009551,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1991915
+     ],
+     [
+      -98.4016715,
+      41.1992813
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1991915
+     ],
+     [
+      -98.3983285,
+      41.1992813
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4009551,
+      41.1987424
+     ],
+     [
+      -98.4008357,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4009551,
+      41.2012576
+     ],
+     [
+      -98.4008357,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1992813
+     ],
+     [
+      -98.4016715,
+      41.1993712
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1992813
+     ],
+     [
+      -98.3983285,
+      41.1993712
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4008357,
+      41.1987424
+     ],
+     [
+      -98.4007163,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4008357,
+      41.2012576
+     ],
+     [
+      -98.4007163,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1993712
+     ],
+     [
+      -98.4016715,
+      41.199461
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1993712
+     ],
+     [
+      -98.3983285,
+      41.199461
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4007163,
+      41.1987424
+     ],
+     [
+      -98.400597,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4007163,
+      41.2012576
+     ],
+     [
+      -98.400597,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.199461
+     ],
+     [
+      -98.4016715,
+      41.1995508
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.199461
+     ],
+     [
+      -98.3983285,
+      41.1995508
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.400597,
+      41.1987424
+     ],
+     [
+      -98.4004776,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.400597,
+      41.2012576
+     ],
+     [
+      -98.4004776,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1995508
+     ],
+     [
+      -98.4016715,
+      41.1996407
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1995508
+     ],
+     [
+      -98.3983285,
+      41.1996407
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4004776,
+      41.1987424
+     ],
+     [
+      -98.4003582,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4004776,
+      41.2012576
+     ],
+     [
+      -98.4003582,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1996407
+     ],
+     [
+      -98.4016715,
+      41.1997305
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1996407
+     ],
+     [
+      -98.3983285,
+      41.1997305
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4003582,
+      41.1987424
+     ],
+     [
+      -98.4002388,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4003582,
+      41.2012576
+     ],
+     [
+      -98.4002388,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1997305
+     ],
+     [
+      -98.4016715,
+      41.1998203
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1997305
+     ],
+     [
+      -98.3983285,
+      41.1998203
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4002388,
+      41.1987424
+     ],
+     [
+      -98.4001194,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4002388,
+      41.2012576
+     ],
+     [
+      -98.4001194,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1998203
+     ],
+     [
+      -98.4016715,
+      41.1999102
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1998203
+     ],
+     [
+      -98.3983285,
+      41.1999102
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4001194,
+      41.1987424
+     ],
+     [
+      -98.4,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4001194,
+      41.2012576
+     ],
+     [
+      -98.4,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.1999102
+     ],
+     [
+      -98.4016715,
+      41.2
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.1999102
+     ],
+     [
+      -98.3983285,
+      41.2
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4,
+      41.1987424
+     ],
+     [
+      -98.3998806,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4,
+      41.2012576
+     ],
+     [
+      -98.3998806,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2
+     ],
+     [
+      -98.4016715,
+      41.2000898
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2
+     ],
+     [
+      -98.3983285,
+      41.2000898
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3998806,
+      41.1987424
+     ],
+     [
+      -98.3997612,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3998806,
+      41.2012576
+     ],
+     [
+      -98.3997612,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2000898
+     ],
+     [
+      -98.4016715,
+      41.2001797
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2000898
+     ],
+     [
+      -98.3983285,
+      41.2001797
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3997612,
+      41.1987424
+     ],
+     [
+      -98.3996418,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3997612,
+      41.2012576
+     ],
+     [
+      -98.3996418,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2001797
+     ],
+     [
+      -98.4016715,
+      41.2002695
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2001797
+     ],
+     [
+      -98.3983285,
+      41.2002695
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3996418,
+      41.1987424
+     ],
+     [
+      -98.3995224,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3996418,
+      41.2012576
+     ],
+     [
+      -98.3995224,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2002695
+     ],
+     [
+      -98.4016715,
+      41.2003593
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2002695
+     ],
+     [
+      -98.3983285,
+      41.2003593
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3995224,
+      41.1987424
+     ],
+     [
+      -98.399403,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3995224,
+      41.2012576
+     ],
+     [
+      -98.399403,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2003593
+     ],
+     [
+      -98.4016715,
+      41.2004492
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2003593
+     ],
+     [
+      -98.3983285,
+      41.2004492
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.399403,
+      41.1987424
+     ],
+     [
+      -98.3992837,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.399403,
+      41.2012576
+     ],
+     [
+      -98.3992837,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2004492
+     ],
+     [
+      -98.4016715,
+      41.200539
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2004492
+     ],
+     [
+      -98.3983285,
+      41.200539
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3992837,
+      41.1987424
+     ],
+     [
+      -98.3991643,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3992837,
+      41.2012576
+     ],
+     [
+      -98.3991643,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.200539
+     ],
+     [
+      -98.4016715,
+      41.2006288
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.200539
+     ],
+     [
+      -98.3983285,
+      41.2006288
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3991643,
+      41.1987424
+     ],
+     [
+      -98.3990449,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3991643,
+      41.2012576
+     ],
+     [
+      -98.3990449,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2006288
+     ],
+     [
+      -98.4016715,
+      41.2007187
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2006288
+     ],
+     [
+      -98.3983285,
+      41.2007187
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_22"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3990449,
+      41.1987424
+     ],
+     [
+      -98.3989255,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_22"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3990449,
+      41.2012576
+     ],
+     [
+      -98.3989255,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_22"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2007187
+     ],
+     [
+      -98.4016715,
+      41.2008085
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_22"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2007187
+     ],
+     [
+      -98.3983285,
+      41.2008085
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_23"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3989255,
+      41.1987424
+     ],
+     [
+      -98.3988061,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_23"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3989255,
+      41.2012576
+     ],
+     [
+      -98.3988061,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_23"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2008085
+     ],
+     [
+      -98.4016715,
+      41.2008983
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_23"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2008085
+     ],
+     [
+      -98.3983285,
+      41.2008983
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_24"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3988061,
+      41.1987424
+     ],
+     [
+      -98.3986867,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_24"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3988061,
+      41.2012576
+     ],
+     [
+      -98.3986867,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_24"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2008983
+     ],
+     [
+      -98.4016715,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_24"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2008983
+     ],
+     [
+      -98.3983285,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_25"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1987424
+     ],
+     [
+      -98.3985673,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_25"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2012576
+     ],
+     [
+      -98.3985673,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_25"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2009881
+     ],
+     [
+      -98.4016715,
+      41.201078
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_25"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2009881
+     ],
+     [
+      -98.3983285,
+      41.201078
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_26"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3985673,
+      41.1987424
+     ],
+     [
+      -98.3984479,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_26"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3985673,
+      41.2012576
+     ],
+     [
+      -98.3984479,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_26"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.201078
+     ],
+     [
+      -98.4016715,
+      41.2011678
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_26"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.201078
+     ],
+     [
+      -98.3983285,
+      41.2011678
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_s_27"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3984479,
+      41.1987424
+     ],
+     [
+      -98.3983285,
+      41.1987424
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_n_27"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3984479,
+      41.2012576
+     ],
+     [
+      -98.3983285,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_w_27"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4016715,
+      41.2011678
+     ],
+     [
+      -98.4016715,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_outer_e_27"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3983285,
+      41.2011678
+     ],
+     [
+      -98.3983285,
+      41.2012576
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1990119
+     ],
+     [
+      -98.4011939,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2009881
+     ],
+     [
+      -98.4011939,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1990119
+     ],
+     [
+      -98.4013133,
+      41.1991017
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_00"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1990119
+     ],
+     [
+      -98.3986867,
+      41.1991017
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4011939,
+      41.1990119
+     ],
+     [
+      -98.4010745,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4011939,
+      41.2009881
+     ],
+     [
+      -98.4010745,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1991017
+     ],
+     [
+      -98.4013133,
+      41.1991915
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_01"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1991017
+     ],
+     [
+      -98.3986867,
+      41.1991915
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4010745,
+      41.1990119
+     ],
+     [
+      -98.4009551,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4010745,
+      41.2009881
+     ],
+     [
+      -98.4009551,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1991915
+     ],
+     [
+      -98.4013133,
+      41.1992813
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_02"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1991915
+     ],
+     [
+      -98.3986867,
+      41.1992813
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4009551,
+      41.1990119
+     ],
+     [
+      -98.4008357,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4009551,
+      41.2009881
+     ],
+     [
+      -98.4008357,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1992813
+     ],
+     [
+      -98.4013133,
+      41.1993712
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_03"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1992813
+     ],
+     [
+      -98.3986867,
+      41.1993712
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4008357,
+      41.1990119
+     ],
+     [
+      -98.4007163,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4008357,
+      41.2009881
+     ],
+     [
+      -98.4007163,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1993712
+     ],
+     [
+      -98.4013133,
+      41.199461
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_04"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1993712
+     ],
+     [
+      -98.3986867,
+      41.199461
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4007163,
+      41.1990119
+     ],
+     [
+      -98.400597,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4007163,
+      41.2009881
+     ],
+     [
+      -98.400597,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.199461
+     ],
+     [
+      -98.4013133,
+      41.1995508
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_05"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.199461
+     ],
+     [
+      -98.3986867,
+      41.1995508
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.400597,
+      41.1990119
+     ],
+     [
+      -98.4004776,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.400597,
+      41.2009881
+     ],
+     [
+      -98.4004776,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1995508
+     ],
+     [
+      -98.4013133,
+      41.1996407
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_06"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1995508
+     ],
+     [
+      -98.3986867,
+      41.1996407
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4004776,
+      41.1990119
+     ],
+     [
+      -98.4003582,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4004776,
+      41.2009881
+     ],
+     [
+      -98.4003582,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1996407
+     ],
+     [
+      -98.4013133,
+      41.1997305
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_07"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1996407
+     ],
+     [
+      -98.3986867,
+      41.1997305
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4003582,
+      41.1990119
+     ],
+     [
+      -98.4002388,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4003582,
+      41.2009881
+     ],
+     [
+      -98.4002388,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1997305
+     ],
+     [
+      -98.4013133,
+      41.1998203
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_08"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1997305
+     ],
+     [
+      -98.3986867,
+      41.1998203
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4002388,
+      41.1990119
+     ],
+     [
+      -98.4001194,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4002388,
+      41.2009881
+     ],
+     [
+      -98.4001194,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1998203
+     ],
+     [
+      -98.4013133,
+      41.1999102
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_09"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1998203
+     ],
+     [
+      -98.3986867,
+      41.1999102
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4001194,
+      41.1990119
+     ],
+     [
+      -98.4,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4001194,
+      41.2009881
+     ],
+     [
+      -98.4,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.1999102
+     ],
+     [
+      -98.4013133,
+      41.2
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_10"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.1999102
+     ],
+     [
+      -98.3986867,
+      41.2
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4,
+      41.1990119
+     ],
+     [
+      -98.3998806,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4,
+      41.2009881
+     ],
+     [
+      -98.3998806,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2
+     ],
+     [
+      -98.4013133,
+      41.2000898
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_11"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2
+     ],
+     [
+      -98.3986867,
+      41.2000898
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3998806,
+      41.1990119
+     ],
+     [
+      -98.3997612,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3998806,
+      41.2009881
+     ],
+     [
+      -98.3997612,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2000898
+     ],
+     [
+      -98.4013133,
+      41.2001797
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_12"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2000898
+     ],
+     [
+      -98.3986867,
+      41.2001797
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3997612,
+      41.1990119
+     ],
+     [
+      -98.3996418,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3997612,
+      41.2009881
+     ],
+     [
+      -98.3996418,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2001797
+     ],
+     [
+      -98.4013133,
+      41.2002695
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_13"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2001797
+     ],
+     [
+      -98.3986867,
+      41.2002695
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3996418,
+      41.1990119
+     ],
+     [
+      -98.3995224,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3996418,
+      41.2009881
+     ],
+     [
+      -98.3995224,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2002695
+     ],
+     [
+      -98.4013133,
+      41.2003593
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_14"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2002695
+     ],
+     [
+      -98.3986867,
+      41.2003593
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3995224,
+      41.1990119
+     ],
+     [
+      -98.399403,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3995224,
+      41.2009881
+     ],
+     [
+      -98.399403,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2003593
+     ],
+     [
+      -98.4013133,
+      41.2004492
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_15"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2003593
+     ],
+     [
+      -98.3986867,
+      41.2004492
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.399403,
+      41.1990119
+     ],
+     [
+      -98.3992837,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.399403,
+      41.2009881
+     ],
+     [
+      -98.3992837,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2004492
+     ],
+     [
+      -98.4013133,
+      41.200539
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_16"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2004492
+     ],
+     [
+      -98.3986867,
+      41.200539
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3992837,
+      41.1990119
+     ],
+     [
+      -98.3991643,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3992837,
+      41.2009881
+     ],
+     [
+      -98.3991643,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.200539
+     ],
+     [
+      -98.4013133,
+      41.2006288
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_17"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.200539
+     ],
+     [
+      -98.3986867,
+      41.2006288
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3991643,
+      41.1990119
+     ],
+     [
+      -98.3990449,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3991643,
+      41.2009881
+     ],
+     [
+      -98.3990449,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2006288
+     ],
+     [
+      -98.4013133,
+      41.2007187
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_18"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2006288
+     ],
+     [
+      -98.3986867,
+      41.2007187
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3990449,
+      41.1990119
+     ],
+     [
+      -98.3989255,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3990449,
+      41.2009881
+     ],
+     [
+      -98.3989255,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2007187
+     ],
+     [
+      -98.4013133,
+      41.2008085
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_19"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2007187
+     ],
+     [
+      -98.3986867,
+      41.2008085
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3989255,
+      41.1990119
+     ],
+     [
+      -98.3988061,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3989255,
+      41.2009881
+     ],
+     [
+      -98.3988061,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2008085
+     ],
+     [
+      -98.4013133,
+      41.2008983
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_20"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2008085
+     ],
+     [
+      -98.3986867,
+      41.2008983
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_s_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3988061,
+      41.1990119
+     ],
+     [
+      -98.3986867,
+      41.1990119
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_n_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3988061,
+      41.2009881
+     ],
+     [
+      -98.3986867,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_w_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.4013133,
+      41.2008983
+     ],
+     [
+      -98.4013133,
+      41.2009881
+     ]
+    ]
+   }
+  },
+  {
+   "type": "Feature",
+   "properties": {
+    "kind": "fence_section",
+    "name": "fence_inner_e_21"
+   },
+   "geometry": {
+    "type": "LineString",
+    "coordinates": [
+     [
+      -98.3986867,
+      41.2008983
+     ],
+     [
+      -98.3986867,
+      41.2009881
+     ]
+    ]
+   }
+  }
+ ]
+}

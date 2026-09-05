@@ -1,0 +1,8 @@
+{
+  "id": "scn-002",
+  "kind": "fence_breach",
+  "params": {
+    "section": "fence_outer_s_07"
+  },
+  "run_at": null
+}

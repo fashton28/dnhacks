@@ -1,0 +1,10 @@
+{
+  "type": "set_velocity",
+  "cmd_id": "cmd-3",
+  "velocity_ned": {
+    "vx": 1.0,
+    "vy": 0.0,
+    "vz": -0.5
+  },
+  "yaw_rate_dps": 10.0
+}

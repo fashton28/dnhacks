@@ -1,3 +1,13 @@
+# ---- Python ----
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.pytest_cache/
+.venv-test/
+.env
 # ---- Node / UI / Electron ----
 node_modules/
 dist/
@@ -5,35 +15,27 @@ dist-electron/
 release/
 *.tsbuildinfo
 .vite/
-
-# ---- Python / companion ----
-__pycache__/
-*.py[cod]
-*.egg-info/
-.eggs/
-.venv/
-venv/
-.env
-*.engine          # exported TensorRT engines (large, device-specific)
-*.onnx
-weights/*.pt
+console/dist/
+console/public/assets/
 # ---- ArduPilot SITL / logs ----
 platform/sim/ardupilot/
 *.tlog
 *.bin
 logs/
 recordings/
+*.log
+# ---- Runtime artefacts, never committed ----
+events.jsonl
+evidence/
+renders/
+scratch/
+# ---- ML artefacts ----
+*.engine
+*.onnx
+weights/*.pt
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db
 .idea/
 .vscode/
-*.log
-.venv-test/
 dist-installer/
-# Python test artefacts
-.pytest_cache/
-# Runtime artefacts, never committed
-events.jsonl
-evidence/
-renders/

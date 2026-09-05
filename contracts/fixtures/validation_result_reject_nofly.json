@@ -1,0 +1,11 @@
+{
+  "mission_id": "msn-002",
+  "verdict": "reject",
+  "violations": [
+    {
+      "rule": "no_fly_zone",
+      "detail": "segment 3-4 crosses no-fly zone 'reactor_exclusion'",
+      "severity": "violation"
+    }
+  ]
+}

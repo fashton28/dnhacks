@@ -1,0 +1,6 @@
+{
+  "type": "hello",
+  "role": "renderer",
+  "id": "console-1",
+  "sim": "browser"
+}

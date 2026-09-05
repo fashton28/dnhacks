@@ -1,0 +1,8 @@
+{
+  "type": "goto",
+  "cmd_id": "cmd-1",
+  "lat": 41.2,
+  "lon": -98.3995224,
+  "alt": 20.0,
+  "speed_mps": 5.0
+}
