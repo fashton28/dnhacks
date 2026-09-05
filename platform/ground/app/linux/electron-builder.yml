@@ -33,6 +33,17 @@ extraResources:
     to: "ground/satellite/data"
     filter:
       - "**/*"
+  - from: "../../planner"
+    to: "ground/planner"
+    filter:
+      - "dist/**/*"
+      - "package.json"
+      - "node_modules/openai/**/*"
+      - "node_modules/zod/**/*"
+  - from: "../../sdr"
+    to: "ground/sdr"
+    filter:
+      - "**/*.py"
 
 linux:
   # AppImage is the primary (portable, no install); deb + rpm for managed installs.

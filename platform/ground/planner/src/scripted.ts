@@ -9,10 +9,12 @@
  * ========================================================================== */
 
 import { Anomaly, MissionPlan } from './contract';
-import { SiteModel, polygonCentroid } from './site';
+import { LatLon, SiteModel, haversineMeters, polygonCentroid } from './site';
 
 /** Orbit radius used by the passing plan, meters (well above the 3 m floor). */
 export const ORBIT_RADIUS_M = 25;
+/** The scripted plan uses the inspect/standard profile, whose fixture cap is 45 m AGL. */
+export const SCRIPTED_PROFILE_MAX_ALT_M = 45;
 
 /** How far above the alt band's max the failing plan flies, meters. */
 export const FAILING_ALT_OVERSHOOT_M = 10;
@@ -21,6 +23,15 @@ export const FAILING_ALT_OVERSHOOT_M = 10;
  *  NFZ's ceiling is inside the band (so an above-band altitude could not also
  *  violate the NFZ), meters. */
 export const FAILING_ALT_UNDERSHOOT_M = 5;
+
+/** Point on the observation ring facing home, so approach never breaches standoff. */
+export function orbitApproachPoint(home: LatLon, center: LatLon, radiusM: number): LatLon {
+  const distance = haversineMeters(home, center);
+  if (distance < 0.01) return { lat: center.lat + radiusM / 111_320, lon: center.lon };
+  const scale = radiusM / distance;
+  return { lat: center.lat + (home.lat - center.lat) * scale,
+    lon: center.lon + (home.lon - center.lon) * scale };
+}
 
 export class ScriptedPlanner {
   /**
@@ -39,7 +50,11 @@ export class ScriptedPlanner {
    * which is the verifier's job, not this planner's.)
    */
   passingPlan(site: SiteModel, anomaly: Anomaly): MissionPlan {
-    const midAlt = (site.altBandM.min + site.altBandM.max) / 2;
+    const midAlt = Math.min(
+      (site.altBandM.min + site.altBandM.max) / 2,
+      SCRIPTED_PROFILE_MAX_ALT_M,
+    );
+    const approach = orbitApproachPoint(site.home, anomaly, ORBIT_RADIUS_M);
     return {
       requestId: `scripted-${anomaly.id}`,
       anomalyId: anomaly.id,
@@ -50,7 +65,7 @@ export class ScriptedPlanner {
         `mid-band altitude ${midAlt} m AGL, orbit at ${ORBIT_RADIUS_M} m for ` +
         `observation, then return to launch.`,
       tools: [
-        { tool: 'goto_gps', lat: anomaly.lat, lon: anomaly.lon, alt: midAlt, profile: 'standard' },
+        { tool: 'goto_gps', lat: approach.lat, lon: approach.lon, alt: midAlt, profile: 'standard' },
         { tool: 'orbit_point', lat: anomaly.lat, lon: anomaly.lon, radius: ORBIT_RADIUS_M },
         { tool: 'rtl' },
       ],

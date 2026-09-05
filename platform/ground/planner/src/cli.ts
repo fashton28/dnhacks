@@ -3,7 +3,7 @@
  * eis-planner CLI — thin Node entrypoint for the Python e2e gate + demo
  * scripts. Prints exactly one JSON document to stdout on success.
  *
- *   node dist/cli.js verify <plan.json> <site.json> [--telemetry <telem.json>]
+ *   node dist/cli.js verify <plan.json> <site.json> --context <runtime.json>
  *       -> contract Verification JSON (verdict inside; exit 0 even when the
  *          verdict is 'rejected' — a produced verdict is a success)
  *
@@ -24,7 +24,7 @@
 import * as fs from 'fs';
 import { ScriptedPlanner } from './scripted';
 import { loadSite } from './site';
-import { TelemetrySnapshot, verifyMission } from './verifier';
+import { VerificationContext, verifyMission } from './verifier';
 import { writeIncidentReport } from './report';
 import { validateAnomaly, validateMissionPlan, validateObservation } from './validate';
 
@@ -47,33 +47,25 @@ function emit(doc: unknown): void {
 }
 
 const USAGE = `usage:
-  node dist/cli.js verify <plan.json> <site.json> [--telemetry <telem.json>]
+  node dist/cli.js verify <plan.json> <site.json> --context <runtime.json>
   node dist/cli.js plan --scripted <anomaly.json> <site.json> [--failing]
   node dist/cli.js report <input.json>`;
 
 function cmdVerify(args: string[]): void {
-  const telemetryIdx = args.indexOf('--telemetry');
-  let telemetryPath: string | undefined;
-  if (telemetryIdx !== -1) {
-    telemetryPath = args[telemetryIdx + 1];
-    if (!telemetryPath) throw new Error('--telemetry requires a file argument');
-    args = args.slice(0, telemetryIdx).concat(args.slice(telemetryIdx + 2));
+  const contextIdx = args.indexOf('--context');
+  let contextPath: string | undefined;
+  if (contextIdx !== -1) {
+    contextPath = args[contextIdx + 1];
+    if (!contextPath) throw new Error('--context requires a file argument');
+    args = args.slice(0, contextIdx).concat(args.slice(contextIdx + 2));
   }
   const [planPath, sitePath] = args;
   if (!planPath || !sitePath) throw new Error(`verify requires <plan.json> <site.json>\n${USAGE}`);
 
   const plan = validateMissionPlan(readJson(planPath, 'plan'));
   const site = loadSite(sitePath);
-  let telemetry: TelemetrySnapshot | undefined;
-  if (telemetryPath) {
-    const t = readJson(telemetryPath, 'telemetry') as { battery?: { remaining?: unknown } };
-    const remaining = t?.battery?.remaining;
-    if (typeof remaining !== 'number' || !Number.isFinite(remaining)) {
-      throw new Error('telemetry file must contain numeric battery.remaining');
-    }
-    telemetry = { battery: { remaining } };
-  }
-  emit(verifyMission(plan, site, telemetry));
+  const context = contextPath ? readJson(contextPath, 'runtime context') as VerificationContext : undefined;
+  emit(verifyMission(plan, site, context));
 }
 
 function cmdPlan(args: string[]): void {

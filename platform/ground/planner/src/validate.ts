@@ -14,7 +14,12 @@ function isFiniteNumber(v: unknown): v is number {
 }
 
 function isProfile(v: unknown): v is MissionProfile {
-  return typeof v === 'string' && v in PROFILE_SPEED_MPS;
+  return typeof v === 'string' && Object.prototype.hasOwnProperty.call(PROFILE_SPEED_MPS, v);
+}
+
+function safeFrameRef(value: unknown): value is string {
+  return typeof value === 'string' && (value.startsWith('data:image/') ||
+    (!/^[a-z][a-z0-9+.-]*:/i.test(value) && !value.includes('..') && !value.startsWith('/') && !value.startsWith('\\')));
 }
 
 function validateTool(v: unknown, ctx: string): PlanTool {
@@ -26,7 +31,7 @@ function validateTool(v: unknown, ctx: string): PlanTool {
     case 'follow':
     case 'orbit': {
       const trackId = t.track_id ?? t.trackId;
-      if (!isFiniteNumber(trackId) || !isProfile(t.profile)) {
+      if (!isFiniteNumber(trackId) || !Number.isInteger(trackId) || trackId < 0 || !isProfile(t.profile)) {
         throw new Error(`${ctx} (${t.tool}) requires numeric track_id and a valid profile`);
       }
       return {
@@ -43,15 +48,19 @@ function validateTool(v: unknown, ctx: string): PlanTool {
       return { tool: 'goto_relative', dx: t.dx, dy: t.dy, dz: t.dz };
     }
     case 'goto_gps': {
+      if (t.alt_m !== undefined && t.alt !== undefined && t.alt_m !== t.alt) {
+        throw new Error(`${ctx} (goto_gps) has conflicting alt and alt_m values`);
+      }
       const alt = t.alt_m ?? t.alt;
-      if (!isFiniteNumber(t.lat) || !isFiniteNumber(t.lon) || !isFiniteNumber(alt)) {
+      if (!isFiniteNumber(t.lat) || t.lat < -90 || t.lat > 90 ||
+          !isFiniteNumber(t.lon) || t.lon < -180 || t.lon > 180 || !isFiniteNumber(alt)) {
         throw new Error(`${ctx} (goto_gps) requires numeric lat, lon, alt_m (or legacy alt)`);
       }
       if (t.profile !== undefined && !isProfile(t.profile)) {
         throw new Error(`${ctx} (goto_gps) has invalid profile ${JSON.stringify(t.profile)}`);
       }
-      if (t.speed_mps !== undefined && !isFiniteNumber(t.speed_mps)) {
-        throw new Error(`${ctx} (goto_gps) speed_mps must be numeric when present`);
+      if (t.speed_mps !== undefined && (!isFiniteNumber(t.speed_mps) || t.speed_mps <= 0)) {
+        throw new Error(`${ctx} (goto_gps) speed_mps must be positive and finite when present`);
       }
       const out: PlanTool = { tool: 'goto_gps', lat: t.lat, lon: t.lon, alt };
       if (t.alt_m !== undefined) out.alt_m = alt;
@@ -60,12 +69,17 @@ function validateTool(v: unknown, ctx: string): PlanTool {
       return out;
     }
     case 'orbit_point': {
+      if (t.radius_m !== undefined && t.radius !== undefined && t.radius_m !== t.radius) {
+        throw new Error(`${ctx} (orbit_point) has conflicting radius and radius_m values`);
+      }
       const radius = t.radius_m ?? t.radius;
-      if (!isFiniteNumber(t.lat) || !isFiniteNumber(t.lon) || !isFiniteNumber(radius)) {
+      if (!isFiniteNumber(t.lat) || t.lat < -90 || t.lat > 90 ||
+          !isFiniteNumber(t.lon) || t.lon < -180 || t.lon > 180 ||
+          !isFiniteNumber(radius) || radius <= 0) {
         throw new Error(`${ctx} (orbit_point) requires numeric lat, lon, radius_m (or legacy radius)`);
       }
-      if (t.laps !== undefined && !isFiniteNumber(t.laps)) {
-        throw new Error(`${ctx} (orbit_point) laps must be numeric when present`);
+      if (t.laps !== undefined && (!isFiniteNumber(t.laps) || !Number.isInteger(t.laps) || t.laps <= 0)) {
+        throw new Error(`${ctx} (orbit_point) laps must be a positive integer when present`);
       }
       return {
         tool: 'orbit_point', lat: t.lat, lon: t.lon, radius,
@@ -74,9 +88,12 @@ function validateTool(v: unknown, ctx: string): PlanTool {
       };
     }
     case 'hold': {
+      if (t.duration_s !== undefined && t.durationS !== undefined && t.duration_s !== t.durationS) {
+        throw new Error(`${ctx} (hold) has conflicting durationS and duration_s values`);
+      }
       const duration = t.duration_s ?? t.durationS;
-      if (duration !== undefined && !isFiniteNumber(duration)) {
-        throw new Error(`${ctx} (hold) duration_s must be a number when present`);
+      if (duration !== undefined && (!isFiniteNumber(duration) || duration < 0)) {
+        throw new Error(`${ctx} (hold) duration_s must be finite and non-negative when present`);
       }
       return duration !== undefined
         ? {
@@ -132,8 +149,9 @@ export function validateAnomaly(data: unknown): Anomaly {
   if (typeof d.id !== 'string' || d.id === '') {
     throw new Error('invalid Anomaly: id must be a non-empty string');
   }
-  if (!isFiniteNumber(d.lat) || !isFiniteNumber(d.lon)) {
-    throw new Error('invalid Anomaly: lat/lon must be finite numbers');
+  if (!isFiniteNumber(d.lat) || d.lat < -90 || d.lat > 90 ||
+      !isFiniteNumber(d.lon) || d.lon < -180 || d.lon > 180) {
+    throw new Error('invalid Anomaly: lat/lon must be finite coordinates');
   }
   if (typeof d.type !== 'string') {
     throw new Error('invalid Anomaly: type must be a string');
@@ -175,6 +193,56 @@ export function validateObservation(data: unknown): ObservationSummary {
     throw new Error('invalid observation: stagingTruth must be a string when present');
   }
   const out: ObservationSummary = { detected: d.detected, confidence: d.confidence };
+  if (d.observationAvailable !== undefined && typeof d.observationAvailable !== 'boolean') {
+    throw new Error('invalid observation: observationAvailable must be boolean when present');
+  }
+  if (d.observationAvailable !== undefined) out.observationAvailable = d.observationAvailable;
   if (d.stagingTruth !== undefined) out.stagingTruth = d.stagingTruth as string;
+  if (d.classification !== undefined) {
+    if (d.classification !== 'confirmed' && d.classification !== 'false_alarm' && d.classification !== 'inconclusive') {
+      throw new Error('invalid observation: classification must be confirmed|false_alarm|inconclusive');
+    }
+    out.classification = d.classification;
+  }
+  if (d.modalities !== undefined) {
+    if (!Array.isArray(d.modalities) || d.modalities.some((m) => !['rgb', 'thermal', 'lidar', 'fused'].includes(String(m)))) {
+      throw new Error('invalid observation: modalities must contain rgb|thermal|lidar|fused');
+    }
+    out.modalities = d.modalities as ObservationSummary['modalities'];
+  }
+  if (d.frames !== undefined) {
+    if (typeof d.frames !== 'object' || d.frames === null) throw new Error('invalid observation: frames must be an object');
+    const frames = d.frames as Record<string, unknown>;
+    if ((frames.rgb !== undefined && !safeFrameRef(frames.rgb)) ||
+        (frames.thermal !== undefined && !safeFrameRef(frames.thermal))) {
+      throw new Error('invalid observation: frame references must be local paths or image data URLs');
+    }
+    out.frames = { ...(frames.rgb === undefined ? {} : { rgb: frames.rgb as string }),
+      ...(frames.thermal === undefined ? {} : { thermal: frames.thermal as string }) };
+  }
+  if (d.geometry !== undefined) {
+    if (typeof d.geometry !== 'object' || d.geometry === null) throw new Error('invalid observation: geometry must be an object');
+    const geometry = d.geometry as Record<string, unknown>;
+    const fenceGaps = geometry.fenceGaps ?? [];
+    const newStructures = geometry.newStructures ?? [];
+    if (!Array.isArray(fenceGaps) || !Array.isArray(newStructures)) throw new Error('invalid observation: geometry arrays are required');
+    const gaps = fenceGaps.map((entry, index) => {
+      const gap = entry as Record<string, unknown>;
+      if (!gap || !isFiniteNumber(gap.lat) || !isFiniteNumber(gap.lon) || !isFiniteNumber(gap.widthM) || gap.widthM < 0) {
+        throw new Error(`invalid observation: fenceGaps[${index}] has invalid geometry`);
+      }
+      return { lat: gap.lat, lon: gap.lon, widthM: gap.widthM };
+    });
+    const structures = newStructures.map((entry, index) => {
+      const structure = entry as Record<string, unknown>;
+      if (!structure || !isFiniteNumber(structure.lat) || !isFiniteNumber(structure.lon) ||
+          !isFiniteNumber(structure.footprintM2) || structure.footprintM2 < 0 ||
+          !isFiniteNumber(structure.heightM) || structure.heightM < 0) {
+        throw new Error(`invalid observation: newStructures[${index}] has invalid geometry`);
+      }
+      return { lat: structure.lat, lon: structure.lon, footprintM2: structure.footprintM2, heightM: structure.heightM };
+    });
+    out.geometry = { fenceGaps: gaps, newStructures: structures };
+  }
   return out;
 }

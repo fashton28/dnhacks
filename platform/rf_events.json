@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "provenance": "scripted passive RF-drone fixture; no live RF claims",
+  "events": [
+    {
+      "ts": 1000,
+      "source": "rf_drone",
+      "kind": "drone_link",
+      "band": "2.4GHz",
+      "power_delta_db": 12.0,
+      "confidence": 0.72
+    },
+    {
+      "ts": 4000,
+      "vehicleId": "eis-1",
+      "source": "rf_drone",
+      "kind": "hostile_drone",
+      "band": "2.4GHz",
+      "power_delta_db": 18.0,
+      "lat": -26.0903,
+      "lon": 29.4724,
+      "pilot_lat": -26.091,
+      "pilot_lon": 29.469,
+      "confidence": 0.9
+    }
+  ]
+}

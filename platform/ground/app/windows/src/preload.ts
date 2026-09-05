@@ -60,6 +60,7 @@ interface ElectronBridge {
   defaultConfig(): Promise<Partial<ConnectionConfig>>;
   /** Raw JSON text of the EIS_SITE_FILE-selected site model (docs/SITE_CONTRACT.md). */
   loadSiteFile(): Promise<string>;
+  resolveSiteAsset(path: string): Promise<string | null>;
   /** Baked satellite change-detection assets; null → fall back to dev-server fetch. */
   loadSatelliteTiles(): Promise<{
     beforePng: string;
@@ -67,6 +68,13 @@ interface ElectronBridge {
     tilesJson: string;
     anomaliesJson: string | null;
   } | null>;
+  plannerPropose(input: unknown): Promise<unknown>;
+  plannerReport(input: unknown): Promise<unknown>;
+  onPlannerEvent(callback: (event: unknown) => void): () => void;
+  sdrStart(input?: { mode?: 'scripted' | 'live'; vehicleId?: string; scenario?: string }): Promise<unknown>;
+  sdrStop(): Promise<unknown>;
+  sdrStatus(): Promise<unknown>;
+  onSdrEvent(callback: (event: unknown) => void): () => void;
 }
 
 // ── Bridge implementation ────────────────────────────────────────────────────
@@ -133,6 +141,9 @@ const bridge: ElectronBridge = {
   loadSiteFile(): Promise<string> {
     return ipcRenderer.invoke('site:load') as Promise<string>;
   },
+  resolveSiteAsset(path: string): Promise<string | null> {
+    return ipcRenderer.invoke('site:resolveAsset', path) as Promise<string | null>;
+  },
   loadSatelliteTiles(): Promise<{
     beforePng: string;
     afterPng: string;
@@ -145,6 +156,27 @@ const bridge: ElectronBridge = {
       tilesJson: string;
       anomaliesJson: string | null;
     } | null>;
+  },
+  plannerPropose(input: unknown): Promise<unknown> {
+    return ipcRenderer.invoke('planner:propose', input) as Promise<unknown>;
+  },
+  plannerReport(input: unknown): Promise<unknown> {
+    return ipcRenderer.invoke('planner:report', input) as Promise<unknown>;
+  },
+  onPlannerEvent(callback: (event: unknown) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on('planner:event', listener);
+    return () => ipcRenderer.removeListener('planner:event', listener);
+  },
+  sdrStart(input?: { mode?: 'scripted' | 'live'; vehicleId?: string; scenario?: string }): Promise<unknown> {
+    return ipcRenderer.invoke('sdr:start', input) as Promise<unknown>;
+  },
+  sdrStop(): Promise<unknown> { return ipcRenderer.invoke('sdr:stop') as Promise<unknown>; },
+  sdrStatus(): Promise<unknown> { return ipcRenderer.invoke('sdr:status') as Promise<unknown>; },
+  onSdrEvent(callback: (event: unknown) => void): () => void {
+    const listener = (_event: Electron.IpcRendererEvent, payload: unknown) => callback(payload);
+    ipcRenderer.on('sdr:event', listener);
+    return () => ipcRenderer.removeListener('sdr:event', listener);
   },
 };
 

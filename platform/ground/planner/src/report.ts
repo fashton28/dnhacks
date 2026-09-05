@@ -10,10 +10,20 @@ import { Anomaly, IncidentReport, MissionPlan, PlanTool } from './contract';
 export interface ObservationSummary {
   /** Did the vision pass detect anything at the location? */
   detected: boolean;
+  /** True only when a healthy observation pass produced reviewable evidence. */
+  observationAvailable?: boolean;
   /** Best detection confidence, 0..1 (meaningful when detected). */
   confidence: number;
   /** Ground-truth label from the site staging data (demo/test paths only). */
   stagingTruth?: string;
+  /** Operator/recognizer conclusion after reviewing all available modalities. */
+  classification?: 'confirmed' | 'false_alarm' | 'inconclusive';
+  modalities?: Array<'rgb' | 'thermal' | 'lidar' | 'fused'>;
+  frames?: { rgb?: string; thermal?: string };
+  geometry?: {
+    fenceGaps?: Array<{ lat: number; lon: number; widthM: number }>;
+    newStructures?: Array<{ lat: number; lon: number; footprintM2: number; heightM: number }>;
+  };
 }
 
 /**
@@ -22,11 +32,12 @@ export interface ObservationSummary {
  */
 export const ESCALATE_CONFIDENCE = 0.6;
 
-/** Verdict mapping: confident detection -> 'escalate'; nothing seen ->
- *  'false_alarm'; ambiguous (seen, low confidence) -> 'log'. */
+/** Missing evidence and low-confidence outcomes always escalate for review. */
 export function reportVerdict(observation: ObservationSummary): IncidentReport['verdict'] {
-  if (!observation.detected) return 'false_alarm';
-  return observation.confidence >= ESCALATE_CONFIDENCE ? 'escalate' : 'log';
+  if (observation.observationAvailable !== true || observation.confidence < ESCALATE_CONFIDENCE ||
+      observation.classification === 'inconclusive') return 'escalate';
+  if (!observation.detected && observation.classification === 'false_alarm') return 'false_alarm';
+  return observation.classification === 'confirmed' ? 'escalate' : 'log';
 }
 
 function describeTool(t: PlanTool): string {
@@ -60,27 +71,44 @@ export function writeIncidentReport(
 ): IncidentReport {
   const verdict = reportVerdict(observation);
 
-  const seen = observation.detected
+  const seen = observation.observationAvailable !== true
+    ? `No reviewable observation was returned; sensor evidence is missing or unavailable.`
+    : observation.detected
     ? `The onboard vision pass detected activity at the anomaly location with ` +
       `confidence ${(observation.confidence * 100).toFixed(0)}%.`
-    : `The onboard vision pass detected nothing of note at the anomaly location.`;
+    : `A healthy observation pass found no matching activity with confidence ` +
+      `${(observation.confidence * 100).toFixed(0)}%.`;
   const truthNote = observation.stagingTruth !== undefined
     ? `\n\n> Staging ground truth (demo only): \`${observation.stagingTruth}\``
     : '';
 
   const recommendation = {
-    escalate:
-      'Escalate to on-site security immediately: a confident detection at a ' +
-      'flagged location warrants human response. Preserve the mission video ' +
-      'and this report for the incident record.',
+    escalate: observation.observationAvailable !== true
+      ? 'Escalate for human review because the mission returned no reviewable observation. Preserve available telemetry and retry only after sensor health is restored.'
+      : observation.confidence < ESCALATE_CONFIDENCE
+        ? 'Escalate for human review because the observation confidence is below the decision threshold. Preserve all modality evidence.'
+        : 'Escalate to on-site security: the reviewed evidence confirms activity at the flagged location. Preserve the mission evidence.',
     log:
       'Log for review: something was observed but below the confidence bar ' +
       'for escalation. Schedule a follow-up pass or manual review of the ' +
       'captured imagery.',
     false_alarm:
-      'Close as a false alarm: the satellite change flag was not confirmed by ' +
-      'the drone observation. No further action required; retain for audit.',
+      'Close as a reviewed false alarm: the high-confidence multimodal observation ' +
+      'supports that classification. Retain the evidence for audit.',
   }[verdict];
+
+  const modalities = observation.modalities?.length ? observation.modalities.join(', ') : 'not supplied';
+  const frameCitations = [
+    observation.frames?.rgb ? `- RGB frame: [evidence](${observation.frames.rgb})` : '- RGB frame: unavailable',
+    observation.frames?.thermal ? `- Thermal frame: [evidence](${observation.frames.thermal})` : '- Thermal frame: unavailable',
+  ].join('\n');
+  const geometry = [
+    ...(observation.geometry?.fenceGaps ?? []).map((gap) =>
+      `- Fence gap at (${gap.lat.toFixed(6)}, ${gap.lon.toFixed(6)}), width ${gap.widthM} m`),
+    ...(observation.geometry?.newStructures ?? []).map((structure) =>
+      `- Structure at (${structure.lat.toFixed(6)}, ${structure.lon.toFixed(6)}), ` +
+      `${structure.footprintM2} m² footprint, ${structure.heightM} m high`),
+  ].join('\n') || '- No geometry claims supplied';
 
   const markdown = `# Incident report — anomaly ${anomaly.id}
 
@@ -103,6 +131,14 @@ Planner rationale: ${plan.rationale}
 ## What was seen
 
 ${seen}${truthNote}
+
+Modalities used: ${modalities}
+
+${frameCitations}
+
+### Geometry citations
+
+${geometry}
 
 ## Recommendation
 

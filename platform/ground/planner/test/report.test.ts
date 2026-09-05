@@ -23,20 +23,20 @@ const plan: MissionPlan = {
 
 describe('reportVerdict mapping', () => {
   it('confident detection -> escalate', () => {
-    expect(reportVerdict({ detected: true, confidence: ESCALATE_CONFIDENCE })).toBe('escalate');
-    expect(reportVerdict({ detected: true, confidence: 0.95 })).toBe('escalate');
+    expect(reportVerdict({ detected: true, observationAvailable: true, classification: 'confirmed', confidence: ESCALATE_CONFIDENCE })).toBe('escalate');
+    expect(reportVerdict({ detected: true, observationAvailable: true, classification: 'confirmed', confidence: 0.95 })).toBe('escalate');
   });
-  it('nothing seen -> false_alarm (regardless of confidence field)', () => {
-    expect(reportVerdict({ detected: false, confidence: 0.9 })).toBe('false_alarm');
+  it('nothing seen -> escalate for human review', () => {
+    expect(reportVerdict({ detected: false, observationAvailable: false, confidence: 0.9 })).toBe('escalate');
   });
-  it('ambiguous detection -> log', () => {
-    expect(reportVerdict({ detected: true, confidence: ESCALATE_CONFIDENCE - 0.01 })).toBe('log');
+  it('ambiguous detection -> escalate', () => {
+    expect(reportVerdict({ detected: true, observationAvailable: true, confidence: ESCALATE_CONFIDENCE - 0.01 })).toBe('escalate');
   });
 });
 
 describe('writeIncidentReport', () => {
   it('produces the four required markdown sections and correlates by requestId', () => {
-    const report = writeIncidentReport(anomaly, plan, { detected: true, confidence: 0.9 });
+    const report = writeIncidentReport(anomaly, plan, { detected: true, observationAvailable: true, classification: 'confirmed', confidence: 0.9 });
     expect(report.missionId).toBe(plan.requestId);
     expect(report.verdict).toBe('escalate');
     for (const section of ['## What was flagged', '## What flew', '## What was seen', '## Recommendation']) {
@@ -47,7 +47,7 @@ describe('writeIncidentReport', () => {
 
   it('carries the staging ground truth when provided (demo path)', () => {
     const report = writeIncidentReport(anomaly, plan, {
-      detected: false, confidence: 0, stagingTruth: 'false_alarm',
+      detected: false, observationAvailable: true, confidence: 0.9, classification: 'false_alarm', stagingTruth: 'false_alarm',
     });
     expect(report.verdict).toBe('false_alarm');
     expect(report.markdown).toContain('false_alarm');

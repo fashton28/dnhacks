@@ -34,6 +34,7 @@ export {
   cropRgba,
   detectAnomalies,
 } from './detect.js';
+export * from './sar.js';
 
 export {
   crc32,

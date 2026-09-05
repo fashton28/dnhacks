@@ -49,16 +49,33 @@ export interface SiteStagingPoint {
   lon: number;
   /** Repo-root-relative path to the still image. */
   image: string;
+  /** Repo-root-relative paired thermal still. */
+  thermalImage: string;
+  /** Provenance label such as scripted_placeholder. */
+  imageKind: string;
+  requiredSensors: Array<'rgb' | 'thermal' | 'lidar'>;
   truth: 'vehicle' | 'breach' | 'structure' | 'false_alarm';
+}
+
+export interface SiteClutter {
+  name: string;
+  polygon: LatLon[];
 }
 
 export interface SiteModel {
   home: { lat: number; lon: number; altM: number };
   /** Outer geofence — open ring, any winding. */
   perimeter: LatLon[];
+  /** Operational containment polygon uploaded to ArduPilot. */
+  geofence: LatLon[];
+  /** Horizontal clearance applied around every NFZ, meters. */
+  nfzBufferM: number;
   nfz: SiteNfz[];
   /** Permitted flight band, meters AGL relative to home. */
   altBandM: { min: number; max: number };
+  /** Minimum safe altitude after LiDAR degradation, meters AGL. */
+  clearAltitudeM: number;
+  clutter: SiteClutter[];
   staging: SiteStagingPoint[];
 }
 
@@ -163,6 +180,10 @@ export function validateSite(data: unknown): SiteModel {
   }
 
   const perimeter = parseRing(d.perimeter, 'perimeter');
+  const geofence = parseRing(d.geofence, 'geofence');
+  if (!isFiniteNumber(d.nfz_buffer_m) || d.nfz_buffer_m < 0) {
+    throw new Error('invalid site JSON: nfz_buffer_m must be a finite number >= 0');
+  }
 
   const nfzRaw = d.nfz;
   if (!Array.isArray(nfzRaw)) {
@@ -191,19 +212,54 @@ export function validateSite(data: unknown): SiteModel {
   if ((band.min as number) < 0 || (band.min as number) >= (band.max as number)) {
     throw new Error(`invalid site JSON: alt_band_m requires 0 <= min < max, got min=${band.min} max=${band.max}`);
   }
+  if (!isFiniteNumber(d.clear_altitude_m) ||
+      d.clear_altitude_m < (band.min as number) || d.clear_altitude_m > (band.max as number)) {
+    throw new Error(
+      `invalid site JSON: clear_altitude_m must be inside alt_band_m ` +
+      `[${band.min}, ${band.max}]`,
+    );
+  }
+
+  const clutterRaw = d.clutter;
+  if (!Array.isArray(clutterRaw)) {
+    throw new Error('invalid site JSON: "clutter" must be an array (may be empty)');
+  }
+  const clutter: SiteClutter[] = clutterRaw.map((entry, i) => {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new Error(`invalid site JSON: clutter[${i}] must be an object`);
+    }
+    const cc = entry as Record<string, unknown>;
+    if (typeof cc.name !== 'string' || cc.name.length === 0) {
+      throw new Error(`invalid site JSON: clutter[${i}].name must be a non-empty string`);
+    }
+    return { name: cc.name, polygon: parseRing(cc.polygon, `clutter[${i}].polygon`) };
+  });
 
   const stagingRaw = d.staging;
   if (!Array.isArray(stagingRaw)) {
     throw new Error('invalid site JSON: "staging" must be an array (may be empty)');
   }
+  const stagingIds = new Set<string>();
   const staging: SiteStagingPoint[] = stagingRaw.map((s, i) => {
     const ss = s as Record<string, unknown>;
     if (typeof ss !== 'object' || ss === null || typeof ss.id !== 'string' ||
-        typeof ss.image !== 'string' || typeof ss.truth !== 'string' ||
+        typeof ss.image !== 'string' || typeof ss.thermal_image !== 'string' ||
+        typeof ss.image_kind !== 'string' || typeof ss.truth !== 'string' ||
         !TRUTH_VALUES.has(ss.truth)) {
       throw new Error(
-        `invalid site JSON: staging[${i}] must have string id/image and truth in ` +
+        `invalid site JSON: staging[${i}] must have string id/image/thermal_image/image_kind and truth in ` +
         `vehicle|breach|structure|false_alarm`,
+      );
+    }
+    if (stagingIds.has(ss.id)) {
+      throw new Error(`invalid site JSON: duplicate staging id ${JSON.stringify(ss.id)}`);
+    }
+    stagingIds.add(ss.id);
+    if (!Array.isArray(ss.required_sensors) || ss.required_sensors.some(
+      (sensor) => sensor !== 'rgb' && sensor !== 'thermal' && sensor !== 'lidar'
+    )) {
+      throw new Error(
+        `invalid site JSON: staging[${i}].required_sensors must contain only rgb|thermal|lidar`,
       );
     }
     return {
@@ -211,15 +267,27 @@ export function validateSite(data: unknown): SiteModel {
       lat: assertLat(ss.lat, `staging[${i}].lat`),
       lon: assertLon(ss.lon, `staging[${i}].lon`),
       image: ss.image,
+      thermalImage: ss.thermal_image,
+      imageKind: ss.image_kind,
+      requiredSensors: [...ss.required_sensors] as SiteStagingPoint['requiredSensors'],
       truth: ss.truth as SiteStagingPoint['truth'],
     };
   });
 
+  const geofenceEscapes = geofence.some((point) => !pointInOrOnPolygon(point, perimeter));
+  if (geofenceEscapes) {
+    throw new Error('invalid site JSON: geofence must be wholly inside or equal to perimeter');
+  }
+
   return {
     home: { lat: homeLat, lon: homeLon, altM: home.alt_m as number },
     perimeter,
+    geofence,
+    nfzBufferM: d.nfz_buffer_m,
     nfz,
     altBandM: { min: band.min as number, max: band.max as number },
+    clearAltitudeM: d.clear_altitude_m,
+    clutter,
     staging,
   };
 }
@@ -367,6 +435,42 @@ function nearestPointOnSegmentXY(p: XY, a: XY, b: XY): XY {
   return { x: a.x + t * abx, y: a.y + t * aby };
 }
 
+/** Minimum horizontal distance from a point to a polygon boundary, meters. */
+export function distancePointToPolygonMeters(p: LatLon, polygon: LatLon[]): number {
+  return haversineMeters(p, nearestPointOnPolygonBoundary(p, polygon));
+}
+
+/** Point containment that treats the polygon edge as inside. */
+export function pointInOrOnPolygon(p: LatLon, polygon: LatLon[]): boolean {
+  return pointInPolygon(p, polygon) || distancePointToPolygonMeters(p, polygon) <= 0.02;
+}
+
+/** Minimum distance between a line segment and a polygon, meters. */
+export function distanceSegmentToPolygonMeters(a: LatLon, b: LatLon, polygon: LatLon[]): number {
+  if (segmentEntersPolygon(a, b, polygon)) return 0;
+  const origin = polygon[0];
+  const pa = toLocal(a, origin);
+  const pb = toLocal(b, origin);
+  const ring = polygon.map((v) => toLocal(v, origin));
+  let best = Infinity;
+  const distancePointToSegment = (p: XY, s1: XY, s2: XY): number => {
+    const nearest = nearestPointOnSegmentXY(p, s1, s2);
+    return Math.hypot(p.x - nearest.x, p.y - nearest.y);
+  };
+  for (let i = 0; i < ring.length; i++) {
+    const e1 = ring[i];
+    const e2 = ring[(i + 1) % ring.length];
+    best = Math.min(
+      best,
+      distancePointToSegment(pa, e1, e2),
+      distancePointToSegment(pb, e1, e2),
+      distancePointToSegment(e1, pa, pb),
+      distancePointToSegment(e2, pa, pb),
+    );
+  }
+  return best;
+}
+
 /** Closest point on the polygon's boundary (including the closing edge). */
 export function nearestPointOnPolygonBoundary(p: LatLon, polygon: LatLon[]): LatLon {
   const origin = polygon[0];
@@ -421,9 +525,65 @@ export function movePointAcrossBoundary(p: LatLon, polygon: LatLon[], marginM: n
   return fromLocal({ x: boundary.x + dx * scale, y: boundary.y + dy * scale }, origin);
 }
 
+/** Move a point to a requested clearance OUTSIDE a polygon boundary. */
+export function movePointAwayFromPolygon(
+  p: LatLon,
+  polygon: LatLon[],
+  clearanceM: number,
+): LatLon {
+  const origin = polygon[0];
+  const pt = toLocal(p, origin);
+  const boundary = toLocal(nearestPointOnPolygonBoundary(p, polygon), origin);
+  const ring = polygon.map((v) => toLocal(v, origin));
+  const cx = ring.reduce((sum, v) => sum + v.x, 0) / ring.length;
+  const cy = ring.reduce((sum, v) => sum + v.y, 0) / ring.length;
+  let dx: number;
+  let dy: number;
+  if (pointInPolygon(p, polygon)) {
+    dx = boundary.x - pt.x;
+    dy = boundary.y - pt.y;
+  } else {
+    dx = pt.x - boundary.x;
+    dy = pt.y - boundary.y;
+  }
+  let length = Math.hypot(dx, dy);
+  if (length < 1e-9) {
+    dx = boundary.x - cx;
+    dy = boundary.y - cy;
+    length = Math.hypot(dx, dy);
+  }
+  if (length < 1e-9) {
+    dx = 1;
+    dy = 0;
+    length = 1;
+  }
+  return fromLocal({
+    x: boundary.x + dx / length * clearanceM,
+    y: boundary.y + dy / length * clearanceM,
+  }, origin);
+}
+
 /** Vertex centroid of a polygon (adequate for target placement, not area math). */
 export function polygonCentroid(polygon: LatLon[]): LatLon {
   const lat = polygon.reduce((s, v) => s + v.lat, 0) / polygon.length;
   const lon = polygon.reduce((s, v) => s + v.lon, 0) / polygon.length;
   return { lat, lon };
+}
+
+/** Move an inside point away from its nearest boundary while staying inward. */
+export function movePointInsidePolygon(p: LatLon, polygon: LatLon[], clearanceM: number): LatLon {
+  const origin = polygon[0];
+  const pt = toLocal(p, origin);
+  const boundary = toLocal(nearestPointOnPolygonBoundary(p, polygon), origin);
+  let dx = pt.x - boundary.x;
+  let dy = pt.y - boundary.y;
+  let length = Math.hypot(dx, dy);
+  if (length < 1e-9) {
+    const ring = polygon.map((v) => toLocal(v, origin));
+    dx = ring.reduce((sum, v) => sum + v.x, 0) / ring.length - boundary.x;
+    dy = ring.reduce((sum, v) => sum + v.y, 0) / ring.length - boundary.y;
+    length = Math.hypot(dx, dy);
+  }
+  if (length < 1e-9) throw new Error('cannot derive inward direction for degenerate polygon');
+  return fromLocal({ x: boundary.x + dx / length * clearanceM, y: boundary.y + dy / length * clearanceM }, origin);
 }

@@ -1,0 +1,5 @@
+numpy>=1.26
+
+# Optional live RX backends; install one for SDR=live:
+# SoapySDR
+# pyrtlsdr

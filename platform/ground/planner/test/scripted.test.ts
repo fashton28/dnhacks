@@ -9,14 +9,16 @@ import { describe, expect, it } from 'vitest';
 import stubSite from '../../../site/site.stub.json';
 import { Anomaly, GotoGpsTool, OrbitPointTool } from '../src/contract';
 import { ORBIT_RADIUS_M, ScriptedPlanner } from '../src/scripted';
-import { SiteModel, polygonCentroid, validateSite } from '../src/site';
+import { SiteModel, haversineMeters, polygonCentroid, validateSite } from '../src/site';
 
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 
 interface RawSite {
   home: { lat: number; lon: number };
   perimeter: number[][];
+  geofence: number[][];
   nfz: { polygon: number[][]; ceiling_m: number }[];
+  clutter: { polygon: number[][] }[];
   alt_band_m: { min: number; max: number };
   staging: { lat: number; lon: number }[];
 }
@@ -27,7 +29,9 @@ function mutatedSite(overrides: Partial<{ band: { min: number; max: number }; ce
   const dLon = -0.02;
   raw.home.lat += dLat; raw.home.lon += dLon;
   raw.perimeter.forEach((p) => { p[0] += dLat; p[1] += dLon; });
+  raw.geofence.forEach((p) => { p[0] += dLat; p[1] += dLon; });
   raw.nfz.forEach((z) => z.polygon.forEach((p) => { p[0] += dLat; p[1] += dLon; }));
+  raw.clutter.forEach((z) => z.polygon.forEach((p) => { p[0] += dLat; p[1] += dLon; }));
   raw.staging.forEach((s) => { s.lat += dLat; s.lon += dLon; });
   raw.alt_band_m = overrides.band ?? { min: 28, max: 76 };
   raw.nfz[0].ceiling_m = overrides.ceiling ?? 150;
@@ -54,9 +58,8 @@ describe('ScriptedPlanner.passingPlan (derived, not hardcoded)', () => {
 
     const goto = plan.tools[0] as GotoGpsTool;
     expect(goto.tool).toBe('goto_gps');
-    expect(goto.lat).toBe(a.lat);
-    expect(goto.lon).toBe(a.lon);
-    expect(goto.alt).toBe((site.altBandM.min + site.altBandM.max) / 2); // 52, from the MUTATED band
+    expect(haversineMeters(goto, a)).toBeCloseTo(ORBIT_RADIUS_M, 0);
+    expect(goto.alt).toBe(45); // site midpoint is capped by the standard profile
     expect(goto.profile).toBe('standard');
 
     const orbit = plan.tools[1] as OrbitPointTool;
