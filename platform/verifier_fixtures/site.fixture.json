@@ -1,0 +1,102 @@
+{
+  "_fixture": {
+    "purpose": "Deterministic geometry for the V01-V25 mission-verifier fixtures.",
+    "provenance": "SYNTHETIC. Home is Komati Power Station; every other coordinate is generated from metre offsets so each verifier check has a provable edge. This is not a survey and never substitutes for site/site.json.",
+    "frame": "Local metres east/north of home, mapped with 111320 m/deg lat and 111320*cos(lat) m/deg lon - the planner site.ts projection.",
+    "landmarks": {
+      "geofence notch": "x 250..500, y -80..80 is CUT OUT of the geofence so a leg between two contained targets can still leave containment (V25).",
+      "ash-dam": "ceiling 30 m AGL - low enough that the band (20-80 m) contains both a legal overflight (V01 at 45 m) and an at-ceiling breach (V10/V11).",
+      "chimney-stack": "ceiling 80 m AGL - no legal overflight inside the band.",
+      "boiler-house": "clutter requiring healthy LiDAR below clear_altitude_m (V16)."
+    }
+  },
+  "home": {
+    "lat": -26.09,
+    "lon": 29.4719,
+    "alt_m": 1600
+  },
+  "perimeter": [
+    [-26.0949407, 29.4658986],
+    [-26.0949407, 29.4779014],
+    [-26.0850593, 29.4779014],
+    [-26.0850593, 29.4658986]
+  ],
+  "geofence": [
+    [-26.0940424, 29.4668988],
+    [-26.0940424, 29.4769012],
+    [-26.0907186, 29.4769012],
+    [-26.0907186, 29.4744006],
+    [-26.0892814, 29.4744006],
+    [-26.0892814, 29.4769012],
+    [-26.0859576, 29.4769012],
+    [-26.0859576, 29.4668988]
+  ],
+  "nfz_buffer_m": 25,
+  "nfz": [
+    {
+      "name": "ash-dam",
+      "polygon": [
+        [-26.0886525, 29.4712999],
+        [-26.0886525, 29.4725001],
+        [-26.0875746, 29.4725001],
+        [-26.0875746, 29.4712999]
+      ],
+      "ceiling_m": 30
+    },
+    {
+      "name": "chimney-stack",
+      "polygon": [
+        [-26.0886525, 29.4685992],
+        [-26.0886525, 29.4697995],
+        [-26.0875746, 29.4697995],
+        [-26.0875746, 29.4685992]
+      ],
+      "ceiling_m": 80
+    }
+  ],
+  "alt_band_m": {
+    "min": 20,
+    "max": 80
+  },
+  "clear_altitude_m": 45,
+  "clutter": [
+    {
+      "name": "boiler-house",
+      "polygon": [
+        [-26.0923356, 29.4712999],
+        [-26.0923356, 29.4725001],
+        [-26.0912576, 29.4725001],
+        [-26.0912576, 29.4712999]
+      ]
+    }
+  ],
+  "staging": [
+    {
+      "id": "fixture-west-service-road",
+      "lat": -26.0926949,
+      "lon": 29.4678991,
+      "image": "site/staging/stage-a.png",
+      "thermal_image": "site/staging/stage-a-thermal.png",
+      "image_kind": "scripted_placeholder",
+      "required_sensors": [
+        "rgb",
+        "thermal",
+        "lidar"
+      ],
+      "truth": "vehicle"
+    },
+    {
+      "id": "fixture-north-yard",
+      "lat": -26.0868559,
+      "lon": 29.4734003,
+      "image": "site/staging/stage-b.png",
+      "thermal_image": "site/staging/stage-b-thermal.png",
+      "image_kind": "scripted_placeholder",
+      "required_sensors": [
+        "rgb",
+        "thermal"
+      ],
+      "truth": "false_alarm"
+    }
+  ]
+}

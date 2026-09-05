@@ -1,0 +1,62 @@
+{
+  "id": "V08",
+  "scenario": "small_standoff",
+  "description": "Orbit radius 2 m is below the 5 m inspect standoff and below the 3 m hard floor. Correction raises it to the profile floor - never to the hard floor.",
+  "covers": [
+    "standoff floor",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V08",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 2,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "standoff"
+    ],
+    "editedChecks": [
+      "standoff"
+    ],
+    "reasonContains": {
+      "standoff": [
+        "tool 1 orbit radius 2 m is below 5 m standoff"
+      ]
+    },
+    "editContains": {
+      "standoff": [
+        "raised tool 1 orbit radius to 5 m"
+      ]
+    }
+  }
+}

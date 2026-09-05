@@ -1,0 +1,61 @@
+{
+  "id": "V14",
+  "scenario": "low_range",
+  "description": "RANGE BOUNDARY, failing side. SoC is exactly the 80% dispatch floor (readiness passes) but the pack reports one second less usable endurance than the wind-adjusted mission needs after the 25% reserve. Paired with V20, which is the same mission one second the other side of the same boundary.",
+  "covers": [
+    "range boundary",
+    "reserve policy"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V14",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "battery": {
+      "soc_pct": 80,
+      "remaining": 80,
+      "remaining_s": 455
+    }
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "range"
+    ],
+    "reasonContains": {
+      "range": [
+        "insufficient live-SoC range",
+        "313.2 s required vs 312.8 s available",
+        "25% reserve"
+      ]
+    }
+  }
+}

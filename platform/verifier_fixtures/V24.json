@@ -1,0 +1,68 @@
+{
+  "id": "V24",
+  "scenario": "battery_readiness",
+  "description": "Every pack gate fails at once: still charging, SoC below the 80% dispatch floor, a declared fault, cell delta above 0.10 V and temperature above 60 C. Range still passes at 62% SoC, so readiness fails alone and each threshold is named separately in the reason.",
+  "covers": [
+    "dispatch battery policy",
+    "charge state",
+    "cell imbalance",
+    "over-temperature"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V24",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "battery": {
+      "soc_pct": 62,
+      "remaining": 62,
+      "charge_state": "charging",
+      "fault": "cell_undervoltage",
+      "cell_delta_v": 0.14,
+      "temp_c": 63
+    }
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "readiness"
+    ],
+    "reasonContains": {
+      "readiness": [
+        "battery SoC 62% is below 80%",
+        "charge_state is charging, expected charged",
+        "battery fault: cell_undervoltage",
+        "cell delta 0.14 V exceeds 0.1 V",
+        "battery temperature 63 C exceeds 60 C"
+      ]
+    }
+  }
+}

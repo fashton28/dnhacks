@@ -1,0 +1,42 @@
+{
+  "_fixture": {
+    "purpose": "Healthy runtime context every case starts from. A case telemetry block is merged over this (one level deep for battery/readiness/sensors/anomaly, replacing every other key).",
+    "shape": "VerificationContext - the same JSON the planner CLI accepts as `verify --context`."
+  },
+  "navSource": "gps",
+  "readiness": {
+    "ready": true,
+    "reasons": []
+  },
+  "battery": {
+    "soc_pct": 92,
+    "voltage_v": 24.6,
+    "current_a": 12,
+    "cell_delta_v": 0.02,
+    "temp_c": 28,
+    "remaining_s": 1200,
+    "charge_state": "charged",
+    "fault": "",
+    "voltage": 24.6,
+    "current": 12,
+    "remaining": 92
+  },
+  "windMps": 0,
+  "rfEvents": [],
+  "sdrState": "nominal",
+  "sensors": {
+    "rgb": "ok",
+    "thermal": "ok",
+    "lidar": "ok"
+  },
+  "isNight": false,
+  "anomaly": {
+    "id": "fixture-north-anomaly",
+    "lat": -26.0869457,
+    "lon": 29.4719,
+    "type": "change",
+    "confidence": 0.86,
+    "thumbnail": "site/staging/stage-a.png",
+    "source": "sentinel2"
+  }
+}

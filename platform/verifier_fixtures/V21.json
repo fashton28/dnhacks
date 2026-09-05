@@ -1,0 +1,67 @@
+{
+  "id": "V21",
+  "scenario": "hostile_airspace",
+  "description": "A hostile drone is inside the operational geofence before launch. FAILURE_MODES: pre-flight detection refuses; only an in-flight detection holds.",
+  "covers": [
+    "hostile-drone refuse policy"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V21",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "rfEvents": [
+      {
+        "type": "rfEvent",
+        "ts": 1757116800000,
+        "vehicleId": "eis-1",
+        "source": "rf_drone",
+        "kind": "hostile_drone",
+        "band": "2.4GHz",
+        "confidence": 0.9,
+        "lat": -26.0882034,
+        "lon": 29.4734003
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "airspace"
+    ],
+    "reasonContains": {
+      "airspace": [
+        "hostile drone at",
+        "conflicts with mission airspace"
+      ]
+    }
+  }
+}

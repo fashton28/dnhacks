@@ -1,0 +1,62 @@
+{
+  "id": "V05",
+  "scenario": "far_anomaly",
+  "description": "The plan is safe but observes nothing: the nearest target is ~740 m from the anomaly, past the 200 m proximity rule, so it cannot answer the request it claims to answer.",
+  "covers": [
+    "anomaly proximity"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V05",
+    "anomalyId": "fixture-south-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "anomaly": {
+      "id": "fixture-south-anomaly",
+      "lat": -26.0935932,
+      "lon": 29.4719,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "anomaly_proximity"
+    ],
+    "reasonContains": {
+      "anomaly_proximity": [
+        "no mission target is within 200 m of the anomaly"
+      ]
+    }
+  }
+}

@@ -1,0 +1,57 @@
+{
+  "id": "V13",
+  "scenario": "low_altitude",
+  "description": "Target altitude 15 m is below the 20 m site band floor. The band binds in both directions; correction raises the target to the floor.",
+  "covers": [
+    "altitude band lower edge",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V13",
+    "anomalyId": "fixture-east-yard-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 15
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "anomaly": {
+      "id": "fixture-east-yard-anomaly",
+      "lat": -26.0873051,
+      "lon": 29.4749007,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "altitude"
+    ],
+    "editedChecks": [
+      "altitude"
+    ],
+    "reasonContains": {
+      "altitude": [
+        "tool 0 altitude 15 m is outside [20, 45] m"
+      ]
+    },
+    "editContains": {
+      "altitude": [
+        "clamped tool 0 altitude to 20 m"
+      ]
+    }
+  }
+}

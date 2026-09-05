@@ -1,0 +1,83 @@
+{
+  "id": "V23",
+  "scenario": "sortie_too_long",
+  "description": "A 120 s hold and a 20-lap orbit blow the loiter bounds, the 480 s sortie cap and the live-SoC range budget together. Correction clamps the hold and laps to their bounds, then drops the hold and trims the orbit to one lap to fit the budget.",
+  "covers": [
+    "loiter bounds",
+    "sortie cap",
+    "range budget",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V23",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 30,
+        "laps": 20
+      },
+      {
+        "tool": "hold",
+        "durationS": 120
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "loiter",
+      "range",
+      "sortie"
+    ],
+    "editedChecks": [
+      "loiter",
+      "sortie"
+    ],
+    "reasonContains": {
+      "loiter": [
+        "tool 1 orbit exceeds 3 laps",
+        "tool 2 hold exceeds 60 s"
+      ],
+      "sortie": [
+        "sortie 1375.3 s exceeds 480 s cap"
+      ],
+      "range": [
+        "873.9 s available at 92% SoC"
+      ]
+    },
+    "editContains": {
+      "loiter": [
+        "trimmed tool 1 orbit to 3 laps",
+        "clamped tool 2 hold to 60 s"
+      ],
+      "sortie": [
+        "trimmed orbit tool 1 to one lap",
+        "dropped hold tool 2 to fit budget"
+      ]
+    }
+  }
+}

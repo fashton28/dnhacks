@@ -1,0 +1,53 @@
+{
+  "id": "V12",
+  "scenario": "missing_rtl",
+  "description": "The mission never comes home. Correction appends the single terminal rtl; the rest of the plan is already safe.",
+  "covers": [
+    "terminal rtl",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V12",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "terminal"
+    ],
+    "editedChecks": [
+      "terminal"
+    ],
+    "reasonContains": {
+      "terminal": [
+        "mission must terminate with rtl"
+      ]
+    },
+    "editContains": {
+      "terminal": [
+        "normalized mission to one terminal rtl"
+      ]
+    }
+  }
+}

@@ -1,0 +1,58 @@
+{
+  "id": "V02",
+  "scenario": "bad_schema",
+  "description": "Malformed tool: `follow` tracks a moving target and has no provable geometry, so it is not admitted to a mission sequence. Schema rejection blocks every downstream check fail-closed - nothing is evaluated on an unparsed plan.",
+  "covers": [
+    "malformed-tool rejection",
+    "fail-closed blocking"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V02",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "follow",
+        "track_id": 1,
+        "profile": "inspect"
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {},
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "schema",
+      "nav_source",
+      "readiness",
+      "wind",
+      "rf_environment",
+      "airspace",
+      "anomaly_proximity",
+      "altitude",
+      "speed",
+      "standoff",
+      "geofence",
+      "nfz_transit",
+      "nfz_orbit",
+      "terminal",
+      "loiter",
+      "range",
+      "sortie"
+    ],
+    "reasonContains": {
+      "schema": [
+        "tool follow is not admitted to a mission sequence"
+      ],
+      "geofence": [
+        "not evaluated",
+        "tool follow is not admitted to a mission sequence"
+      ]
+    }
+  }
+}

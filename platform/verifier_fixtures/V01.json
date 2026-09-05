@@ -1,0 +1,50 @@
+{
+  "id": "V01",
+  "scenario": "pass",
+  "description": "Nominal mission on the fixture site. Exercises every legal edge at once: the ash-dam is overflown at 45 m, strictly ABOVE its 30 m ceiling; 45 m is the inspect profile altitude ceiling and 20 m is the site band floor, so both altitude-band edges are inclusive; the orbit radius is exactly the 5 m profile standoff floor; every target and leg stays inside the geofence.",
+  "covers": [
+    "geofence in",
+    "NFZ above ceiling",
+    "altitude band edges",
+    "standoff floor edge",
+    "terminal rtl"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V01",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45
+  },
+  "expected": {
+    "verdict": "pass",
+    "failingChecks": []
+  }
+}

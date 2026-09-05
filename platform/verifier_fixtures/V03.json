@@ -1,0 +1,54 @@
+{
+  "id": "V03",
+  "scenario": "bad_nav",
+  "description": "GPS vote failed and the companion selected extnav. FAILURE_MODES: a new mission is refused whenever navSource != gps, even with a healthy fallback.",
+  "covers": [
+    "nav_source refuse policy"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V03",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "navSource": "extnav"
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "nav_source"
+    ],
+    "reasonContains": {
+      "nav_source": [
+        "refused while navigation source is extnav"
+      ]
+    }
+  }
+}

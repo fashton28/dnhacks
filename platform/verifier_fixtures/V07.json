@@ -1,0 +1,63 @@
+{
+  "id": "V07",
+  "scenario": "high_speed",
+  "description": "Leg speed 7 m/s is under the 8 m/s hard cap but over the 4 m/s inspect profile cap. Correction clamps to the profile value.",
+  "covers": [
+    "speed cap",
+    "corrected plan"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V07",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45,
+        "speed_mps": 7
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "speed"
+    ],
+    "editedChecks": [
+      "speed"
+    ],
+    "reasonContains": {
+      "speed": [
+        "tool 0 speed 7 m/s exceeds valid (0, 4] m/s"
+      ]
+    },
+    "editContains": {
+      "speed": [
+        "clamped tool 0 speed to 4 m/s"
+      ]
+    }
+  }
+}

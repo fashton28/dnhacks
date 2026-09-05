@@ -1,0 +1,57 @@
+{
+  "id": "V15",
+  "scenario": "night_thermal",
+  "description": "Night mission with a failed thermal rail. FAILURE_MODES: dispatch is refused at readiness - the ground verifier will not launch a night mission that cannot see. No correction exists for a sensor fault.",
+  "covers": [
+    "thermal-at-night refuse policy"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V15",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "isNight": true,
+    "sensors": {
+      "thermal": "failed"
+    }
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "readiness"
+    ],
+    "reasonContains": {
+      "readiness": [
+        "night mission requires a healthy thermal sensor"
+      ]
+    }
+  }
+}

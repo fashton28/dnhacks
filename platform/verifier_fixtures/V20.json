@@ -1,0 +1,62 @@
+{
+  "id": "V20",
+  "scenario": "sdr_no_device",
+  "description": "RANGE BOUNDARY, passing side, plus SDR absence. No SDR is attached, so the RF environment is unknown rather than clear - unknown does not require an override and does not block. SoC is exactly the 80% dispatch floor and the pack reports one second more usable endurance than the mission needs; V14 is the same mission one second below it.",
+  "covers": [
+    "range boundary",
+    "dispatch SoC edge",
+    "SDR unknown vs clear"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V20",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "sdrState": "no_device",
+    "battery": {
+      "soc_pct": 80,
+      "remaining": 80,
+      "remaining_s": 456
+    }
+  },
+  "expected": {
+    "verdict": "pass",
+    "failingChecks": [],
+    "reasonContains": {
+      "rf_environment": [
+        "SDR unavailable; RF environment unknown"
+      ],
+      "range": [
+        "313.2 s required vs 313.5 s available"
+      ]
+    }
+  }
+}

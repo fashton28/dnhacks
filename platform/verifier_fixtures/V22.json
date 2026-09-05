@@ -1,0 +1,70 @@
+{
+  "id": "V22",
+  "scenario": "gps_rf",
+  "description": "GPS loss correlated with a GNSS interference event - the probable interference case. Both nav_source and rf_environment fail and both reasons are preserved; neither masks the other.",
+  "covers": [
+    "GPS loss + interference correlation",
+    "multiple failing checks"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V22",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0873051,
+        "lon": 29.4749007,
+        "alt": 20
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "navSource": "optflow",
+    "rfEvents": [
+      {
+        "type": "rfEvent",
+        "ts": 1757116800000,
+        "vehicleId": "eis-1",
+        "source": "sdr",
+        "kind": "gnss_interference",
+        "band": "GPS L1",
+        "confidence": 0.9
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "nav_source",
+      "rf_environment"
+    ],
+    "reasonContains": {
+      "nav_source": [
+        "refused while navigation source is optflow"
+      ],
+      "rf_environment": [
+        "GNSS interference detected; operator override required"
+      ]
+    }
+  }
+}

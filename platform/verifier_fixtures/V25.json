@@ -1,0 +1,55 @@
+{
+  "id": "V25",
+  "scenario": "geofence_segment",
+  "description": "Both targets are inside the geofence, but the fence is concave and the straight leg between them crosses the notch. Containment is a property of the whole path, not of the waypoints. No correction exists for a crossing leg - the verifier only relocates targets - so this is a rejection, not a repair.",
+  "covers": [
+    "geofence segment crossing",
+    "rejection when no correction exists"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V25",
+    "anomalyId": "fixture-east-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0917966,
+        "lon": 29.4759009,
+        "alt": 30
+      },
+      {
+        "tool": "goto_gps",
+        "lat": -26.0882034,
+        "lon": 29.4759009,
+        "alt": 30
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "anomaly": {
+      "id": "fixture-east-anomaly",
+      "lat": -26.0882034,
+      "lon": 29.4759009,
+      "type": "change",
+      "confidence": 0.86,
+      "thumbnail": "site/staging/stage-a.png",
+      "source": "sentinel2"
+    }
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "geofence"
+    ],
+    "reasonContains": {
+      "geofence": [
+        "leg to tool 1 leaves geofence"
+      ]
+    }
+  }
+}
