@@ -8,7 +8,9 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_generator_outputs_agree(tmp_path):
-    subprocess.run([sys.executable, str(ROOT / "sim/site/gen_site.py"), "--fleet", "3"], check=True, cwd=ROOT)
+    # Run as a module, not a file path: `python sim/site/gen_site.py` puts sim/site on
+    # sys.path instead of the repo root, so the generator's `import contracts` fails.
+    subprocess.run([sys.executable, "-m", "sim.site.gen_site", "--fleet", "3"], check=True, cwd=ROOT)
     scene = json.loads((ROOT / "sim/site/site.json").read_text())
     geo = json.loads((ROOT / "sim/site/site.geojson").read_text())
     scene_ids = {s["id"] for f in ("outer", "inner") for s in scene["fences"][f]["sections"]}
