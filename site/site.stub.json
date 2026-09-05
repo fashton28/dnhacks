@@ -1,37 +1,81 @@
 {
-  "home": { "lat": -35.363261, "lon": 149.16523, "alt_m": 584.0 },
+  "home": { "lat": -26.09, "lon": 29.4719, "alt_m": 1600.0 },
   "perimeter": [
-    [-35.360761, 149.16223],
-    [-35.360761, 149.16823],
-    [-35.365761, 149.16823],
-    [-35.365761, 149.16223]
+    [-26.0867, 29.4672],
+    [-26.0867, 29.477],
+    [-26.094, 29.477],
+    [-26.094, 29.4672]
   ],
+  "geofence": [
+    [-26.0871, 29.4677],
+    [-26.0871, 29.4765],
+    [-26.0936, 29.4765],
+    [-26.0936, 29.4677]
+  ],
+  "nfz_buffer_m": 25,
   "nfz": [
+    {
+      "name": "chimney",
+      "polygon": [
+        [-26.08815, 29.46975],
+        [-26.08815, 29.47045],
+        [-26.08885, 29.47045],
+        [-26.08885, 29.46975]
+      ],
+      "ceiling_m": 80
+    },
     {
       "name": "switchyard",
       "polygon": [
-        [-35.3616, 149.1662],
-        [-35.3616, 149.1674],
-        [-35.3624, 149.1674],
-        [-35.3624, 149.1662]
+        [-26.09135, 29.47365],
+        [-26.09135, 29.47575],
+        [-26.09275, 29.47575],
+        [-26.09275, 29.47365]
       ],
-      "ceiling_m": 120
+      "ceiling_m": 80
     }
   ],
-  "alt_band_m": { "min": 20, "max": 60 },
+  "alt_band_m": { "min": 20, "max": 80 },
+  "clear_altitude_m": 45,
+  "clutter": [
+    {
+      "name": "boiler-house",
+      "polygon": [
+        [-26.08905, 29.47105],
+        [-26.08905, 29.4726],
+        [-26.08965, 29.4726],
+        [-26.08965, 29.47105]
+      ]
+    },
+    {
+      "name": "coal-handling",
+      "polygon": [
+        [-26.09265, 29.46865],
+        [-26.09265, 29.47055],
+        [-26.09335, 29.47055],
+        [-26.09335, 29.46865]
+      ]
+    }
+  ],
   "staging": [
     {
-      "id": "stage-a",
-      "lat": -35.3648,
-      "lon": 149.1669,
+      "id": "komati-west-service-road",
+      "lat": -26.09065,
+      "lon": 29.46925,
       "image": "site/staging/stage-a.png",
+      "thermal_image": "site/staging/stage-a.png",
+      "image_kind": "scripted_placeholder",
+      "required_sensors": ["rgb", "thermal", "lidar"],
       "truth": "vehicle"
     },
     {
-      "id": "stage-b",
-      "lat": -35.362,
-      "lon": 149.1632,
+      "id": "komati-east-yard",
+      "lat": -26.0891,
+      "lon": 29.47515,
       "image": "site/staging/stage-b.png",
+      "thermal_image": "site/staging/stage-b.png",
+      "image_kind": "scripted_placeholder",
+      "required_sensors": ["rgb", "thermal", "lidar"],
       "truth": "false_alarm"
     }
   ]
