@@ -15,6 +15,7 @@ import type {
   MissionPlan,
   Verification,
 } from '@/contract';
+import { DEFAULT_VEHICLE_ID } from '@/contract';
 import type { SiteModel } from '@/site';
 
 export type AuditKind =
@@ -23,6 +24,7 @@ export type AuditKind =
 
 export interface AuditEvent {
   ts: number;
+  vehicleId: string;
   kind: AuditKind;
   text: string;
 }
@@ -79,8 +81,12 @@ function createMissionStore() {
     state = { ...state, ...patch };
     emit();
   };
-  const audit = (kind: AuditKind, text: string): AuditEvent[] =>
-    [...state.audit.slice(-300), { ts: Date.now(), kind, text }];
+  const audit = (
+    kind: AuditKind,
+    text: string,
+    vehicleId: string = DEFAULT_VEHICLE_ID,
+  ): AuditEvent[] =>
+    [...state.audit.slice(-300), { ts: Date.now(), vehicleId, kind, text }];
 
   return {
     get(): MissionState {
@@ -96,31 +102,31 @@ function createMissionStore() {
       set({ site });
     },
 
-    addAudit(kind: AuditKind, text: string): void {
-      set({ audit: audit(kind, text) });
+    addAudit(kind: AuditKind, text: string, vehicleId: string = DEFAULT_VEHICLE_ID): void {
+      set({ audit: audit(kind, text, vehicleId) });
     },
 
-    ingestAnomaly(a: Anomaly): void {
+    ingestAnomaly(a: Anomaly, vehicleId: string = DEFAULT_VEHICLE_ID): void {
       if (state.anomalies.some((x) => x.id === a.id)) return;
       set({
         anomalies: [...state.anomalies, a],
         audit: audit('anomaly',
           `Satellite anomaly ${a.id} (${a.type}, conf ${(a.confidence * 100).toFixed(0)}%) at ` +
-          `${a.lat.toFixed(5)}, ${a.lon.toFixed(5)}`),
+          `${a.lat.toFixed(5)}, ${a.lon.toFixed(5)}`, vehicleId),
       });
     },
 
-    ingestPlan(p: MissionPlan): void {
+    ingestPlan(p: MissionPlan, vehicleId: string = DEFAULT_VEHICLE_ID): void {
       if (state.proposals.some((x) => x.plan.requestId === p.requestId)) return;
       set({
         proposals: [...state.proposals, { plan: p }],
         selectedRequestId: p.requestId,
         audit: audit('plan',
-          `Plan ${shortId(p.requestId)} proposed — ${p.tools.length} step(s), profile ${p.profile}`),
+          `Plan ${shortId(p.requestId)} proposed — ${p.tools.length} step(s), profile ${p.profile}`, vehicleId),
       });
     },
 
-    ingestVerification(v: Verification): void {
+    ingestVerification(v: Verification, vehicleId: string = DEFAULT_VEHICLE_ID): void {
       const idx = state.proposals.findIndex((x) => x.plan.requestId === v.requestId);
       if (idx === -1) return; // verification for an unknown plan — drop
       if (state.proposals[idx].verification) return;
@@ -132,7 +138,7 @@ function createMissionStore() {
         selectedRequestId: v.requestId,
         audit: audit('verification',
           `Verifier: ${shortId(v.requestId)} → ${v.verdict.toUpperCase()}` +
-          (failed.length ? ` (failed: ${failed.join(', ')})` : '')),
+          (failed.length ? ` (failed: ${failed.join(', ')})` : ''), vehicleId),
       });
     },
 
@@ -164,23 +170,26 @@ function createMissionStore() {
     },
 
     /** Track execution from the authoritative telemetry controlSource. */
-    noteControlSource(src: ControlSource | undefined): void {
+    noteControlSource(
+      src: ControlSource | undefined,
+      vehicleId: string = DEFAULT_VEHICLE_ID,
+    ): void {
       const executing = src === 'planner';
       if (executing === state.executing) return;
       set({
         executing,
         audit: audit('execution',
           executing ? 'Mission execution started (controlSource → planner)'
-                    : 'Mission execution ended (planner released)'),
+                    : 'Mission execution ended (planner released)', vehicleId),
       });
     },
 
-    ingestReport(r: IncidentReport): void {
+    ingestReport(r: IncidentReport, vehicleId: string = DEFAULT_VEHICLE_ID): void {
       if (state.report && state.report.missionId === r.missionId) return;
       set({
         report: r,
         reportResolution: null,
-        audit: audit('report', `Incident report for ${shortId(r.missionId)}: verdict ${r.verdict.toUpperCase()}`),
+        audit: audit('report', `Incident report for ${shortId(r.missionId)}: verdict ${r.verdict.toUpperCase()}`, vehicleId),
       });
     },
 

@@ -49,7 +49,9 @@ function syntheticSite(): SiteModel {
 }
 
 function anomalyAt(lat: number, lon: number, id = 'anom-1'): Anomaly {
-  return { id, lat, lon, type: 'change', confidence: 0.9, thumbnail: 'thumb.png' };
+  return {
+    id, lat, lon, type: 'change', confidence: 0.9, thumbnail: 'thumb.png', source: 'sentinel2',
+  };
 }
 
 const planner = new ScriptedPlanner();

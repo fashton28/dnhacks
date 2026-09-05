@@ -4,7 +4,8 @@ import { Anomaly, MissionPlan } from '../src/contract';
 import { ESCALATE_CONFIDENCE, reportVerdict, writeIncidentReport } from '../src/report';
 
 const anomaly: Anomaly = {
-  id: 'anom-9', lat: -35.36, lon: 149.16, type: 'change', confidence: 0.77, thumbnail: 'x.png',
+  id: 'anom-9', lat: -35.36, lon: 149.16, type: 'change', confidence: 0.77,
+  thumbnail: 'x.png', source: 'sentinel2',
 };
 
 const plan: MissionPlan = {

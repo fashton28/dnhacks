@@ -35,7 +35,8 @@ function mutatedSite(overrides: Partial<{ band: { min: number; max: number }; ce
 }
 
 const anomaly: Anomaly = {
-  id: 'anom-x', lat: 0, lon: 0, type: 'change', confidence: 0.8, thumbnail: 't.png',
+  id: 'anom-x', lat: 0, lon: 0, type: 'change', confidence: 0.8,
+  thumbnail: 't.png', source: 'sentinel2',
 };
 
 const planner = new ScriptedPlanner();

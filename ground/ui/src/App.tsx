@@ -29,6 +29,7 @@ import type {
   Command,
   ManualInput,
 } from '@/contract';
+import { DEFAULT_VEHICLE_ID } from '@/contract';
 
 import {
   DataSourceProvider,
@@ -190,7 +191,7 @@ function GroundControl(): JSX.Element {
     const offT = ds.onTelemetry(t => {
       setTel(t);
       appendFrame(t);
-      missionStore.noteControlSource(t.controlSource);
+      missionStore.noteControlSource(t.controlSource, t.vehicleId);
     });
     const offK = ds.onTracking(t => { setTracking(t); appendFrame(t); });
     const offTxt = ds.onStatusText(s => {
@@ -198,7 +199,7 @@ function GroundControl(): JSX.Element {
       appendFrame(s);
       // While a mission executes, status lines (waypoints, observation, RTL)
       // belong in the mission audit trail too.
-      if (missionStore.get().executing) missionStore.addAudit('status', s.text);
+      if (missionStore.get().executing) missionStore.addAudit('status', s.text, s.vehicleId);
       if (s.severity === 'critical') pushToast({ severity: 'critical', title: s.text });
     });
     const offAck = ds.onAck((a: CommandAck) => {
@@ -207,7 +208,7 @@ function GroundControl(): JSX.Element {
 
     /* mission channels (anomaly → plan → verification → incident report) */
     const offAn = ds.onAnomaly(m => {
-      missionStore.ingestAnomaly(m.anomaly);
+      missionStore.ingestAnomaly(m.anomaly, m.vehicleId);
       appendFrame(m);
       pushToast({ severity: 'warning', title: 'Satellite anomaly detected', message: m.anomaly.id });
       if (!autoSwitchedRef.current) {
@@ -215,10 +216,12 @@ function GroundControl(): JSX.Element {
         setCenterView('mission');
       }
     });
-    const offPl = ds.onMissionPlan(m => { missionStore.ingestPlan(m.plan); appendFrame(m); });
-    const offVf = ds.onVerification(m => { missionStore.ingestVerification(m.verification); appendFrame(m); });
+    const offPl = ds.onMissionPlan(m => { missionStore.ingestPlan(m.plan, m.vehicleId); appendFrame(m); });
+    const offVf = ds.onVerification(m => {
+      missionStore.ingestVerification(m.verification, m.vehicleId); appendFrame(m);
+    });
     const offRp = ds.onIncidentReport(m => {
-      missionStore.ingestReport(m.report);
+      missionStore.ingestReport(m.report, m.vehicleId);
       appendFrame(m);
       pushToast({
         severity: m.report.verdict === 'escalate' ? 'critical' : 'info',
@@ -259,7 +262,9 @@ function GroundControl(): JSX.Element {
 
   /* ----- command helper --------------------------------------------------- */
   const cmd: SendCmd = useCallback(
-    (command, params) => { void ds.sendCommand({ type: 'command', command, params }); },
+    (command, params) => {
+      void ds.sendCommand({ type: 'command', vehicleId: DEFAULT_VEHICLE_ID, command, params });
+    },
     [ds],
   );
 

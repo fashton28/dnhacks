@@ -36,6 +36,7 @@ import type {
   MissionPlanMessage,
   Mode,
   StatusText,
+  SimulationToggles,
   Telemetry,
   TrackingState,
   TrackingStatus,
@@ -43,6 +44,7 @@ import type {
   VerificationMessage,
 } from '@/contract';
 import { PROFILE_SPEED_MPS } from '@/contract';
+import { DEFAULT_VEHICLE_ID } from '@/contract';
 import type { MissionDataSource } from './types';
 
 import { getSiteModel } from '@/site';
@@ -70,6 +72,20 @@ const MISSION_TIME_SCALE = 6;
 /** Scenario beat delays, ms (anomaly → failing plan → its verification →
  *  passing plan → its verification → await approval). */
 const SCENARIO_DELAYS_MS = [5000, 2500, 2000, 2500, 2000];
+
+const DEFAULT_SIMULATION_TOGGLES: SimulationToggles = {
+  simulateGpsLoss: false,
+  simulateRfInterference: false,
+  simulateHostileDrone: false,
+  simulateLinkLoss: false,
+  simulateCameraFail: false,
+  simulateCharging: false,
+  simulateBatteryFault: false,
+  simulateSortieExpiry: false,
+  simulateThermalFail: false,
+  simulateLidarFail: false,
+  simulateNight: false,
+};
 
 type Severity = StatusText['severity'];
 type Phase = 'idle' | 'takeoff' | 'flying' | 'rtl' | 'landing';
@@ -215,6 +231,8 @@ export class MockDataProvider implements MissionDataSource {
 
   // mission planner: while active, controlSource is 'planner'.
   private plannerActive = false;
+  private sortieStartedAt: number | null = null;
+  private simulationToggles: SimulationToggles = { ...DEFAULT_SIMULATION_TOGGLES };
   private mission: MissionExec | null = null;
   private obs: ObservationSim | null = null;
 
@@ -250,6 +268,15 @@ export class MockDataProvider implements MissionDataSource {
     this.stop();
     this.connState = 'disconnected';
     this._emit('conn', this.connState);
+  }
+
+  /** Phase 3 drives the fault scenarios through this stable mock API. */
+  setSimulationToggles(next: Partial<SimulationToggles>): void {
+    Object.assign(this.simulationToggles, next);
+  }
+
+  getSimulationToggles(): Readonly<SimulationToggles> {
+    return this.simulationToggles;
   }
 
   /* high-frequency stick input — bypasses the ack path on purpose */
@@ -320,7 +347,9 @@ export class MockDataProvider implements MissionDataSource {
   }
 
   private log(severity: Severity, text: string): void {
-    this._emit('txt', { type: 'statusText', ts: now(), severity, text });
+    this._emit('txt', {
+      type: 'statusText', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, severity, text,
+    });
   }
 
   /* ---- mission scenario (anomaly → plans → verifications) --------------- */
@@ -359,33 +388,43 @@ export class MockDataProvider implements MissionDataSource {
       if (step === 0) {
         const anomaly = this.deriveAnomaly(site);
         this._scnAnomaly = anomaly;
-        this._emit('anom', { type: 'anomaly', ts: now(), anomaly });
+        this._emit('anom', {
+          type: 'anomaly', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, anomaly,
+        });
         this.log('warning',
           `Satellite change detection flagged ${anomaly.id} (${anomaly.type}, ` +
           `conf ${(anomaly.confidence * 100).toFixed(0)}%)`);
       } else if (step === 1) {
         if (this._scnAnomaly && site.nfz.length > 0) {
           this._scnFailing = this.planner.failingPlan(site, this._scnAnomaly);
-          this._emit('plan', { type: 'missionPlan', ts: now(), plan: this._scnFailing });
+          this._emit('plan', {
+            type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan: this._scnFailing,
+          });
           this.log('info', `Planner proposed mission ${this._scnFailing.requestId}`);
         }
       } else if (step === 2) {
         if (this._scnFailing) {
           const v = verifyMission(this._scnFailing, site, { battery: { remaining: this.s.battery } });
-          this._emit('verf', { type: 'verification', ts: now(), verification: v });
+          this._emit('verf', {
+            type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification: v,
+          });
           this.log(v.verdict === 'rejected' ? 'error' : 'warning',
             `MissionVerifier: ${this._scnFailing.requestId} → ${v.verdict.toUpperCase()}`);
         }
       } else if (step === 3) {
         if (this._scnAnomaly) {
           this._scnPassing = this.planner.passingPlan(site, this._scnAnomaly);
-          this._emit('plan', { type: 'missionPlan', ts: now(), plan: this._scnPassing });
+          this._emit('plan', {
+            type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan: this._scnPassing,
+          });
           this.log('info', `Planner proposed mission ${this._scnPassing.requestId}`);
         }
       } else if (step === 4) {
         if (this._scnPassing) {
           const v = verifyMission(this._scnPassing, site, { battery: { remaining: this.s.battery } });
-          this._emit('verf', { type: 'verification', ts: now(), verification: v });
+          this._emit('verf', {
+            type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification: v,
+          });
           this.log('info',
             `MissionVerifier: ${this._scnPassing.requestId} → ${v.verdict.toUpperCase()} — awaiting operator approval`);
         }
@@ -407,7 +446,7 @@ export class MockDataProvider implements MissionDataSource {
       baked &&
       pointInPolygon({ lat: baked.lat, lon: baked.lon }, site.perimeter) &&
       site.staging.some((sp) => haversineMeters(sp, baked) < 100);
-    if (coherent) return baked;
+    if (coherent) return { ...baked, source: baked.source ?? 'sentinel2' };
     const anchor = site.staging[0] ??
       { lat: (site.home.lat + site.perimeter[0].lat) / 2, lon: (site.home.lon + site.perimeter[0].lon) / 2 };
     return {
@@ -417,6 +456,7 @@ export class MockDataProvider implements MissionDataSource {
       type: baked?.type ?? 'change',
       confidence: baked?.confidence ?? 0.9,
       thumbnail: baked?.thumbnail ?? '',
+      source: baked?.source ?? 'sentinel2',
     };
   }
 
@@ -428,11 +468,13 @@ export class MockDataProvider implements MissionDataSource {
     switch (cmd.command) {
       case 'arm':
         this.s.armed = true;
+        this.sortieStartedAt ??= now();
         this.log('info', 'Vehicle ARMED');
         break;
       case 'disarm':
       case 'emergencyStop':
         this.s.armed = false;
+        this.sortieStartedAt = null;
         this.s.phase = 'idle';
         this.s.mode = 'LOITER';
         this.s.targetAlt = 0;
@@ -554,6 +596,7 @@ export class MockDataProvider implements MissionDataSource {
           // Mock-only convenience so the approve→fly demo is one click; the
           // real companion refuses executePlan while disarmed.
           this.s.armed = true;
+          this.sortieStartedAt = now();
           this.log('info', 'Auto-armed for planned mission (mock)');
         }
         this.plannerActive = true;
@@ -573,11 +616,18 @@ export class MockDataProvider implements MissionDataSource {
           this.log('warning', 'Plan aborted — position hold');
         }
         break;
+      case 'continueMission':
+        // Operator-only release from a hostile-drone hold. Phase 3 supplies
+        // the held-state transition; the baseline mock acknowledges the gate.
+        this.log('warning', 'Operator approved mission continuation');
+        break;
       default:
         ok = false;
         message = 'Unknown command';
     }
-    const ack: CommandAck = { type: 'ack', ts: now(), command: cmd.command, success: ok, message };
+    const ack: CommandAck = {
+      type: 'ack', ts: now(), vehicleId: cmd.vehicleId, command: cmd.command, success: ok, message,
+    };
     setTimeout(() => this._emit('ack', ack), 60);
     return Promise.resolve(ack);
   }
@@ -719,6 +769,7 @@ export class MockDataProvider implements MissionDataSource {
       type: 'change',
       confidence: 0.8,
       thumbnail: '',
+      source: 'drone_survey',
     };
     // Ground truth comes from the SITE staging data, never hardcoded.
     let staging: SiteStagingPoint | null = null;
@@ -748,7 +799,9 @@ export class MockDataProvider implements MissionDataSource {
     const plan = m.plan;
     setTimeout(() => {
       const report = writeIncidentReport(anomaly, plan, observation);
-      this._emit('rept', { type: 'incidentReport', ts: now(), report });
+      this._emit('rept', {
+        type: 'incidentReport', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, report,
+      });
       this.log(report.verdict === 'escalate' ? 'critical' : 'info',
         `Incident report ${report.missionId}: ${report.verdict.toUpperCase()}`);
     }, 3000);
@@ -777,6 +830,7 @@ export class MockDataProvider implements MissionDataSource {
       if (s.relAlt < 0.12) {
         s.relAlt = 0;
         s.armed = false;
+        this.sortieStartedAt = null;
         s.phase = 'idle';
         s.mode = 'LOITER';
         if (this.plannerActive) {
@@ -866,6 +920,7 @@ export class MockDataProvider implements MissionDataSource {
     this._emit('tel', {
       type: 'telemetry',
       ts: now(),
+      vehicleId: DEFAULT_VEHICLE_ID,
       armed: s.armed,
       mode: s.mode,
       controlSource: this.manual.active
@@ -875,12 +930,32 @@ export class MockDataProvider implements MissionDataSource {
           : this.track.state === 'locked'
             ? 'tracking'
             : 'auto',
+      navSource: 'gps',
+      gpsHealth: { fix: s.fix, sats: s.sats, hdop: s.hdop },
+      failsafeState: 'none',
+      failsafeReason: '',
       attitude: { roll: s.roll, pitch: s.pitch, yaw: s.heading },
       position: { lat: s.lat, lon: s.lon, relAlt: s.relAlt, absAlt: s.relAlt + 32 },
       velocity: { groundspeed: s.groundspeed, verticalSpeed: s.vspeed },
       heading: s.heading,
-      battery: { voltage: s.voltage, current: s.current, remaining: s.battery },
+      battery: {
+        soc_pct: s.battery,
+        voltage_v: s.voltage,
+        current_a: s.current,
+        cell_delta_v: 0.018,
+        temp_c: 31,
+        remaining_s: Math.max(0, Math.round((s.battery / 100) * 1500)),
+        charge_state: s.armed ? 'discharging' : 'charged',
+        voltage: s.voltage,
+        current: s.current,
+        remaining: s.battery,
+      },
       gps: { fixType: s.fix, satellites: s.sats, hdop: s.hdop },
+      sortie: this.sortieStartedAt === null ? null : {
+        elapsed_s: Math.max(0, (now() - this.sortieStartedAt) / 1000),
+        cap_s: 480,
+        must_rtl_by_s: 420,
+      },
       home: { lat: this.homeLat(), lon: this.homeLon(), distance: homeDist },
       link: { rssi: s.rssi, latencyMs: s.latency },
     });
@@ -905,6 +980,7 @@ export class MockDataProvider implements MissionDataSource {
         this._emit('trk', {
           type: 'tracking',
           ts: now(),
+          vehicleId: DEFAULT_VEHICLE_ID,
           state: o.detected ? 'locked' : 'searching',
           targets: o.detected ? [target] : [],
           lockedTargetId: o.detected ? 901 : null,
@@ -963,6 +1039,7 @@ export class MockDataProvider implements MissionDataSource {
     this._emit('trk', {
       type: 'tracking',
       ts: now(),
+      vehicleId: DEFAULT_VEHICLE_ID,
       state: tr.state,
       targets: tr.targets,
       lockedTargetId: tr.lockedTargetId,

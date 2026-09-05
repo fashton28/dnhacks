@@ -258,6 +258,7 @@ export function detectAnomalies(
       lon,
       type: 'change',
       confidence: blobConfidence(blob),
+      source: 'sentinel2',
       thumbnail: wantThumbs ? thumbnailFor(after, width, height, blob) : '',
     };
   });

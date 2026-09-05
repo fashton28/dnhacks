@@ -26,6 +26,7 @@ const anomaly: Anomaly = {
   type: 'change',
   confidence: 0.85,
   thumbnail: 'site/staging/stage-a.png',
+  source: 'sentinel2',
 };
 
 function runCli(args: string[]): string {

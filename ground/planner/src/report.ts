@@ -31,6 +31,12 @@ export function reportVerdict(observation: ObservationSummary): IncidentReport['
 
 function describeTool(t: PlanTool): string {
   switch (t.tool) {
+    case 'follow':
+      return `follow track ${t.track_id} [${t.profile}]`;
+    case 'orbit':
+      return `orbit track ${t.track_id} [${t.profile}]`;
+    case 'goto_relative':
+      return `goto relative (${t.dx}, ${t.dy}, ${t.dz}) m`;
     case 'goto_gps':
       return `goto (${t.lat.toFixed(6)}, ${t.lon.toFixed(6)}) at ${t.alt} m AGL` +
         (t.profile ? ` [${t.profile}]` : '');
