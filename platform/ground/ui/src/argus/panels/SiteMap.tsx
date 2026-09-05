@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any -- MapLibre GL event/feature payloads are untyped in this panel (teammate code, kept as-is) */
 /* ============================================================================
  * SiteMap — satellite operations map of the Site (MapLibre GL on Esri World Imagery).
  * ----------------------------------------------------------------------------
