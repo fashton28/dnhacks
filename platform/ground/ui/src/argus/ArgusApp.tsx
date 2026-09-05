@@ -25,6 +25,10 @@ import { DetectionsPanel, SpecPanel, ValidatorPanel, ReportPanel } from './panel
 import { ArgusTelemetry } from './panels/ArgusTelemetry';
 import { ArgusStatusBar } from './panels/ArgusStatusBar';
 import { ClampBanner } from './panels/ClampBanner';
+import { GIMBAL_MAX, GIMBAL_MIN } from './panels/OpsPanel';
+import { useArgusDocument } from './Brand';
+import { Video, Crosshair, Globe, Keyboard } from 'lucide-react';
+import './argus.css';
 
 type CenterView = 'flight' | 'mission' | 'world';
 interface ToastItem { id: number; severity: 'info' | 'success' | 'warning' | 'error' | 'critical'; title: string; message?: string }
@@ -50,6 +54,7 @@ function agentPlanToRoute(mission_id: string, plan: AgentPlan): MissionPlan {
 }
 
 export default function ArgusApp(): JSX.Element {
+  useArgusDocument();
   const settings = useSettings();
   const st = useArgus;
   const [center, setCenter] = useState<CenterView>('flight');
@@ -157,7 +162,14 @@ export default function ArgusApp(): JSX.Element {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Hub payloads are dynamically shaped
   const post = useCallback(async (path: string, body: unknown, okMsg?: string): Promise<any> => {
     const r = await hub.postJson(path, body);
-    if (!r.ok) { toast({ severity: 'error', title: 'Hub refused', message: r.text.slice(0, 160) }); log('error', `${path}: ${r.text.slice(0, 160)}`); throw new Error(r.text); }
+    if (!r.ok) {
+      const j = r.json as { detail?: unknown; verdict?: string; violations?: { rule: string; detail: string }[] } | null;
+      const detail = j && typeof j === 'object' && Array.isArray(j.violations)
+        ? `Safety Validator rejected the plan: ${j.violations.map((v) => `${v.rule.replace(/_/g, ' ')} (${v.detail})`).join('; ')}`
+        : j && typeof j === 'object' && 'detail' in j ? (typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail)) : (typeof r.text === 'string' ? r.text : JSON.stringify(r.text));
+      const msg = String(detail).slice(0, 220);
+      toast({ severity: 'error', title: 'Hub refused', message: msg }); log('error', `${path}: ${msg}`); throw new Error(msg);
+    }
     if (okMsg) log('info', okMsg);
     return r.json;
   }, [toast, log]);
@@ -202,7 +214,26 @@ export default function ArgusApp(): JSX.Element {
       const a = await hub.sendCommand({ type: 'command', vehicleId: id, command: 'disengageManual' });
       st.getState().setManualActive(false); log('info', a.message);
     },
+    gimbal(pitchDeg: number) {
+      const id = st.getState().selected; if (!id) return;
+      const v = Math.round(Math.max(GIMBAL_MIN, Math.min(GIMBAL_MAX, pitchDeg)));
+      st.getState().setGimbalPending(v);
+      gimbalTarget.current = v;
+      if (gimbalTimer.current === null) {
+        gimbalTimer.current = window.setTimeout(async () => {
+          gimbalTimer.current = null;
+          const target = gimbalTarget.current;
+          if (target === null) return;
+          try { await hub.postJson(`/drones/${id}/command`, { type: 'look_at', pitch_deg: target }); }
+          catch { /* the Hub logs refusals; telemetry stays authoritative */ }
+          // telemetry takes over once it catches up; clear the optimistic value after a grace period either way
+          window.setTimeout(() => { if (gimbalTarget.current === target) { st.getState().setGimbalPending(null); gimbalTarget.current = null; } }, 1200);
+        }, 100);
+      }
+    },
   }), [post, toast, log, base, st]);
+  const gimbalTimer = useRef<number | null>(null);
+  const gimbalTarget = useRef<number | null>(null);
 
   const dispatchId = useCallback(async (id: string) => {
     st.getState().setDispatching(id); setCenter('mission');
@@ -238,6 +269,7 @@ export default function ArgusApp(): JSX.Element {
       if (k === 'escape') { setHelp(false); return; }
       if (k === 'h') { if (st.getState().manualActive) void act.manualRelease(); return; }
       if (k === 'r') { void act.returnHome(); return; }
+      if (k === '[' || k === ']') { const cur = st.getState().gimbalPending ?? (st.getState().selected ? st.getState().fleet[st.getState().selected!]?.gimbal_pitch_deg : undefined) ?? 45; act.gimbal(cur + (k === ']' ? 5 : -5)); return; }
       if (['w', 'a', 's', 'd', 'q', 'e', 'arrowleft', 'arrowright'].includes(k)) {
         e.preventDefault();
         keys.current.add(k);
@@ -277,7 +309,7 @@ export default function ArgusApp(): JSX.Element {
         {/* CENTER */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0, minWidth: 0 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 'none' }}>
-            <Tabs size="sm" value={center} onChange={(id) => setCenter(id as CenterView)} items={[{ id: 'flight', label: 'Flight ops' }, { id: 'mission', label: 'Mission' }, { id: 'world', label: 'World view' }]} />
+            <Tabs size="sm" value={center} onChange={(id) => setCenter(id as CenterView)} items={[{ id: 'flight', label: 'Flight', icon: <Video size={13} /> }, { id: 'mission', label: 'Mission', icon: <Crosshair size={13} /> }, { id: 'world', label: 'World', icon: <Globe size={13} /> }]} />
             {detections.length > 0 && <Badge tone="caution" mono>{detections.length} DETECTION{detections.length === 1 ? '' : 'S'}</Badge>}
             {mission && <Badge tone="accent" mono>MISSION {mission.phase.toUpperCase()} · WP {mission.next_waypoint}</Badge>}
           </div>
@@ -291,7 +323,7 @@ export default function ArgusApp(): JSX.Element {
           {center === 'world' ? null : center === 'flight' ? (
             <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: 'minmax(0, 1.45fr) minmax(0, 1fr)', gap: 8 }}>
               <div style={{ borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', minHeight: 0 }}>
-                <ArgusVideo hubBase={base} lastFrameTs={lastFrame.current + frameTick * 0} />
+                <ArgusVideo hubBase={base} lastFrameTs={lastFrame.current + frameTick * 0} onGimbal={(p) => act.gimbal(p)} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1fr)', gap: 8, minHeight: 0 }}>
                 <MissionMap site={site} tel={tel} trail={trail} anomalies={anomalies} plan={route} executing={!!mission} />
@@ -323,12 +355,14 @@ export default function ArgusApp(): JSX.Element {
       </div>
 
       {help && (
-        <div onClick={() => setHelp(false)} style={{ position: 'absolute', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1300, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <div onClick={(e) => e.stopPropagation()} style={{ background: 'var(--surface-panel)', border: '1px solid var(--border-default)', borderRadius: 10, padding: 16, width: 380, fontSize: 12.5, lineHeight: 1.7 }}>
-            <div style={{ fontWeight: 700, marginBottom: 6 }}>Keyboard</div>
-            <div><b>1 2 3</b> select Drone · <b>R</b> return home</div>
-            <div><b>W/S</b> forward/back · <b>A/D</b> strafe · <b>Q/E</b> down/up · <b>◄ ►</b> yaw (takes Manual Control)</div>
-            <div><b>H</b> release Manual Control (paused Mission resumes) · <b>?</b> this help · <b>Esc</b> close</div>
+        <div onClick={() => setHelp(false)} style={{ position: 'absolute', inset: 0, background: 'rgba(4,6,9,0.6)', zIndex: 1300, display: 'flex', alignItems: 'center', justifyContent: 'center', backdropFilter: 'blur(3px)' }}>
+          <div className="a-in" onClick={(e) => e.stopPropagation()} style={{ background: 'var(--surface-panel)', border: '1px solid var(--border-default)', borderRadius: 10, padding: '14px 16px 16px', width: 400, boxShadow: 'var(--shadow-modal)' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}><Keyboard size={14} style={{ color: 'var(--text-secondary)' }} /><span className="a-title">Keyboard</span></div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '6px 14px', alignItems: 'center' }}>
+              {([['1 2 3', 'Select a Drone'], ['R', 'Return the selected Drone to its pad'], ['W S · A D', 'Forward and back · strafe (takes Manual Control)'], ['Q E', 'Down · up'], ['◄ ►', 'Yaw'], ['[ ]', 'Camera up · down, 5° steps'], ['H', 'Release Manual Control; a paused Mission resumes'], ['?  Esc', 'This help · close']] as const).map(([k, v]) => (
+                <React.Fragment key={k}><span className="a-key" style={{ height: 18, fontSize: 10, padding: '0 6px', justifySelf: 'start' }}>{k}</span><span className="a-body">{v}</span></React.Fragment>
+              ))}
+            </div>
           </div>
         </div>
       )}
