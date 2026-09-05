@@ -11,9 +11,15 @@ orchestrator uses to talk to the ArduPilot flight controller:
   * cache the latest of each interesting MAVLink message and translate them
     into the contract ``telemetry`` dict (shared.py shapes) plus a
     ``VehicleState`` snapshot the control core reasons about;
-  * run the discrete command set (arm/disarm/setMode/takeoff/land/rtl); and
+  * run the discrete command set (arm/disarm/setMode/takeoff/land/rtl);
   * stream BODY-frame velocity setpoints (``VelocitySetpoint``) as
-    SET_POSITION_TARGET_LOCAL_NED at 10-20 Hz.
+    SET_POSITION_TARGET_LOCAL_NED at 10-20 Hz;
+  * fly GUIDED global position targets (``goto_global`` ->
+    SET_POSITION_TARGET_GLOBAL_INT, speed via DO_CHANGE_SPEED) for the
+    mission planner; and
+  * upload the site perimeter as an ArduPilot polygon inclusion fence on
+    request (``upload_geofence`` -- the orchestrator calls it after connect
+    with the loaded site perimeter; this module never reads the site file).
 
 This is the ONLY companion module (besides packaging) allowed to import
 hardware libraries. Pure-logic guidance/manual/safety never import this.
@@ -29,20 +35,30 @@ is the guidance/manual layer's job (it owns the envelope and the standoff hard
 limit). This layer simply refuses to send a non-finite or absurd value and
 treats ``valid=False`` as a hard zero hold. Defaults to the safe (zero) command
 on any error.
+
+EXCEPTION -- ``goto_global`` DOES clamp: global position targets bypass the
+orchestrator's per-tick body-velocity clamp (``_clamp_setpoint`` only sees
+VelocitySetpoints), so the "clamped twice" rule's second clamp for the planner
+path lives here: speed is clamped to ``[0, Limits.max_speed]`` (never raised)
+and altitude to ``Limits.max_altitude`` immediately before the wire.
 ============================================================================
 """
 from __future__ import annotations
 
+import logging
 import math
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Sequence, Tuple
 
 from eis_companion.types import (
     ControlSource,
+    Limits,
     VehicleState,
     VelocitySetpoint,
     now,
 )
+
+log = logging.getLogger("eis.mavlink")
 
 # pymavlink is hardware-facing; import lazily-tolerant so that merely importing
 # this module on a dev box without it gives a clear error only when used.
@@ -74,6 +90,21 @@ _TYPEMASK_VEL_YAWRATE = (
     # bit 3,4,5 (velocity) and bit 11 (yaw_rate) are left ENABLED (0)
 )
 
+# Typemask for SET_POSITION_TARGET_GLOBAL_INT position-only targets (the
+# planner's goto path): everything ignored EXCEPT the x/y/z position fields.
+# The velocity fields of a position target are a feed-forward term in
+# ArduPilot, NOT a cruise-speed cap, so speed is set separately via
+# MAV_CMD_DO_CHANGE_SPEED (which GUIDED honours) and the velocity bits stay
+# ignored here.
+_TYPEMASK_POS_ONLY = (
+    (1 << 3) | (1 << 4) | (1 << 5)          # ignore velocity
+    | (1 << 6) | (1 << 7) | (1 << 8)        # ignore acceleration
+    | (1 << 9)                              # ignore force
+    | (1 << 10)                             # ignore yaw angle
+    | (1 << 11)                             # ignore yaw rate
+    # bit 0,1,2 (position) are left ENABLED (0)
+)
+
 # Data streams we ask the FC to emit, and the rate (Hz). ArduPilot honours
 # REQUEST_DATA_STREAM; on newer firmware SET_MESSAGE_INTERVAL is preferred, so
 # we send both for robustness.
@@ -95,6 +126,7 @@ class Vehicle:
         baud: int = 115200,
         source_system: int = 255,
         target_system: int = 1,
+        limits: Optional[Limits] = None,
     ) -> None:
         # Connection parameters may be supplied at construction (the orchestrator
         # builds Vehicle(connection=..., baud=..., source_system=..., target_system=...))
@@ -102,6 +134,10 @@ class Vehicle:
         self._connection = connection
         self._init_baud = baud
         self._init_source_system = source_system
+        # The hard safety envelope for the paths that clamp AT THIS LAYER
+        # (goto_global). Defaults to the conservative stock Limits; the
+        # orchestrator passes / updates its configured copy.
+        self._limits: Limits = limits if limits is not None else Limits()
         self._master: Any = None
         self._connected: bool = False
         self._target_system: int = target_system
@@ -183,6 +219,15 @@ class Vehicle:
     def master(self) -> Any:
         """The raw pymavlink connection (for callers that need extras)."""
         return self._master
+
+    @property
+    def limits(self) -> Limits:
+        """The hard safety envelope this layer clamps ``goto_global`` to."""
+        return self._limits
+
+    def update_limits(self, limits: Limits) -> None:
+        """Swap the safety envelope (operator edits at runtime, like SafetyManager)."""
+        self._limits = limits
 
     def close(self) -> None:
         """Close the link. Safe to call when never connected."""
@@ -654,6 +699,287 @@ class Vehicle:
     def hold(self) -> None:
         """Convenience: send a single zero-velocity hold frame."""
         self.send_body_velocity(VelocitySetpoint.hold())
+
+    # ----------------------------------------------------------------------
+    # GUIDED global position targets (the mission-planner output path)
+    # ----------------------------------------------------------------------
+    def goto_global(
+        self,
+        lat: float,
+        lon: float,
+        rel_alt: float,
+        speed: float,
+        *,
+        limits: Optional[Limits] = None,
+    ) -> bool:
+        """Fly to a global position in GUIDED: SET_POSITION_TARGET_GLOBAL_INT.
+
+        Sends a position-only target in MAV_FRAME_GLOBAL_RELATIVE_ALT_INT
+        (lat/lon 1e7-scaled ints, altitude metres relative to home). The
+        groundspeed for the leg is set FIRST via MAV_CMD_DO_CHANGE_SPEED
+        (param1=1 groundspeed, param3=-1 throttle unchanged): ArduPilot GUIDED
+        honours DO_CHANGE_SPEED as the horizontal speed limit for subsequent
+        position targets, whereas the velocity fields of a position target are
+        a feed-forward term, not a cruise-speed cap -- so those stay masked out
+        (``_TYPEMASK_POS_ONLY``).
+
+        SAFETY -- this method clamps (the "clamped twice" rule's second clamp
+        for the planner path, which bypasses the orchestrator's body-velocity
+        clamp): ``speed`` to ``[0, Limits.max_speed]`` -- never raised -- and
+        ``rel_alt`` to ``[0, Limits.max_altitude]``.
+        A clamped speed of <= 0 (a profile the config floor degraded to zero
+        means "no motion, safe direction") REFUSES the whole leg: ArduPilot
+        DENIES non-positive DO_CHANGE_SPEED, so sending the position target
+        anyway would fly it at the FC's previous/default guided speed (SITL
+        WPNAV_SPEED 10 m/s > the 8 m/s hard cap) instead of not moving.
+        Nothing goes on the wire; the caller should hold.
+        Non-finite or out-of-range lat/lon are REFUSED (returns False, nothing
+        sent) -- never coerced toward (0, 0). The caller keeps GUIDED mode +
+        preconditions; a repeated target is fine (ArduPilot latches the last).
+
+        Returns True when the target was sent, False otherwise. Never raises.
+        """
+        if not self._connected or self._master is None:
+            log.warning("goto_global refused: not connected")
+            return False
+
+        try:
+            lat_f, lon_f = float(lat), float(lon)
+        except (TypeError, ValueError):
+            log.warning("goto_global refused: non-numeric lat/lon %r/%r", lat, lon)
+            return False
+        if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
+            log.warning("goto_global refused: non-finite lat/lon %r/%r", lat, lon)
+            return False
+        if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+            log.warning("goto_global refused: lat/lon out of range %s/%s", lat_f, lon_f)
+            return False
+
+        lim = limits if limits is not None else self._limits
+        # Second clamp before the wire (rule: every setpoint clamped twice).
+        # NEVER raise a requested speed: clamp to [0, max_speed] only.
+        # Limits.clamp_speed's min_speed floor exists for guidance usability;
+        # flooring here would turn a profile the config floor degraded to 0.0
+        # ("no motion, safe direction") into actual motion at min_speed.
+        speed_c = max(0.0, min(_finite(speed), float(lim.max_speed)))
+        alt_c = max(0.0, min(_finite(rel_alt), float(lim.max_altitude)))
+
+        if speed_c <= 0.0:
+            # ArduPilot DENIES non-positive DO_CHANGE_SPEED: the wire value
+            # would be "correct" but the leg would fly at the FC's previous/
+            # default guided speed instead of NOT MOVING. Refuse outright.
+            log.warning(
+                "goto_global refused: leg speed %.3f clamps to %.3f <= 0 "
+                "(no motion) -- position target not sent", float(speed), speed_c,
+            )
+            return False
+
+        try:
+            # 1. Leg groundspeed (GUIDED honours DO_CHANGE_SPEED).
+            self._command_long(
+                mavutil.mavlink.MAV_CMD_DO_CHANGE_SPEED,
+                1.0,          # param1: speed type 1 = groundspeed
+                speed_c,      # param2: speed m/s (already clamped)
+                -1.0,         # param3: throttle unchanged
+            )
+            # 2. The position target itself.
+            self._master.mav.set_position_target_global_int_send(
+                0,                              # time_boot_ms (0 = now)
+                self._target_system,
+                self._target_component,
+                mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
+                _TYPEMASK_POS_ONLY,
+                int(round(lat_f * 1e7)),        # lat_int (degE7)
+                int(round(lon_f * 1e7)),        # lon_int (degE7)
+                float(alt_c),                   # alt (m, relative to home)
+                0.0, 0.0, 0.0,                  # vx, vy, vz (ignored)
+                0.0, 0.0, 0.0,                  # ax, ay, az (ignored)
+                0.0,                            # yaw (ignored)
+                0.0,                            # yaw_rate (ignored)
+            )
+        except Exception:
+            log.exception("goto_global send failed")
+            return False
+        return True
+
+    # ----------------------------------------------------------------------
+    # Parameter writes (best-effort, never fatal)
+    # ----------------------------------------------------------------------
+    def set_param(
+        self,
+        name: str,
+        value: float,
+        *,
+        retries: int = 3,
+        timeout: float = 1.0,
+    ) -> bool:
+        """PARAM_SET ``name`` = ``value`` and wait for the PARAM_VALUE echo.
+
+        Best-effort: retries a few times, logs and returns False on silence or
+        error -- NEVER raises (a SITL without some param must not kill the
+        connection). The echo is matched by param_id only; ArduPilot echoes
+        the value it actually stored.
+        """
+        if not self._connected or self._master is None:
+            log.warning("set_param(%s) skipped: not connected", name)
+            return False
+        try:
+            for _ in range(max(1, int(retries))):
+                self._master.mav.param_set_send(
+                    self._target_system,
+                    self._target_component,
+                    name.encode("ascii"),
+                    float(value),
+                    mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
+                )
+                msg = self._master.recv_match(
+                    type="PARAM_VALUE", blocking=True, timeout=timeout,
+                )
+                while msg is not None:
+                    got = getattr(msg, "param_id", "")
+                    if isinstance(got, bytes):
+                        got = got.decode("ascii", errors="replace")
+                    if got.rstrip("\x00") == name:
+                        return True
+                    msg = self._master.recv_match(
+                        type="PARAM_VALUE", blocking=True, timeout=timeout,
+                    )
+        except Exception:
+            log.exception("set_param(%s) failed", name)
+            return False
+        log.warning("set_param(%s=%s) not acknowledged; continuing", name, value)
+        return False
+
+    # ----------------------------------------------------------------------
+    # Geofence upload (site perimeter -> ArduPilot polygon inclusion fence)
+    # ----------------------------------------------------------------------
+    def upload_geofence(
+        self,
+        perimeter: Sequence[Tuple[float, float]],
+        *,
+        item_timeout: float = 2.0,
+    ) -> bool:
+        """Upload ``perimeter`` as an ArduPilot polygon INCLUSION fence.
+
+        The orchestrator calls this once after ``connect()`` with the loaded
+        site perimeter (list of ``(lat, lon)`` tuples, open ring) -- this
+        module never reads the site file itself.
+
+        Uses the MAVLink mission protocol with MAV_MISSION_TYPE_FENCE:
+        MISSION_COUNT, answer each MISSION_REQUEST(_INT) with a
+        MISSION_ITEM_INT of MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION
+        (param1 = total vertex count, x/y = degE7), then wait for the final
+        MISSION_ACK. On success, best-effort PARAM_SET of FENCE_TYPE=5
+        (bit0 max-altitude + bit2 polygon; the circle bit is deliberately
+        dropped -- a 60 m circle would fight a plant-scale polygon) and
+        FENCE_ENABLE=1.
+
+        Graceful on SITL quirks: a NACK, a timeout, or an unacknowledged param
+        logs and returns False (or True with a warning when only the params
+        went unanswered) -- it NEVER raises, so a fence hiccup cannot take the
+        FC connection down.
+
+        Returns True when the FC accepted the fence upload.
+        """
+        try:
+            if not self._connected or self._master is None:
+                log.warning("upload_geofence skipped: not connected")
+                return False
+
+            ring = list(perimeter)
+            if len(ring) < 3:
+                log.warning(
+                    "upload_geofence refused: perimeter needs >= 3 vertices, got %d",
+                    len(ring),
+                )
+                return False
+            for latlon in ring:
+                lat_f, lon_f = float(latlon[0]), float(latlon[1])
+                if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
+                    log.warning("upload_geofence refused: non-finite vertex %r", latlon)
+                    return False
+                if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
+                    log.warning("upload_geofence refused: vertex out of range %r", latlon)
+                    return False
+
+            count = len(ring)
+            self._master.mav.mission_count_send(
+                self._target_system,
+                self._target_component,
+                count,
+                mavutil.mavlink.MAV_MISSION_TYPE_FENCE,
+            )
+
+            sent = 0
+            while sent < count:
+                msg = self._master.recv_match(
+                    type=["MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK"],
+                    blocking=True,
+                    timeout=item_timeout,
+                )
+                if msg is None:
+                    log.warning(
+                        "upload_geofence: no MISSION_REQUEST after item %d/%d; "
+                        "giving up (fence NOT loaded)", sent, count,
+                    )
+                    return False
+                if msg.get_type() == "MISSION_ACK":
+                    # An early ack mid-transfer is a rejection.
+                    log.warning(
+                        "upload_geofence: FC rejected transfer early (MISSION_ACK "
+                        "type=%s)", getattr(msg, "type", "?"),
+                    )
+                    return False
+                seq = int(getattr(msg, "seq", sent))
+                if not 0 <= seq < count:
+                    log.warning("upload_geofence: FC requested bad seq %d", seq)
+                    return False
+                lat_f, lon_f = float(ring[seq][0]), float(ring[seq][1])
+                # ArduPilot accepts MISSION_ITEM_INT replies to either request
+                # flavour (it speaks the INT protocol).
+                self._master.mav.mission_item_int_send(
+                    self._target_system,
+                    self._target_component,
+                    seq,
+                    mavutil.mavlink.MAV_FRAME_GLOBAL,
+                    mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                    0,                          # current
+                    0,                          # autocontinue
+                    float(count),               # param1: polygon vertex count
+                    0.0, 0.0, 0.0,              # param2..4 (unused)
+                    int(round(lat_f * 1e7)),    # x: lat degE7
+                    int(round(lon_f * 1e7)),    # y: lon degE7
+                    0.0,                        # z (unused for fence vertices)
+                    mavutil.mavlink.MAV_MISSION_TYPE_FENCE,
+                )
+                sent += 1
+
+            ack = self._master.recv_match(
+                type="MISSION_ACK", blocking=True, timeout=item_timeout,
+            )
+            if ack is None:
+                log.warning("upload_geofence: no final MISSION_ACK; fence state unknown")
+                return False
+            if int(getattr(ack, "type", -1)) != int(
+                mavutil.mavlink.MAV_MISSION_ACCEPTED
+            ):
+                log.warning(
+                    "upload_geofence: FC NACKed fence (MISSION_ACK type=%s)",
+                    getattr(ack, "type", "?"),
+                )
+                return False
+
+            log.info("upload_geofence: %d-vertex inclusion fence accepted", count)
+
+            # Best-effort enable: log + continue on NACK/silence (SITL may lack
+            # or rename params; the fence itself is already stored).
+            # FENCE_TYPE bit0=max-alt(1) | bit2=polygon(4) -> 5.
+            self.set_param("FENCE_TYPE", 5.0)
+            self.set_param("FENCE_ENABLE", 1.0)
+            return True
+        except Exception:
+            log.exception("upload_geofence failed; continuing without FC fence")
+            return False
 
 
 def _finite(v: float) -> float:

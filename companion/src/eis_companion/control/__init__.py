@@ -4,11 +4,12 @@ eis_companion.control -- the safety-critical control core.
 Pure-logic modules (numpy + stdlib only, no hardware) so the whole control loop
 unit-tests with no FC, camera, or detector:
 
-  pid       PID controller (clamp + anti-windup, dt-aware, reset)
-  distance  monocular distance-from-bbox-height (pinhole geometry)
-  tracker   single-target multi-object tracker (IoU + Kalman, stable ids, lock)
-  guidance  visual-servoing -> BODY-frame VelocitySetpoint (HARD standoff)
-  manual    manual stick -> BODY-frame VelocitySetpoint (deadzone + watchdog)
+  pid          PID controller (clamp + anti-windup, dt-aware, reset)
+  distance     monocular distance-from-bbox-height (pinhole geometry)
+  tracker      single-target multi-object tracker (IoU + Kalman, stable ids, lock)
+  guidance     visual-servoing -> BODY-frame VelocitySetpoint (HARD standoff)
+  manual       manual stick -> BODY-frame VelocitySetpoint (deadzone + watchdog)
+  planner_exec MissionPlan executor -> GotoTarget / VelocitySetpoint per tick
 """
 from __future__ import annotations
 
@@ -21,6 +22,12 @@ from .distance import (
 from .guidance import Guidance
 from .manual import ManualPilot
 from .pid import PID
+from .planner_exec import (
+    GotoTarget,
+    PlanOutputKind,
+    PlannerExecutor,
+    PlannerOutput,
+)
 from .tracker import (
     DetectedTargetView,
     Track,
@@ -42,4 +49,8 @@ __all__ = [
     "iou",
     "Guidance",
     "ManualPilot",
+    "PlannerExecutor",
+    "PlannerOutput",
+    "PlanOutputKind",
+    "GotoTarget",
 ]

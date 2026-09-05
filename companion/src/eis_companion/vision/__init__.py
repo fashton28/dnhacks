@@ -12,9 +12,12 @@ work cleanly from the rest of the companion.
 from .capture import Capture
 from .detector import PersonDetector
 from .sim_source import SimTargetSource
+from .staging import StagingObserver, StagingPoint
 
 __all__ = [
     "Capture",
     "PersonDetector",
     "SimTargetSource",
+    "StagingObserver",
+    "StagingPoint",
 ]

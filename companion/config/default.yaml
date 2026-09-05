@@ -78,3 +78,13 @@ safety:
   critical_battery_action: land
   min_battery_remaining:  20.0   # % gate enforced at arming
   rc_override_primacy:    true   # documented invariant; never disabled
+
+# --- Mission planner (power-plant security retrofit) ------------------------
+planner:
+  # Cruise speed per mission profile, m/s. Mirrors the shared contract's
+  # PROFILE_SPEED_MPS; clamped under the hard 8 m/s cap at load and re-clamped
+  # to limits.max_speed per emitted setpoint (profiles only TIGHTEN).
+  profile_speed_mps: { slow: 2.0, standard: 4.0, fast: 6.0 }
+  site_file: ""                   # "" -> EIS_SITE_FILE env, else site/site.json
+  arrival_radius_m: 2.0           # goto_gps arrival threshold (m)
+  staging_arrival_radius_m: 15.0  # staging-point vision trigger radius (m)

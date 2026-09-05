@@ -49,6 +49,7 @@ detect = [
 # Test suite (pure-logic + config + API unit tests; no hardware).
 dev = [
   "pytest==8.2.0",
+  "hypothesis==6.100.1",   # property tests for the planner executor safety clamps
 ]
 # Jetson / JetPack note: torch, torchvision, and TensorRT are provided by
 # NVIDIA JetPack (L4T) on the Orin Nano -- do NOT pip install them there. These

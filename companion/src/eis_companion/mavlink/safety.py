@@ -8,11 +8,12 @@ Pure-logic safety helpers shared by the orchestrator. NO hardware imports
 Responsibilities
   1. Ground-link DEADMAN. The ground station sends a heartbeat (any inbound
      control-WS message counts). If nothing arrives within
-     ``ground_link_timeout_ms`` *while tracking or manual is the active control
-     source*, guidance must stop, the setpoint must be zeroed/held, and we
-     escalate the failsafe action (HOLD -> RTL). Auto guidance with no ground
-     operator present is intentionally NOT a deadman trigger on its own -- the
-     FC's own GCS failsafe (FS_GCS_ENABLE) is the backstop.
+     ``ground_link_timeout_ms`` *while tracking, manual or planner is the
+     active control source*, guidance must stop, the setpoint must be
+     zeroed/held, and we escalate the failsafe action (HOLD -> RTL). Auto
+     guidance with no ground operator present is intentionally NOT a deadman
+     trigger on its own -- the FC's own GCS failsafe (FS_GCS_ENABLE) is the
+     backstop.
   2. ARMING PRECONDITIONS. A conservative checklist evaluated against a
      ``VehicleState`` (+ a couple of raw fields the FC layer fills in) before we
      let the operator arm: GPS fix, EKF/health, battery, geofence, not already
@@ -161,14 +162,17 @@ class SafetyManager:
         """Evaluate the ground-link deadman for the current control source.
 
         The deadman only *trips* when the ground operator is actively in the
-        loop -- i.e. tracking or manual is the active control source. For those,
-        a stale link means we must immediately stop guidance, hold, and escalate
-        to RTL (PRD 11: "Ground-link loss while tracking must stop guidance
-        immediately"). For plain ``auto``, link loss is handled by the FC's own
-        GCS failsafe, so we report it but do not command an action from here.
+        loop -- i.e. tracking, manual or planner is the active control source.
+        For those, a stale link means we must immediately stop guidance, hold,
+        and escalate to RTL (PRD 11: "Ground-link loss while tracking must stop
+        guidance immediately"; an executing mission plan is an operator-approved
+        activity and gets the same protection). For plain ``auto``, link loss is
+        handled by the FC's own GCS failsafe, so we report it but do not command
+        an action from here.
 
         Args:
-          control_source: the active ControlSource value ('auto'/'tracking'/'manual').
+          control_source: the active ControlSource value
+            ('auto'/'tracking'/'manual'/'planner').
           airborne: whether the vehicle is airborne (a tripped deadman on the
             ground escalates to DISARM-safe HOLD rather than RTL).
 
@@ -182,6 +186,7 @@ class SafetyManager:
         link_matters = control_source in (
             ControlSource.TRACKING.value,
             ControlSource.MANUAL.value,
+            ControlSource.PLANNER.value,
         )
 
         if alive or not link_matters:

@@ -23,19 +23,25 @@ Components built here
 asyncio tasks
   (1) telemetry pump @10 Hz : read vehicle telemetry, stamp controlSource, push.
   (2) perception+tracking   : frames -> detect -> tracker -> push 'tracking' @~10 Hz.
+        (+ staging-point still-image detections spliced in while a plan flies)
   (3) control loop @10-20 Hz: pick the ONE active control source and emit a
         clamped body-velocity setpoint:
           manual active            -> ManualPilot setpoint (watchdog-gated)
+          plan engaged+armed+GUIDED -> PlannerExecutor output (velocity legs
+                                       through the same clamp path; goto legs
+                                       through Vehicle.goto_global, which
+                                       clamps again; rtl -> existing rtl path)
           tracking engaged+armed+GUIDED -> Guidance setpoint
           else                     -> hold (zero, valid=False)
         then clamp + Vehicle.send_body_velocity.
   (4) command dispatch (event-driven via the API handler).
 
 SAFETY INVARIANTS enforced here (PRD 11)
-  * Exactly one controlSource is ever active (auto | tracking | manual).
+  * Exactly one controlSource is ever active (auto | tracking | manual | planner).
   * standoff is a hard limit -- delegated to Guidance, never overridden here.
   * Every setpoint is clamped to Limits before it reaches the FC.
-  * Manual + ground-link watchdogs zero-and-hold on input/link loss.
+  * Manual + ground-link watchdogs zero-and-hold on input/link loss (the
+    ground-link deadman also covers planner flight).
   * emergencyStop/disarm need no confirmation and override everything.
   * Default to the safe (hold) state on startup and on ANY exception.
 ============================================================================
@@ -45,11 +51,13 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import math
 import signal
 import time
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
-from .config import AppConfig, load_config
+from .config import MAX_SPEED_CAP, AppConfig, load_config
 from .types import (
     ControlSource,
     Limits,
@@ -90,10 +98,14 @@ class Companion:
         self._control_source: str = ControlSource.AUTO.value
         self._tracking_engaged: bool = False
         self._manual_engaged: bool = False
+        self._planner_engaged: bool = False
         self._estop_latched: bool = False
         self._vehicle_state: VehicleState = VehicleState()
         self._last_manual_input_ms: float = 0.0
         self._latest_tracking: Optional[Any] = None  # TrackingResult
+        # goto-leg streaming state (re-send throttle for position targets)
+        self._last_goto: Optional[Tuple[float, float, float, float]] = None
+        self._last_goto_ts: float = 0.0
 
         self._stop = asyncio.Event()
         self._tasks: List[asyncio.Task] = []
@@ -104,6 +116,9 @@ class Companion:
         self.tracker: Optional[Any] = None
         self.guidance: Optional[Any] = None
         self.manual: Optional[Any] = None
+        self.planner: Optional[Any] = None         # control.PlannerExecutor
+        self.site: Optional[Any] = None            # site.Site (may be None)
+        self.staging_observer: Optional[Any] = None  # vision.StagingObserver
         self.safety: Optional[Any] = None
         self.api: Optional[Any] = None
         self.video: Optional[Any] = None
@@ -137,6 +152,13 @@ class Companion:
             vx_gains=cfg.gains.forward.as_tuple(),
         )
         self.manual = self._build_manual_pilot()
+
+        # --- site model + mission-plan executor + staging vision ----------
+        # (site is I/O and lives OUTSIDE control/; its data is passed into the
+        # pure-logic PlannerExecutor / StagingObserver as plain numbers.)
+        self.site = self._load_site()
+        self.planner = self._build_planner()
+        self.staging_observer = self._build_staging_observer()
 
         # --- safety manager (pure stdlib) ---------------------------------
         from .mavlink import SafetyManager
@@ -187,9 +209,100 @@ class Companion:
                 baud=cfg.fc.baud,
                 source_system=cfg.fc.gcs_sysid,
                 target_system=cfg.fc.sysid,
+                # goto_global clamps to THIS envelope (the global-position
+                # path's second clamp); share the live Limits object so
+                # runtime edits (setMaxSpeed) apply immediately.
+                limits=self.limits,
             )
         except Exception:
             log.exception("failed to construct Vehicle; FC link disabled")
+            return None
+
+    def _load_site(self) -> Optional[Any]:
+        """Load the site model (docs/SITE_CONTRACT.md): perimeter geofence,
+        altitude band, staging points. A missing/invalid site degrades with a
+        warning -- the companion still boots (no fence upload, default alt
+        band, no staging vision)."""
+        try:
+            from .site import load_site_from_env
+        except Exception:
+            log.warning("site module unavailable; no site model")
+            return None
+        try:
+            site = load_site_from_env(self.config.planner.site_file or None)
+            log.info(
+                "site model loaded: %s (%d perimeter vertices, %d staging points)",
+                site.source_path, len(site.perimeter), len(site.staging),
+            )
+            return site
+        except FileNotFoundError:
+            log.warning(
+                "site file not found (planner.site_file / EIS_SITE_FILE / "
+                "site/site.json); planner runs without site constraints"
+            )
+            return None
+        except Exception:
+            log.exception("failed to load site model; planner runs without site constraints")
+            return None
+
+    def _build_planner(self) -> Optional[Any]:
+        """Build the pure-logic PlannerExecutor (mirrors _build_manual_pilot).
+
+        Gets the live Limits by reference, the config-clamped profile speed
+        map, and the site altitude band as plain numbers -- planner_exec never
+        reads config/site itself."""
+        try:
+            from .control.planner_exec import PlannerExecutor
+        except Exception:
+            log.warning("control.planner_exec unavailable; mission plans disabled")
+            return None
+        band_min, band_max = 0.0, float("inf")
+        if self.site is not None:
+            band_min = float(self.site.alt_band.min_m)
+            band_max = float(self.site.alt_band.max_m)
+        speeds = dict(self.config.planner.profile_speed_mps)
+        try:
+            return PlannerExecutor(
+                self.limits,
+                speeds.get("standard", 0.0),  # default cap; plans resolve their own profile
+                alt_band_min=band_min,
+                alt_band_max=band_max,
+                profile_speeds=speeds,
+                arrival_radius_m=self.config.planner.arrival_radius_m,
+            )
+        except Exception:
+            log.exception("failed to construct PlannerExecutor; mission plans disabled")
+            return None
+
+    def _build_staging_observer(self) -> Optional[Any]:
+        """Staging-point vision: still-image detections on arrival at the site's
+        pre-surveyed points, spliced into the normal perception stream while a
+        mission plan is flying (and only then)."""
+        if self.site is None or not getattr(self.site, "staging", None):
+            return None
+        try:
+            from .vision import StagingObserver
+        except Exception:
+            log.warning("vision.StagingObserver unavailable; staging vision disabled")
+            return None
+        try:
+            # site.py's StagingPoint dataclass is a DIFFERENT type from
+            # vision/staging.py's same-named one and is not a Mapping, so it
+            # must not be passed through raw -- convert to the plain-dict
+            # lingua franca (site.json key names) the observer coerces from.
+            staging = [
+                {"id": s.id, "lat": s.lat, "lon": s.lon,
+                 "image": s.image, "truth": s.truth}
+                for s in self.site.staging
+            ]
+            return StagingObserver(
+                staging,
+                arrival_radius_m=self.config.planner.staging_arrival_radius_m,
+                # staging image paths are repo-root-relative (SITE_CONTRACT)
+                image_root=str(Path(__file__).resolve().parents[3]),
+            )
+        except Exception:
+            log.exception("failed to construct StagingObserver; staging vision disabled")
             return None
 
     def _build_vision_source(self) -> Optional[Any]:
@@ -248,15 +361,21 @@ class Companion:
         self.setup()
 
         # Connect the FC first; default to a held setpoint regardless.
+        fc_connected = False
         if self.vehicle is not None:
             try:
                 await _maybe_await(self.vehicle.connect())
+                fc_connected = True
                 log.info("connected to FC: %s", self.config.fc.connection)
             except Exception:
                 log.exception("FC connect failed; continuing in degraded/SITL mode")
 
         if self.api is not None:
             await self.api.start()
+
+        # Site perimeter -> FC polygon geofence (best-effort, after connect).
+        if fc_connected:
+            await self._upload_site_fence()
 
         if self.video is not None:
             try:
@@ -368,6 +487,18 @@ class Companion:
             except Exception:
                 observations = []
 
+        # Staging-point vision: ONLY while a mission plan is flying. The
+        # observer emits still-image detections when the vehicle arrives at a
+        # site staging point; they ride the normal tracker -> 'tracking' path.
+        if self._planner_engaged and self.staging_observer is not None:
+            try:
+                st = self._vehicle_state
+                extra = self.staging_observer.observe(st.lat, st.lon, st.relAlt)
+                if extra:
+                    observations = list(observations) + list(extra)
+            except Exception:
+                log.exception("staging observer failed")
+
         if self.tracker is None:
             return
         result = self.tracker.update(observations, ts=time.time())
@@ -441,6 +572,13 @@ class Companion:
 
         if self._manual_engaged:
             sp = await self._manual_setpoint(dt)
+        elif self._planner_engaged and self._guidance_preconditions_ok():
+            planner_sp = await self._planner_tick(dt)
+            if planner_sp is None:
+                # goto / rtl / completion handled their own emission this tick
+                # (a body-velocity frame would override the position target).
+                return
+            sp = planner_sp
         elif self._tracking_engaged and self._guidance_preconditions_ok():
             sp = self._guidance_setpoint(dt)
         else:
@@ -465,6 +603,92 @@ class Companion:
             self.limits,
             dt,
         )
+
+    async def _planner_tick(self, dt: float) -> Optional[VelocitySetpoint]:
+        """One mission-plan control tick (source == planner).
+
+        Returns a VelocitySetpoint to route through the NORMAL clamp+send path
+        (orbit / hold / defensive-hold legs), or ``None`` when this tick
+        emitted a different flavor itself:
+          * goto legs stream an absolute position target via
+            Vehicle.goto_global -- clamped in planner_exec AND again inside
+            goto_global (the global path's "clamped twice", since
+            _clamp_setpoint only sees body velocities);
+          * an rtl tool hands off to the existing rtl path and releases;
+          * plan completion pushes statusText and releases to hold.
+        The ground-link deadman ran before this (planner is a link-matters
+        source), so a tripped link never reaches here.
+        """
+        if self.planner is None:
+            self._planner_engaged = False
+            self._set_control_source(ControlSource.AUTO.value)
+            return VelocitySetpoint.hold()
+        try:
+            out = self.planner.update(self._vehicle_state, dt)
+        except Exception:
+            log.exception("planner update failed -> hold")
+            return VelocitySetpoint.hold()
+
+        kind = getattr(out.kind, "value", str(out.kind))
+        if kind == "velocity":
+            return out.setpoint
+        if kind == "goto" and out.goto is not None:
+            await self._stream_goto(out.goto)
+            return None
+        if kind == "rtl":
+            # Terminal tool: mirror the 'rtl' command (release, then RTL).
+            self._release_all(ControlSource.AUTO.value)
+            await self._status("info", "mission plan: RTL -> returning to launch")
+            if self.vehicle is not None:
+                try:
+                    await _maybe_await(self.vehicle.set_mode("RTL"))
+                except Exception:
+                    log.exception("plan RTL failed")
+            await self._send_hold("plan rtl")
+            return None
+        if kind == "done":
+            self._planner_engaged = False
+            self._set_control_source(ControlSource.AUTO.value)
+            await self._status("info", "mission plan complete -> hold")
+            await self._send_hold("plan complete")
+            return None
+        # idle / unexpected while engaged: release and hold (safe default).
+        self._planner_engaged = False
+        self._set_control_source(ControlSource.AUTO.value)
+        return VelocitySetpoint.hold()
+
+    async def _stream_goto(self, goto: Any) -> None:
+        """Send/refresh the GUIDED global position target for a goto leg.
+
+        ArduPilot latches a position target, so re-send only when the target
+        changes or every ~1 s as belt-and-braces (re-sending at 20 Hz would
+        spam DO_CHANGE_SPEED). While a goto is active the control tick
+        deliberately does NOT emit the body-velocity hold -- a zero-velocity
+        frame would override the position target."""
+        if self.vehicle is None:
+            return
+        key = (
+            round(float(goto.lat), 7), round(float(goto.lon), 7),
+            round(float(goto.alt), 2), round(float(goto.speed), 2),
+        )
+        now = time.monotonic()
+        if key == self._last_goto and (now - self._last_goto_ts) < 1.0:
+            return
+        self._last_goto = key
+        self._last_goto_ts = now
+        try:
+            ok = await _maybe_await(self.vehicle.goto_global(
+                goto.lat, goto.lon, goto.alt, goto.speed,
+            ))
+            if not ok:
+                # Refused (e.g. zero-speed leg / bad target): emit the
+                # canonical zero-and-hold so any PREVIOUSLY latched position
+                # target in the FC cannot keep the vehicle moving.
+                log.warning("goto_global refused target %s -> hold", key)
+                await self._send_hold("goto refused")
+        except Exception:
+            log.exception("goto_global failed")
+            await self._send_hold("goto failed")
 
     async def _manual_setpoint(self, dt: float) -> VelocitySetpoint:
         """Manual setpoint via ManualPilot, gated by the input watchdog.
@@ -536,10 +760,43 @@ class Companion:
                 await _maybe_await(self.vehicle.set_mode("RTL"))
             except Exception:
                 log.exception("deadman RTL failed")
-        # Manual/tracking are no longer authoritative once the operator is gone.
+        # Manual/tracking/planner are no longer authoritative once the
+        # operator is gone -- an approved plan still requires a live link.
         self._manual_engaged = False
         self._tracking_engaged = False
+        self._planner_engaged = False
+        if self.planner is not None:
+            _safe_call(getattr(self.planner, "reset", None))
         self._control_source = ControlSource.AUTO.value
+
+    async def _upload_site_fence(self) -> None:
+        """Upload the site perimeter as the FC polygon geofence (best-effort).
+
+        The perimeter is the site's outer geofence (docs/SITE_CONTRACT.md).
+        A failed upload degrades loudly (statusText warning) but never blocks
+        startup -- the FC's own fence/failsafe params remain the backstop."""
+        if self.vehicle is None:
+            return
+        if self.site is None or not getattr(self.site, "perimeter", None):
+            await self._status("warning", "no site model; polygon geofence not uploaded")
+            return
+        try:
+            ok = bool(await _maybe_await(
+                self.vehicle.upload_geofence(self.site.perimeter)
+            ))
+        except Exception:
+            log.exception("geofence upload raised")
+            ok = False
+        if ok:
+            await self._status(
+                "info",
+                f"site geofence uploaded ({len(self.site.perimeter)} vertices)",
+            )
+        else:
+            await self._status(
+                "warning",
+                "site geofence upload failed; FC fence params are the backstop",
+            )
 
     # ======================================================================
     # Task 4: command dispatch (event-driven via the API handler)
@@ -612,16 +869,29 @@ class Companion:
             return True, f"standoff set to {val:.1f} m (floor {self.limits.min_standoff:.0f} m)"
         if command == "setMaxSpeed":
             mps = float(params.get("mps", self.limits.max_speed))
+            # Runtime mirror of the config-time hard cap (_enforce_safety_floor):
+            # the wire may LOWER the live max_speed, never raise it past the
+            # 8 m/s envelope. guidance.set_max_speed itself only floors at
+            # min_speed (control/ stays cap-agnostic), so clamp here -- the
+            # same idiom as setStandoff's floor. NaN falls back to the cap
+            # (min() would propagate it into the live Limits otherwise).
+            mps = min(mps, MAX_SPEED_CAP) if math.isfinite(mps) else MAX_SPEED_CAP
             val = self.guidance.set_max_speed(mps, self.limits) if self.guidance else \
                 self.limits.clamp_speed(mps)
             self._sync_safety_limits()
-            return True, f"max speed set to {val:.1f} m/s"
+            return True, f"max speed set to {val:.1f} m/s (cap {MAX_SPEED_CAP:.0f} m/s)"
 
         # ---- manual piloting (-> ManualPilot) ------------------------------
         if command == "engageManual":
             return await self._engage_manual()
         if command == "disengageManual":
             return await self._disengage_manual()
+
+        # ---- mission planner (-> PlannerExecutor) --------------------------
+        if command == "executePlan":
+            return await self._execute_plan(params)
+        if command == "abortPlan":
+            return await self._abort_plan()
 
         return False, f"unknown command {command!r}"
 
@@ -642,6 +912,8 @@ class Companion:
     def _engage_tracking(self):
         if self._manual_engaged:
             return False, "release manual control before engaging tracking"
+        if self._planner_engaged:
+            return False, "abort the active mission plan before engaging tracking"
         self._tracking_engaged = True
         self._set_control_source(ControlSource.TRACKING.value)
         if self.guidance is not None:
@@ -649,10 +921,14 @@ class Companion:
         return True, "tracking engaged"
 
     def _disengage_tracking(self):
+        # Guard the source release on was-engaged (same hazard as abortPlan:
+        # a stray disengage must not relabel an active manual/planner source).
+        was_engaged = self._tracking_engaged
         self._tracking_engaged = False
-        self._set_control_source(ControlSource.AUTO.value)
         if self.guidance is not None:
             self.guidance.reset()
+        if was_engaged:
+            self._set_control_source(ControlSource.AUTO.value)
         return True, "tracking disengaged -> auto hold"
 
     async def _engage_manual(self):
@@ -664,8 +940,12 @@ class Companion:
             await self._status("warning", msg)
             return False, msg
 
-        # mutual exclusion: tracking releases immediately.
+        # mutual exclusion: tracking AND any mission plan release immediately
+        # (the hands-on operator always wins).
         self._tracking_engaged = False
+        self._planner_engaged = False
+        if self.planner is not None:
+            _safe_call(getattr(self.planner, "abort", None))
         if self.guidance is not None:
             self.guidance.reset()
         if self.manual is not None:
@@ -685,14 +965,87 @@ class Companion:
         return True, "manual control engaged (GUIDED)"
 
     async def _disengage_manual(self):
-        """releaseManualControl: zero setpoints + auto-hold; controlSource=auto."""
+        """releaseManualControl: zero setpoints + auto-hold; controlSource=auto.
+        The release (hold + source=auto) only runs when manual WAS engaged --
+        a stray disengage must not stomp an active tracking/planner source
+        (deadman silencing hazard; see _abort_plan)."""
+        was_engaged = self._manual_engaged
         self._manual_engaged = False
         if self.manual is not None:
             _safe_call(getattr(self.manual, "reset", None))
-        await self._send_hold("release manual")
-        self._set_control_source(ControlSource.AUTO.value)
+        if was_engaged:
+            await self._send_hold("release manual")
+            self._set_control_source(ControlSource.AUTO.value)
         # auto-hold in GUIDED (zero-velocity); optionally LOITER if available.
         return True, "manual control released -> auto hold"
+
+    async def _execute_plan(self, params: Dict[str, Any]):
+        """executePlan: validate params.plan through PlannerExecutor.load_plan
+        (the companion-side INDEPENDENT validator the trust layer requires --
+        unknown tools / malformed fields reject with a failed ack) and engage
+        the planner control source.
+
+        Mutual exclusion mirrors the existing engage paths: manual (hands-on
+        operator) wins and must be released first; tracking force-releases.
+        The control tick gates on the same armed+airborne+GUIDED preconditions
+        as tracking, so a plan accepted on the ground holds until the vehicle
+        is flying in GUIDED."""
+        if self.planner is None:
+            return False, "mission planner unavailable"
+        if self._manual_engaged:
+            return False, "release manual control before executing a plan"
+        plan = params.get("plan")
+        if not isinstance(plan, dict):
+            return False, "executePlan requires params.plan (MissionPlan)"
+
+        # planner_exec resolves plan/leg profiles via the config-clamped
+        # profile_speeds mapping it was constructed with; a rejected load
+        # leaves any previously armed plan untouched.
+        ok, message = self.planner.load_plan(plan)
+        if not ok:
+            return False, f"plan rejected: {message}"
+
+        # Exactly one control source: tracking releases immediately.
+        self._tracking_engaged = False
+        if self.guidance is not None:
+            self.guidance.reset()
+        # Fresh mission context: re-arm the staging points.
+        if self.staging_observer is not None:
+            _safe_call(getattr(self.staging_observer, "reset", None))
+        self._last_goto = None  # force the first goto target to stream
+
+        # Ensure GUIDED so setpoints/position targets take effect (manual idiom).
+        st = self._vehicle_state
+        if (self.vehicle is not None and st.armed and st.airborne
+                and str(st.mode).upper() != "GUIDED"):
+            try:
+                await _maybe_await(self.vehicle.set_mode("GUIDED"))
+            except Exception:
+                log.exception("could not switch to GUIDED for the mission plan")
+
+        self._planner_engaged = True
+        self._set_control_source(ControlSource.PLANNER.value)
+        await self._status("info", f"mission plan engaged: {message}")
+        return True, message
+
+    async def _abort_plan(self):
+        """abortPlan: zero-and-hold + release back to auto (disengage idiom).
+        Idempotent -- aborting with no active plan still acks success, but the
+        release itself (hold frame + controlSource=auto) only runs when the
+        planner WAS engaged: a stray abortPlan while tracking/manual is active
+        must never stomp the source label to 'auto', or the ground-link
+        deadman (which only 'matters' for tracking/manual/planner) is silenced
+        while guidance keeps commanding motion -- and telemetry lies."""
+        was_engaged = self._planner_engaged
+        self._planner_engaged = False
+        if self.planner is not None:
+            _safe_call(getattr(self.planner, "abort", None))
+        if not was_engaged:
+            return True, "no active plan (abortPlan is idempotent)"
+        await self._send_hold("abortPlan")
+        self._set_control_source(ControlSource.AUTO.value)
+        await self._status("info", "mission plan aborted -> hold")
+        return True, "plan aborted -> auto hold"
 
     async def _emergency_stop(self):
         """emergencyStop: release everything, zero setpoints, LAND/BRAKE.
@@ -762,16 +1115,26 @@ class Companion:
     def _release_all(self, source: str) -> None:
         self._tracking_engaged = False
         self._manual_engaged = False
+        self._planner_engaged = False
         if self.guidance is not None:
             self.guidance.reset()
         if self.manual is not None:
             _safe_call(getattr(self.manual, "reset", None))
+        if self.planner is not None:
+            # Full reset: a plan must never survive a failsafe/release.
+            _safe_call(getattr(self.planner, "reset", None))
         self._set_control_source(source)
 
     def _sync_safety_limits(self) -> None:
         if self.safety is not None:
             try:
                 self.safety.update_limits(self.limits)
+            except Exception:
+                pass
+        if self.vehicle is not None:
+            # goto_global clamps to the Vehicle-held Limits; keep it current.
+            try:
+                self.vehicle.update_limits(self.limits)
             except Exception:
                 pass
 

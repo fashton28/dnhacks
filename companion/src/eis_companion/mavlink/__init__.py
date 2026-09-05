@@ -9,8 +9,11 @@ Modules
   vehicle.py  -- ``Vehicle``: a thin pymavlink wrapper. Connect, request data
                  streams, translate FC MAVLink into the contract ``telemetry``
                  dict + a ``VehicleState`` snapshot, run the command set
-                 (arm/disarm/mode/takeoff/land/rtl), and stream BODY-frame
-                 velocity setpoints via SET_POSITION_TARGET_LOCAL_NED.
+                 (arm/disarm/mode/takeoff/land/rtl), stream BODY-frame
+                 velocity setpoints via SET_POSITION_TARGET_LOCAL_NED, fly
+                 GUIDED global position targets (``goto_global``), and upload
+                 the site perimeter as an ArduPilot polygon inclusion fence
+                 (``upload_geofence``, called by the orchestrator post-connect).
   safety.py   -- ``SafetyManager``: ground-link deadman, arming preconditions,
                  emergency-stop mapping, and the ArduCopter geofence + failsafe
                  PARAM map (returned as a plain dict so docs/flashing.md and a

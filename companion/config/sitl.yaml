@@ -79,3 +79,14 @@ safety:
   critical_battery_action: land
   min_battery_remaining:  20.0
   rc_override_primacy:    true
+
+# --- Mission planner (power-plant security retrofit) ------------------------
+# NOTE: emitted plan speeds are additionally capped at limits.max_speed (2.0
+# above) and goto altitudes at limits.max_altitude (30.0) -- raise those YAML
+# values (still under the hard 8 m/s cap) if the demo should fly profiles at
+# full speed / the full site altitude band.
+planner:
+  profile_speed_mps: { slow: 2.0, standard: 4.0, fast: 6.0 }
+  site_file: ""                   # "" -> EIS_SITE_FILE env, else site/site.json
+  arrival_radius_m: 2.0
+  staging_arrival_radius_m: 15.0

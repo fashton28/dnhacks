@@ -28,6 +28,7 @@ speed cap), even if a YAML/env value asks to: ``Limits`` clamping + the
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -50,6 +51,47 @@ except Exception:  # pragma: no cover - exercised only on a broken install
 MAX_SPEED_CAP: float = 8.0       # m/s -- the hard ceiling for max_speed
 MIN_STANDOFF_FLOOR: float = 3.0  # m  -- standoff may never be set below this
 GEOFENCE_RADIUS_DEFAULT: float = 60.0  # m
+
+# Fallback mirror of the shared contract's PROFILE_SPEED_MPS (shared/shared.py /
+# shared/shared.ts). The authoritative copy is loaded from shared/shared.py at
+# config time when the monorepo checkout is present (_shared_profile_speeds);
+# this literal keeps the companion configurable on a partial install. Either
+# way every value is clamped under MAX_SPEED_CAP in _enforce_safety_floor --
+# mission profiles may only TIGHTEN the speed envelope, never relax it.
+PROFILE_SPEED_FALLBACK: Dict[str, float] = {
+    "slow": 2.0,
+    "standard": 4.0,
+    "fast": 6.0,
+}
+
+_shared_profile_cache: Optional[Dict[str, float]] = None
+
+
+def _shared_profile_speeds() -> Dict[str, float]:
+    """PROFILE_SPEED_MPS from the shared contract file (shared/shared.py).
+
+    ``shared/`` is not an installed package, so it is loaded by path from the
+    monorepo root (the same ``parents[N]`` idiom ``site.py`` uses). Any failure
+    (partial checkout, packaged install) falls back to the literal mirror.
+    Values are still safety-clamped afterwards in ``_enforce_safety_floor``.
+    """
+    global _shared_profile_cache
+    if _shared_profile_cache is None:
+        speeds = dict(PROFILE_SPEED_FALLBACK)
+        try:
+            import importlib.util
+            shared_py = Path(__file__).resolve().parents[3] / "shared" / "shared.py"
+            spec = importlib.util.spec_from_file_location("_eis_shared_contract", shared_py)
+            if spec is not None and spec.loader is not None:
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                loaded = getattr(mod, "PROFILE_SPEED_MPS", None)
+                if isinstance(loaded, dict) and loaded:
+                    speeds = {str(k): float(v) for k, v in loaded.items()}
+        except Exception:
+            pass  # fall back to the mirror; the floor clamp still applies
+        _shared_profile_cache = speeds
+    return dict(_shared_profile_cache)
 
 
 # ==========================================================================
@@ -135,6 +177,26 @@ class SafetyConfig:
 
 
 @dataclass
+class PlannerConfig:
+    """Mission-planner execution config (power-plant security retrofit).
+
+    ``profile_speed_mps`` mirrors the shared contract's PROFILE_SPEED_MPS
+    (slow/standard/fast cruise speeds). ``_enforce_safety_floor`` clamps every
+    value under MAX_SPEED_CAP at load; the PlannerExecutor additionally
+    re-clamps each emitted speed to ``limits.max_speed`` per tick, so a
+    profile can only ever tighten the envelope.
+
+    ``site_file`` selects the site model JSON (docs/SITE_CONTRACT.md):
+    "" defers to the ``EIS_SITE_FILE`` env var, then ``site/site.json``
+    (that resolution lives in ``eis_companion.site.resolve_site_path``).
+    """
+    profile_speed_mps: Dict[str, float] = field(default_factory=_shared_profile_speeds)
+    site_file: str = ""                       # "" -> EIS_SITE_FILE, else site/site.json
+    arrival_radius_m: float = 2.0             # goto_gps arrival threshold (m)
+    staging_arrival_radius_m: float = 15.0    # staging-point vision trigger radius (m)
+
+
+@dataclass
 class AppConfig:
     """The whole companion configuration, fully resolved + typed."""
     sitl: bool = True
@@ -146,6 +208,7 @@ class AppConfig:
     fc: FcConfig = field(default_factory=FcConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    planner: PlannerConfig = field(default_factory=PlannerConfig)
     source_path: Optional[str] = None     # the YAML path actually loaded
 
     # ---- convenience views ------------------------------------------------
@@ -408,6 +471,22 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         rc_override_primacy=bool(_g(saf_d, "rc_override_primacy", True)),
     )
 
+    pl_d = _section(raw, "planner")
+    speeds = _shared_profile_speeds()
+    speeds_raw = pl_d.get("profile_speed_mps")
+    if isinstance(speeds_raw, dict):
+        for k, v in speeds_raw.items():
+            try:
+                speeds[str(k)] = float(v)
+            except (TypeError, ValueError):
+                pass  # bad YAML value -> keep the shared default for this profile
+    planner = PlannerConfig(
+        profile_speed_mps=speeds,
+        site_file=str(_g(pl_d, "site_file", "")),
+        arrival_radius_m=float(_g(pl_d, "arrival_radius_m", 2.0)),
+        staging_arrival_radius_m=float(_g(pl_d, "staging_arrival_radius_m", 15.0)),
+    )
+
     return AppConfig(
         sitl=bool(_g(raw, "sitl", True)),
         limits=limits,
@@ -418,6 +497,7 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         fc=fc,
         tracking=tracking,
         safety=safety,
+        planner=planner,
     )
 
 
@@ -512,6 +592,14 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     if f is not None:
         cfg.safety.geofence_radius_m = f
 
+    # planner / site model
+    s = _env("EIS_SITE_FILE")
+    if s is not None:
+        cfg.planner.site_file = s
+    f = _env_float("EIS_STAGING_RADIUS_M")
+    if f is not None:
+        cfg.planner.staging_arrival_radius_m = f
+
 
 def _enforce_safety_floor(cfg: AppConfig) -> None:
     """Re-assert the hard safety envelope after all layering (PRD 9 / 11).
@@ -543,6 +631,26 @@ def _enforce_safety_floor(cfg: AppConfig) -> None:
     # geofence radius floor
     cfg.safety.geofence_radius_m = max(10.0, float(cfg.safety.geofence_radius_m))
 
+    # planner profile speeds: every profile is clamped UNDER the hard speed cap
+    # (profiles may only tighten the envelope). A malformed/non-finite value
+    # degrades to 0.0 = no motion, the safe direction; negative -> 0.0. The
+    # PlannerExecutor re-clamps to limits.max_speed at every emitted setpoint.
+    speeds = cfg.planner.profile_speed_mps
+    for name in list(speeds.keys()):
+        try:
+            v = float(speeds[name])
+        except (TypeError, ValueError):
+            v = 0.0
+        if not math.isfinite(v):
+            v = 0.0
+        speeds[name] = max(0.0, min(v, MAX_SPEED_CAP))
+
+    # planner thresholds must stay sane (arrival radii can't collapse to 0)
+    cfg.planner.arrival_radius_m = max(0.5, float(cfg.planner.arrival_radius_m))
+    cfg.planner.staging_arrival_radius_m = max(
+        1.0, float(cfg.planner.staging_arrival_radius_m)
+    )
+
 
 __all__ = [
     "AppConfig",
@@ -554,7 +662,9 @@ __all__ = [
     "FcConfig",
     "TrackingConfig",
     "SafetyConfig",
+    "PlannerConfig",
     "load_config",
     "MAX_SPEED_CAP",
     "MIN_STANDOFF_FLOOR",
+    "PROFILE_SPEED_FALLBACK",
 ]
