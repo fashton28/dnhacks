@@ -1,0 +1,32 @@
+<!-- @dsCard group="Colors" viewport="700x180" name="Surfaces & text" subtitle="Semantic aliases — app → panel → raised → input. Text emphasis ladder." -->
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8" /><link rel="stylesheet" href="../styles.css" />
+<style>
+  html,body{margin:0;background:var(--bg-app)}
+  body{padding:18px 20px;font-family:var(--font-sans);display:flex;gap:20px}
+  .surf{flex:1;display:flex;flex-direction:column;gap:6px}
+  .stack{border-radius:var(--radius-md);overflow:hidden;border:1px solid var(--border-default)}
+  .lvl{padding:9px 12px;font-size:11px;display:flex;justify-content:space-between;align-items:center}
+  .tk{font-family:var(--font-mono);font-size:9px;color:var(--text-tertiary)}
+  .txt{flex:1;display:flex;flex-direction:column;gap:9px;justify-content:center}
+  .tl{display:flex;justify-content:space-between;align-items:baseline}
+</style></head>
+<body>
+<div class="surf">
+  <div class="stack">
+    <div class="lvl" style="background:var(--bg-app)">App<span class="tk">--bg-app</span></div>
+    <div class="lvl" style="background:var(--surface-panel)">Panel<span class="tk">--surface-panel</span></div>
+    <div class="lvl" style="background:var(--surface-raised)">Raised<span class="tk">--surface-raised</span></div>
+    <div class="lvl" style="background:var(--surface-input)">Input<span class="tk">--surface-input</span></div>
+    <div class="lvl" style="background:var(--surface-hover)">Hover<span class="tk">--surface-hover</span></div>
+  </div>
+</div>
+<div class="txt">
+  <div class="tl"><span style="color:var(--text-primary);font-size:15px;font-weight:500">Primary text</span><span class="tk">--text-primary</span></div>
+  <div class="tl"><span style="color:var(--text-secondary);font-size:14px">Secondary text</span><span class="tk">--text-secondary</span></div>
+  <div class="tl"><span style="color:var(--text-tertiary);font-size:13px">Tertiary text</span><span class="tk">--text-tertiary</span></div>
+  <div class="tl"><span style="color:var(--text-disabled);font-size:13px">Disabled text</span><span class="tk">--text-disabled</span></div>
+  <div class="tl"><span style="color:var(--accent-text);font-size:13px;font-weight:500">Accent text / link</span><span class="tk">--accent-text</span></div>
+</div>
+</body></html>

@@ -1,0 +1,81 @@
+###############################################################################
+# Eye in the Sky -- COMPANION SITL configuration (SIMULATION / dev box).
+#
+# For the SITL-first acceptance demo (PRD 10/13): ArduPilot SITL over UDP + a
+# synthetic 'sim' camera source feeding the tracking/guidance loop, so the whole
+# stack runs with ZERO hardware and no camera.
+#
+#   EIS_CONFIG=config/sitl.yaml python -m eis_companion.app
+#
+# Inherits the same conservative safety envelope as default.yaml; only the FC
+# link (UDP) and the camera source (sim, no video stream) differ.
+###############################################################################
+
+# This IS simulation.
+sitl: true
+
+# --- Hard safety + tuning envelope (same conservative limits as real) ------
+limits:
+  max_speed:            2.0
+  min_speed:            0.5
+  max_climb_rate:       1.5
+  max_yaw_rate:         45.0
+  max_altitude:         30.0
+  standoff:             5.0
+  min_standoff:         3.0
+  deadzone:             0.09
+  manual_watchdog_ms:   500
+  ground_link_timeout_ms: 2000
+
+# --- Visual-servoing PID gains ---------------------------------------------
+guidance:
+  gains:
+    yaw:      { kp: 90.0, ki: 0.0, kd: 4.0 }
+    altitude: { kp: 2.0,  ki: 0.0, kd: 0.1 }
+    forward:  { kp: 0.6,  ki: 0.0, kd: 0.05 }
+
+# --- Camera: synthetic sim target (no real camera, no video stream) --------
+camera:
+  source:   sim            # SimTargetSource feeds synthetic person detections
+  width:    1280
+  height:   720
+  fps:      30
+  vfov_deg: 41.0
+
+# --- Detector (unused with source=sim, kept for parity) --------------------
+detector:
+  model_path:      weights/yolo11n.pt
+  engine_path:     weights/yolo11n.engine
+  conf:            0.4
+  person_height_m: 1.7
+
+# --- Single-target tracker -------------------------------------------------
+tracking:
+  lost_timeout:  1.0
+  max_age:       1.5
+  iou_threshold: 0.3
+  min_hits:      2
+
+# --- Network: control WS + video ports -------------------------------------
+network:
+  host:               0.0.0.0
+  control_port:       8765
+  video_port:         8554
+  webrtc_port:        8889
+  video_bitrate_kbps: 2500
+  video_url:          ""     # empty in SITL -> UI renders its mock canvas
+
+# --- Flight-controller MAVLink link (SITL: UDP) ----------------------------
+fc:
+  connection: udp:127.0.0.1:14550   # ArduPilot SITL MAVLink out
+  baud:       921600                # ignored for udp
+  sysid:      1
+  gcs_sysid:  255
+
+# --- Safety / failsafe actions + geofence ----------------------------------
+safety:
+  geofence_radius_m:      60.0
+  low_battery_action:     rtl
+  critical_battery_action: land
+  min_battery_remaining:  20.0
+  rc_override_primacy:    true

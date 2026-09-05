@@ -1,0 +1,48 @@
+appId: com.eyeinthesky.groundcontrol
+productName: Eye in the Sky
+copyright: Copyright © 2024 Eye in the Sky
+
+# Where electron-builder finds the compiled main/preload
+directories:
+  output: dist-installer
+  buildResources: build-resources
+
+# Files included in the final package (relative to project root)
+files:
+  - dist-electron/**/*
+  - "!../../ui/node_modules"
+  - "!../../ui/src"
+  - "!../../ui/.git"
+
+# The built React UI is bundled as an extra resource so main.ts can
+# reference it at runtime regardless of asar packing.
+extraResources:
+  - from: "../../ui/dist"
+    to: "ui/dist"
+    filter:
+      - "**/*"
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: build-resources/icon.ico
+  # We do not code-sign here. Skipping the sign/edit step avoids electron-builder
+  # downloading + extracting the winCodeSign bundle (whose macOS .dylib symlinks
+  # fail to extract on Windows accounts without the create-symlink privilege /
+  # Developer Mode). Provide a real cert + CSC_LINK in CI/release to sign.
+  signAndEditExecutable: false
+
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: build-resources/icon.ico
+  uninstallerIcon: build-resources/icon.ico
+  createDesktopShortcut: always
+  createStartMenuShortcut: true
+  shortcutName: Eye in the Sky
+
+# Prevent electron-builder from signing on dev machines without a cert
+# (remove or set to true when you have a Windows code-signing cert)
+forceCodeSigning: false

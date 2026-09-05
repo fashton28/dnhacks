@@ -1,0 +1,32 @@
+{
+  "name": "eye-in-the-sky-ground-app-linux",
+  "version": "1.0.0",
+  "description": "Eye in the Sky — Ground Control Center (Electron shell, Linux)",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "concurrently --kill-others --names UI,ELECTRON --prefix-colors cyan,yellow \"npm run dev:ui\" \"npm run dev:electron\"",
+    "dev:ui": "cd ../../ui && npm run dev",
+    "dev:electron": "wait-on http://localhost:5173 && cross-env EIS_DEV=true electron .",
+    "build": "npm run build:ui && npm run build:electron",
+    "build:ui": "cd ../../ui && npm run build",
+    "build:electron": "tsc -p tsconfig.json",
+    "package:linux": "npm run build && electron-builder --linux AppImage deb rpm",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "dotenv": "16.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.2",
+    "concurrently": "8.2.2",
+    "cross-env": "7.0.3",
+    "electron": "31.3.1",
+    "electron-builder": "24.13.3",
+    "typescript": "5.6.3",
+    "wait-on": "7.2.0"
+  },
+  "build": {
+    "extends": "./electron-builder.yml"
+  }
+}

@@ -1,0 +1,35 @@
+# ---- Node / UI / Electron ----
+node_modules/
+dist/
+dist-electron/
+release/
+*.tsbuildinfo
+.vite/
+
+# ---- Python / companion ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+.venv/
+venv/
+.env
+*.engine          # exported TensorRT engines (large, device-specific)
+*.onnx
+weights/*.pt
+
+# ---- ArduPilot SITL / logs ----
+sim/ardupilot/
+*.tlog
+*.bin
+logs/
+recordings/
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
+.venv-test/
+dist-installer/

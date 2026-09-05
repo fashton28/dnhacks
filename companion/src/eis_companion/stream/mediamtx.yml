@@ -1,0 +1,52 @@
+###############################################################################
+# Eye in the Sky -- mediamtx config for the companion video stream.
+#
+# Serves the Jetson camera as low-latency RTSP (8554) and WebRTC/WHEP (8889).
+# The GStreamer publisher (stream/video.py) pushes to rtsp://127.0.0.1:8554/stream;
+# the ground UI plays either:
+#     rtsp://<jetson-ip>:8554/stream            (RTSP)
+#     http://<jetson-ip>:8889/stream/whep       (WebRTC/WHEP, lowest latency)
+#
+# Keep this minimal + permissive for the local link only (PRD 12: no cloud, the
+# system operates on the local network). Lock down / add auth before exposing it
+# beyond the operator's LAN.
+###############################################################################
+
+# --- logging ---------------------------------------------------------------
+logLevel: info
+logDestinations: [stdout]
+
+# --- timeouts (tuned short for low latency) --------------------------------
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 512
+
+# --- RTSP server (port 8554) ----------------------------------------------
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [tcp, udp]
+rtspEncryption: "no"
+
+# --- WebRTC server (port 8889) -- lowest-latency UI playback ---------------
+webrtc: yes
+webrtcAddress: :8889
+# Allow the browser to negotiate directly on the LAN. For NAT traversal across
+# networks, add ICE servers here; on a flat LAN the local candidates suffice.
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: ""
+webrtcAdditionalHosts: []
+
+# --- disable the protocols we don't use ------------------------------------
+rtmp: no
+hls: no
+srt: no
+
+# --- paths -----------------------------------------------------------------
+# A single published path 'stream'. The companion's GStreamer pipeline is the
+# publisher; the ground UI is the reader. 'publisher' source means "whatever
+# pushes to this path is the source" (our rtspclientsink).
+paths:
+  stream:
+    source: publisher
+    # Keep buffers tiny for low latency.
+    rtspTransport: tcp
