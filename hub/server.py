@@ -633,6 +633,16 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             out.append({"ref": m.get("ref", f"overhead/{meta.stem}.png"), "ts": m.get("ts"), "footprint": m.get("footprint"), "width": m.get("width"), "height": m.get("height")})
         return out
 
+    from fastapi.responses import FileResponse
+
+    @app.get("/site.json", include_in_schema=False)
+    async def site_json() -> FileResponse:
+        return FileResponse(Path(__file__).resolve().parent.parent / "sim" / "site" / "site.json", media_type="application/json")
+
+    @app.get("/site.geojson", include_in_schema=False)
+    async def site_geojson() -> FileResponse:
+        return FileResponse(Path(__file__).resolve().parent.parent / "sim" / "site" / "site.geojson", media_type="application/geo+json")
+
     @app.get("/", include_in_schema=False)
     async def root() -> RedirectResponse:
         return RedirectResponse(url="/gcs/" if gcs_dist.exists() else "/console/")
