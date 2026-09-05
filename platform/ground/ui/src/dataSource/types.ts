@@ -12,15 +12,19 @@ import type {
   AnomalyMessage,
   CapabilitiesMessage,
   DataSource,
+  EnvelopeMessage,
+  EscalationMessage,
   FleetMessage,
   HealthEventMessage,
   IncidentReportMessage,
   MissionPlanMessage,
+  ModeMessage,
   ObservationMessage,
   ReadinessMessage,
   RfEventMessage,
   SimulationToggles,
   SpectrumMessage,
+  TaskMessage,
   Unsubscribe,
   VerificationMessage,
 } from '@/contract';
@@ -42,4 +46,13 @@ export interface MissionDataSource extends DataSource {
   getSimulationToggles?(): Readonly<SimulationToggles>;
   /** Passive receive-only RF events may be forwarded to the companion. */
   forwardRfEvent?(event: RfEventMessage): void;
+
+  /** Tasking: what to look for and why (never where/how high — see Task). */
+  onTask(cb: (m: TaskMessage) => void): Unsubscribe;
+  /** Envelope monitor: margin to the nearest hard limit, and what was done. */
+  onEnvelope(cb: (m: EnvelopeMessage) => void): Unsubscribe;
+  /** Attendance mode (attended | unattended) and operator presence. */
+  onMode(cb: (m: ModeMessage) => void): Unsubscribe;
+  /** Out-of-band escalations raised for a mission. */
+  onEscalation(cb: (m: EscalationMessage) => void): Unsubscribe;
 }

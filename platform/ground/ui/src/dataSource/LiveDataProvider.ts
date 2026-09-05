@@ -19,17 +19,21 @@ import type {
   Command,
   ConnectionConfig,
   ConnectionState,
+  EnvelopeMessage,
+  EscalationMessage,
   IncidentReportMessage,
   FleetMessage,
   HealthEventMessage,
   InboundMessage,
   ManualInput,
   MissionPlanMessage,
+  ModeMessage,
   ObservationMessage,
   ReadinessMessage,
   RfEventMessage,
   SpectrumMessage,
   StatusText,
+  TaskMessage,
   Telemetry,
   TrackingStatus,
   Unsubscribe,
@@ -65,6 +69,10 @@ interface Callbacks {
   rf: Array<(m: RfEventMessage) => void>;
   spectrum: Array<(m: SpectrumMessage) => void>;
   fleet: Array<(m: FleetMessage) => void>;
+  task: Array<(m: TaskMessage) => void>;
+  envl: Array<(m: EnvelopeMessage) => void>;
+  mode: Array<(m: ModeMessage) => void>;
+  escl: Array<(m: EscalationMessage) => void>;
 }
 
 export class LiveDataProvider implements MissionDataSource {
@@ -86,6 +94,10 @@ export class LiveDataProvider implements MissionDataSource {
     rf: [],
     spectrum: [],
     fleet: [],
+    task: [],
+    envl: [],
+    mode: [],
+    escl: [],
   };
 
   private ws: WebSocket | null = null;
@@ -236,7 +248,21 @@ export class LiveDataProvider implements MissionDataSource {
       case 'fleet':
         this.cbs.fleet.forEach((f) => f(msg));
         break;
+      case 'task':
+        this.cbs.task.forEach((f) => f(msg));
+        break;
+      case 'envelope':
+        this.cbs.envl.forEach((f) => f(msg));
+        break;
+      case 'mode':
+        this.cbs.mode.forEach((f) => f(msg));
+        break;
+      case 'escalation':
+        this.cbs.escl.forEach((f) => f(msg));
+        break;
       default:
+        // cctvEvent and the other audit-only frames have no UI channel yet;
+        // they are accepted and ignored rather than treated as protocol errors.
         break;
     }
   }
@@ -332,6 +358,22 @@ export class LiveDataProvider implements MissionDataSource {
   onFleet(cb: (m: FleetMessage) => void): Unsubscribe {
     this.cbs.fleet.push(cb);
     return () => this._off('fleet', cb);
+  }
+  onTask(cb: (m: TaskMessage) => void): Unsubscribe {
+    this.cbs.task.push(cb);
+    return () => this._off('task', cb);
+  }
+  onEnvelope(cb: (m: EnvelopeMessage) => void): Unsubscribe {
+    this.cbs.envl.push(cb);
+    return () => this._off('envl', cb);
+  }
+  onMode(cb: (m: ModeMessage) => void): Unsubscribe {
+    this.cbs.mode.push(cb);
+    return () => this._off('mode', cb);
+  }
+  onEscalation(cb: (m: EscalationMessage) => void): Unsubscribe {
+    this.cbs.escl.push(cb);
+    return () => this._off('escl', cb);
   }
 
   private _off<K extends keyof Callbacks>(k: K, cb: unknown): void {

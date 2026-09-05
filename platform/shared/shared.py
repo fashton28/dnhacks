@@ -45,6 +45,40 @@ MissionProfile = Literal[
 VerificationVerdict = Literal["pass", "corrected", "rejected"]
 IncidentVerdict = Literal["false_alarm", "log", "escalate"]
 
+# Tasking enums (mirror shared.ts inline literal unions).
+TaskLookFor = Literal["person", "vehicle", "fence_gap", "structure", "unknown"]
+TaskUrgency = Literal["immediate", "next_sortie", "defer"]
+TaskSource = Literal["llm", "operator", "scripted"]
+
+# Envelope-monitoring / attendance enums.
+EnvelopeState = Literal["in_envelope", "warning", "breach"]
+EnvelopeConstraint = Literal[
+    "corridor", "altitude", "geofence", "nfz", "standoff", "sortie", "separation",
+]
+# Never "continue": a breach resolves to hold | rtl (or an escalation).
+EnvelopeAction = Literal["none", "slow", "hold", "rtl"]
+AttendanceMode = Literal["attended", "unattended"]
+
+# Check names the verifier and the mirrors agree on. VerificationCheck["name"]
+# stays a plain str (the shape is unchanged) so a verifier may still report a
+# check this list does not know yet.
+#   attended      -- the mission's attendance mode permits this dispatch
+#   deconfliction -- no other vehicle's corridor conflicts in space and time
+VerificationCheckName = Literal[
+    "geofence", "nfz", "altitude", "battery", "attended", "deconfliction",
+]
+VERIFICATION_CHECK_NAMES: list[VerificationCheckName] = [
+    "geofence", "nfz", "altitude", "battery", "attended", "deconfliction",
+]
+
+# Hard cap on Task["question"] so an operator card never has to truncate it.
+TASK_QUESTION_MAX_CHARS = 120
+
+# Gimbal pitch limits, degrees. -30 looks UP, 0 is level, 90 is straight DOWN --
+# the same convention the ARGUS console reports (gimbal_pitch_deg).
+GIMBAL_PITCH_MIN_DEG = -30.0
+GIMBAL_PITCH_MAX_DEG = 90.0
+
 # Base PRD 4 command set + the manual-piloting extension (engageManual /
 # disengageManual). High-rate stick input is the `manualInput` wire message,
 # NOT a command, and bypasses the ack path.
@@ -53,12 +87,17 @@ IncidentVerdict = Literal["false_alarm", "log", "escalate"]
 #   takeManualControl    === engageManual      (acked command)
 #   releaseManualControl === disengageManual    (acked command)
 #   manualInput          === the `manualInput` wire message (fire-and-forget)
+#
+# setGimbal / enterUnattended / exitUnattended travel the ordinary acked
+# command path like every other command; params carry {"pitchDeg": float} and
+# {"operatorId": str} respectively.
 CommandName = Literal[
     "arm", "disarm", "takeoff", "land", "rtl", "setMode",
     "engageTracking", "disengageTracking", "selectTarget",
     "setStandoff", "setMaxSpeed", "emergencyStop",
     "engageManual", "disengageManual",
     "executePlan", "abortPlan", "continueMission", "testFault",
+    "setGimbal", "enterUnattended", "exitUnattended",
 ]
 
 # SITL-only: reject unless config.sitl and EIS_ENABLE_TEST_HOOKS=true.
@@ -81,6 +120,11 @@ class CommandParams(TypedDict, total=False):
     fault: TestFaultName
     enabled: bool
     value: float
+    # setGimbal, degrees, GIMBAL_PITCH_MIN_DEG..GIMBAL_PITCH_MAX_DEG.
+    pitchDeg: float
+    # enterUnattended / exitUnattended: the operator making the change. Both
+    # travel the ordinary acked command path like every other command.
+    operatorId: str
 
 
 # --- TypedDicts for the JSON messages (what goes over the wire) -------------
@@ -150,7 +194,13 @@ class Link(TypedDict):
     latencyMs: float
 
 
-class Telemetry(TypedDict):
+class GimbalState(TypedDict):
+    """Reported gimbal attitude, degrees. Optional on Telemetry: airframes
+    without a commandable gimbal omit it rather than reporting a fictional 0."""
+    pitchDeg: float  # GIMBAL_PITCH_MIN_DEG..GIMBAL_PITCH_MAX_DEG
+
+
+class TelemetryRequired(TypedDict):
     type: Literal["telemetry"]
     ts: int
     vehicleId: str
@@ -170,6 +220,11 @@ class Telemetry(TypedDict):
     sortie: Optional[SortieState]
     home: Home
     link: Link
+
+
+class Telemetry(TelemetryRequired, total=False):
+    # Present only when the airframe carries a commandable gimbal.
+    gimbal: GimbalState
 
 
 class DetectedTarget(TypedDict):
@@ -256,12 +311,15 @@ PlanTool = Union[
     FollowTool, OrbitTool, GotoRelativeTool,
     GotoGpsTool, OrbitPointTool, HoldTool, RtlTool,
 ]
+# Where a cue came from. "cctv" and "fence_sensor" are the fixed-infrastructure
+# "cue rails": they observe continuously and their cues expire (see ttl_s).
 AnomalySource = Literal[
-    "sentinel2", "sar", "sdr", "rf_drone", "drone_survey", "cctv",
+    "sentinel2", "sar", "sdr", "rf_drone", "drone_survey",
+    "cctv", "fence_sensor",
 ]
 
 
-class Anomaly(TypedDict):
+class AnomalyRequired(TypedDict):
     """A detected site anomaly. ``type`` here is the anomaly KIND (e.g.
     'change'), NOT a message discriminant -- the wire wrapper nests the
     payload precisely to avoid that collision (see AnomalyMessage)."""
@@ -274,7 +332,67 @@ class Anomaly(TypedDict):
     source: AnomalySource
 
 
-class MissionPlan(TypedDict):
+class Anomaly(AnomalyRequired, total=False):
+    # Epoch ms the cue was OBSERVED -- earlier than the ``ts`` of the wire
+    # message that carries it. Optional while the satellite/SAR rails still
+    # emit undated cues; the cue rails (cctv / fence_sensor) always set it.
+    observedAt: int
+    # Cue lifetime in seconds from observedAt. Past it the cue is stale and
+    # must not be dispatched on. Optional for the same reason.
+    ttl_s: float
+    # Fixed camera that raised the cue (site.cameras[].id), when any.
+    cameraId: str
+
+
+class PlanTraceEntry(TypedDict):
+    """One decision the planner made, in the order it was made. A trace is a
+    reason-for-record only: it never carries coordinates, tools or altitudes."""
+    rule: str
+    effect: str
+
+
+class LatLon(TypedDict):
+    lat: float
+    lon: float
+
+
+class LatLonAlt(TypedDict):
+    lat: float
+    lon: float
+    relAlt: float   # m above home
+
+
+# One straight segment of the flight tube a verified plan may fly inside.
+# Declared functionally because "from" is a Python keyword.
+CorridorLeg = TypedDict("CorridorLeg", {
+    "from": LatLon,
+    "to": LatLon,
+    "lateral_tol_m": float,   # half-width of the tube about the leg, m
+})
+
+
+class CorridorOrbit(TypedDict):
+    """One orbit the flight tube permits."""
+    center: LatLon
+    radius_m: float
+    radial_tol_m: float       # permitted radial error about radius_m, m
+
+
+class AltBand(TypedDict):
+    min: float
+    max: float
+
+
+class Corridor(TypedDict):
+    """The geometric envelope a verified plan is allowed to occupy. The envelope
+    monitor checks the vehicle against THIS rather than re-running the planner."""
+    legs: list                # list[CorridorLeg]
+    orbits: list              # list[CorridorOrbit]
+    alt_band_m: AltBand       # m AGL, relative to home
+    generated_from: str       # requestId of the MissionPlan it came from
+
+
+class MissionPlanRequired(TypedDict):
     requestId: str   # ground-side correlation only -- never used by the ack path
     anomalyId: str
     tools: list      # list[PlanTool]
@@ -282,8 +400,16 @@ class MissionPlan(TypedDict):
     rationale: str
 
 
+class MissionPlan(MissionPlanRequired, total=False):
+    # Ordered record of the rules that shaped this plan. Optional for now --
+    # the planner does not emit it yet.
+    planTrace: list  # list[PlanTraceEntry]
+    # Flight tube derived from ``tools``. Optional for now -- same reason.
+    corridor: Corridor
+
+
 class VerificationCheck(TypedDict, total=False):
-    name: str
+    name: str        # see VERIFICATION_CHECK_NAMES for the agreed names
     ok: bool
     reason: str
     edit: str        # optional: human-readable description of an applied correction
@@ -294,12 +420,43 @@ class Verification(TypedDict, total=False):
     verdict: VerificationVerdict
     checks: list     # list[VerificationCheck]
     correctedPlan: MissionPlan  # present when verdict == "corrected"
+    # Delayed-dispatch correction: epoch ms before which this plan must NOT be
+    # dispatched (an attended window that has not opened, a deconfliction wait).
+    holdUntil: int
 
 
 class IncidentReport(TypedDict):
     missionId: str
     verdict: IncidentVerdict
     markdown: str
+
+
+# --- Tasking ---------------------------------------------------------------
+# A task says WHAT to look for and WHY -- never where, how high, or with which
+# tool. It carries no coordinates of its own: the only geometry it may
+# reference is ``anomalyId``. This is exactly the surface an LLM is allowed to
+# emit as schema-bound JSON.
+
+class TaskRequired(TypedDict):
+    taskId: str
+    anomalyId: str
+    lookFor: TaskLookFor
+    question: str      # <= TASK_QUESTION_MAX_CHARS characters
+    urgency: TaskUrgency
+    priority: float    # 0..1
+    rationale: str
+    source: TaskSource
+
+
+class Task(TaskRequired, total=False):
+    assignedTo: str    # vehicleId this task is assigned to, if any
+
+
+class TaskMessage(TypedDict):
+    type: Literal["task"]
+    ts: int
+    vehicleId: str
+    task: Task
 
 
 class CommandRequired(TypedDict):
@@ -495,7 +652,7 @@ class ReadinessMessage(TypedDict):
 
 HealthComponent = Literal[
     "link", "planner", "gps", "battery", "wind", "camera", "thermal", "lidar",
-    "site_model", "mesh", "sdr",
+    "site_model", "mesh", "sdr", "envelope",
 ]
 
 
@@ -559,12 +716,91 @@ class FleetFailsafe(TypedDict):
     reason: str
 
 
-class FleetVehicle(TypedDict):
+# --- Envelope monitoring, attendance mode, escalation, cue rails -----------
+
+class EnvelopeMessageRequired(TypedDict):
+    type: Literal["envelope"]
+    ts: int
+    vehicleId: str
+    state: EnvelopeState
+
+
+class EnvelopeMessage(EnvelopeMessageRequired, total=False):
+    # The limit this report is about -- omitted only when state is
+    # "in_envelope" with nothing notable nearby.
+    constraint: EnvelopeConstraint
+    # Signed metres of margin to ``constraint``: positive is inside the
+    # envelope, negative is how far past the limit the vehicle is.
+    margin_m: float
+    action: EnvelopeAction
+
+
+class ModeMessage(TypedDict):
+    type: Literal["mode"]
+    ts: int
+    vehicleId: str
+    mode: AttendanceMode
+    since: int              # epoch ms this attendance mode began
+    operatorPresent: bool   # the liveness signal behind ``mode``
+
+
+class EscalationMessageRequired(TypedDict):
+    type: Literal["escalation"]
+    ts: int
+    vehicleId: str
+    missionId: str
+    channel: str            # delivery channel id, e.g. "console"
+    payload: dict           # channel-specific body, kept verbatim for audit
+
+
+class EscalationMessage(EscalationMessageRequired, total=False):
+    deliveredAt: int        # epoch ms the channel confirmed delivery
+
+
+class CctvEventRequired(TypedDict):
+    """A fixed-camera cue. Audit/provenance ONLY: it never carries a dispatch,
+    a route or an altitude. The dispatchable form of a camera cue is an
+    Anomaly with source "cctv"."""
+    type: Literal["cctvEvent"]
+    ts: int
+    vehicleId: str
+    cameraId: str           # site.cameras[].id
+    zone: str               # site.cameras[].zones[].name
+
+
+# "class" is a Python keyword, so the optional half is declared functionally.
+CctvEventOptional = TypedDict("CctvEventOptional", {
+    "class": str,           # coarse classifier label, when the camera reports one
+    "thumbnail": str,       # repo-relative path or data URL
+}, total=False)
+
+
+class CctvEventMessage(CctvEventRequired, CctvEventOptional):
+    pass
+
+
+class FleetSortie(TypedDict):
+    """Sortie budget as the fleet view reports it. Deliberately distinct from
+    SortieState: ``must_rtl_by`` is an EPOCH-MS deadline, not seconds into the
+    sortie, so a fleet row is comparable across vehicles."""
+    elapsed_s: float
+    must_rtl_by: int
+
+
+class FleetVehicleRequired(TypedDict):
     vehicleId: str
     battery: Battery
     controlSource: ControlSource
     failsafe: FleetFailsafe
     readiness: FleetReadiness
+    position: LatLonAlt
+    sortie: Optional[FleetSortie]   # None when the vehicle is not on a sortie
+
+
+class FleetVehicle(FleetVehicleRequired, total=False):
+    # The corridor this vehicle is currently cleared to fly, when any -- the
+    # input a deconfliction check needs from every other vehicle.
+    plannedCorridor: Corridor
 
 
 class FleetMessage(TypedDict):
@@ -572,6 +808,32 @@ class FleetMessage(TypedDict):
     ts: int
     vehicleId: str
     vehicles: list
+
+
+class MissionRecordRequired(TypedDict):
+    """The durable per-mission audit record: everything needed to reconstruct
+    why a mission flew, what it was allowed to do, and what it actually did.
+    Carries ``vehicleId`` like every other audit entry."""
+    missionId: str
+    vehicleId: str
+    anomalyId: str
+    plan: MissionPlan
+    verification: Verification
+    startedAt: int
+    mode: AttendanceMode        # attendance in force when it was dispatched
+    planTrace: list             # list[PlanTraceEntry]; [] when none was emitted
+    envelopeEvents: list        # list[EnvelopeMessage], in order; [] if none
+
+
+class MissionRecord(MissionRecordRequired, total=False):
+    report: IncidentReport
+    endedAt: int
+    # The task this mission answered, when one drove it.
+    task: Task
+    # The corridor the mission was cleared for, when one was generated.
+    corridor: Corridor
+    # vehicleId that handed this mission over, when it was a handoff.
+    handoffFrom: str
 
 
 class SimulationToggles(TypedDict):
@@ -593,6 +855,7 @@ InboundMessage = Union[
     AnomalyMessage, MissionPlanMessage, VerificationMessage, IncidentReportMessage,
     ObservationMessage, CapabilitiesMessage, PlanCommandAckMessage, ReadinessMessage,
     HealthEventMessage, RfEventMessage, SpectrumMessage, FleetMessage,
+    TaskMessage, EnvelopeMessage, ModeMessage, EscalationMessage, CctvEventMessage,
 ]
 OutboundMessage = Union[
     Command, ManualInputMessage, PlanCommandMessage, PlanHeartbeatMessage, RfEventMessage,

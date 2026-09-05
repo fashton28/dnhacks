@@ -85,8 +85,11 @@ export type PlanTool =
   | FollowTool | OrbitTool | GotoRelativeTool
   | GotoGpsTool | OrbitPointTool | HoldTool | RtlTool;
 
+/** Where a cue came from. `cctv` and `fence_sensor` are the fixed-infrastructure
+ *  "cue rails": they observe continuously and their cues expire (see `ttl_s`). */
 export type AnomalySource =
-  | 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey' | 'cctv';
+  | 'sentinel2' | 'sar' | 'sdr' | 'rf_drone' | 'drone_survey'
+  | 'cctv' | 'fence_sensor';
 
 /** A detected site anomaly. `type` is the anomaly KIND (e.g. 'change'). */
 export interface Anomaly {
@@ -97,6 +100,37 @@ export interface Anomaly {
   confidence: number;  // 0..1
   thumbnail: string;   // repo-relative path or data URL
   source: AnomalySource;
+  /** Epoch ms the cue was OBSERVED. Optional while the satellite/SAR rails
+   *  still emit undated cues; the cue rails always set it. */
+  observedAt?: number;
+  /** Cue lifetime in seconds from `observedAt`; past it the cue is stale. */
+  ttl_s?: number;
+  /** Fixed camera that raised the cue (`site.cameras[].id`), when any. */
+  cameraId?: string;
+}
+
+/** One decision the planner made, in the order it was made. Reason-for-record
+ *  only: never coordinates, tools or altitudes. */
+export interface PlanTraceEntry { rule: string; effect: string; }
+
+export interface CorridorLeg {
+  from: { lat: number; lon: number };
+  to: { lat: number; lon: number };
+  lateral_tol_m: number;
+}
+
+export interface CorridorOrbit {
+  center: { lat: number; lon: number };
+  radius_m: number;
+  radial_tol_m: number;
+}
+
+/** The geometric envelope a verified plan is allowed to occupy. */
+export interface Corridor {
+  legs: CorridorLeg[];
+  orbits: CorridorOrbit[];
+  alt_band_m: { min: number; max: number };  // m AGL, relative to home
+  generated_from: string;                    // MissionPlan.requestId
 }
 
 export interface MissionPlan {
@@ -105,7 +139,19 @@ export interface MissionPlan {
   tools: PlanTool[];
   profile: MissionProfile;
   rationale: string;
+  /** Optional for now — the planner does not emit these yet. */
+  planTrace?: PlanTraceEntry[];
+  corridor?: Corridor;
 }
+
+/** Check names the verifier and the mirrors agree on. `VerificationCheck.name`
+ *  stays a plain `string` so a verifier may report an unlisted check. */
+export type VerificationCheckName =
+  | 'geofence' | 'nfz' | 'altitude' | 'battery' | 'attended' | 'deconfliction';
+
+export const VERIFICATION_CHECK_NAMES: VerificationCheckName[] = [
+  'geofence', 'nfz', 'altitude', 'battery', 'attended', 'deconfliction',
+];
 
 export interface VerificationCheck {
   name: string;
@@ -119,12 +165,42 @@ export interface Verification {
   verdict: 'pass' | 'corrected' | 'rejected';
   checks: VerificationCheck[];
   correctedPlan?: MissionPlan;  // present when verdict === 'corrected'
+  /** Delayed-dispatch correction: epoch ms before which this plan must NOT be
+   *  dispatched (an attended window that has not opened, a deconfliction wait). */
+  holdUntil?: number;
 }
 
 export interface IncidentReport {
   missionId: string;
   verdict: 'false_alarm' | 'log' | 'escalate';
   markdown: string;
+}
+
+/* ---- Tasking: WHAT to look for and WHY. No coordinates (only anomalyId),
+ * no tools, no altitudes — the schema-bound surface an LLM may emit. ------ */
+export type TaskLookFor = 'person' | 'vehicle' | 'fence_gap' | 'structure' | 'unknown';
+export type TaskUrgency = 'immediate' | 'next_sortie' | 'defer';
+export type TaskSource = 'llm' | 'operator' | 'scripted';
+
+export const TASK_QUESTION_MAX_CHARS = 120;
+
+export interface Task {
+  taskId: string;
+  anomalyId: string;
+  lookFor: TaskLookFor;
+  question: string;     // <= TASK_QUESTION_MAX_CHARS characters
+  urgency: TaskUrgency;
+  priority: number;     // 0..1
+  rationale: string;
+  source: TaskSource;
+  assignedTo?: string;  // vehicleId
+}
+
+export interface TaskMessage {
+  type: 'task';
+  ts: number;
+  vehicleId: string;
+  task: Task;
 }
 
 export type NavSource = 'gps' | 'optflow' | 'extnav';
@@ -140,6 +216,11 @@ export type Mode =
 export interface FailsafeStatus { state: FailsafeState; reason: string; }
 export interface GpsHealth { fix: number; sats: number; hdop: number; }
 export interface SortieState { elapsed_s: number; cap_s: number; must_rtl_by_s: number; }
+
+/** Gimbal pitch limits, degrees: -30 up, 0 level, 90 straight down. */
+export const GIMBAL_PITCH_MIN_DEG = -30;
+export const GIMBAL_PITCH_MAX_DEG = 90;
+export interface GimbalState { pitchDeg: number; }
 
 export interface BatteryState {
   soc_pct: number;
@@ -175,6 +256,8 @@ export interface Telemetry {
   sortie: SortieState | null;
   home: { lat: number; lon: number; distance: number };
   link: { rssi: number; latencyMs: number };
+  /** Present only when the airframe carries a commandable gimbal. */
+  gimbal?: GimbalState;
 }
 
 export interface ReadinessMessage {
@@ -250,7 +333,7 @@ export interface RfEventMessage {
 
 export type HealthComponent =
   | 'link' | 'planner' | 'gps' | 'battery' | 'wind' | 'camera'
-  | 'thermal' | 'lidar' | 'site_model' | 'mesh' | 'sdr';
+  | 'thermal' | 'lidar' | 'site_model' | 'mesh' | 'sdr' | 'envelope';
 export interface HealthEventMessage {
   type: 'healthEvent'; ts: number; vehicleId: string;
   component: HealthComponent; state: string; detail: string;
@@ -277,11 +360,64 @@ export interface PlanCommandAckMessage {
   status: 'accepted' | 'rejected' | 'clamped'; reason: string;
 }
 export interface PlanHeartbeatMessage { type: 'planHeartbeat'; ts: number; vehicleId: string; }
+
+/* ---- Envelope monitoring, attendance mode, escalation, cue rails ---------- */
+export type EnvelopeState = 'in_envelope' | 'warning' | 'breach';
+export type EnvelopeConstraint =
+  | 'corridor' | 'altitude' | 'geofence' | 'nfz'
+  | 'standoff' | 'sortie' | 'separation';
+/** Never 'continue': a breach resolves to hold | rtl (or an escalation). */
+export type EnvelopeAction = 'none' | 'slow' | 'hold' | 'rtl';
+export interface EnvelopeMessage {
+  type: 'envelope'; ts: number; vehicleId: string; state: EnvelopeState;
+  constraint?: EnvelopeConstraint;
+  /** Signed metres to `constraint`; negative is past the limit. */
+  margin_m?: number;
+  action?: EnvelopeAction;
+}
+export type AttendanceMode = 'attended' | 'unattended';
+export interface ModeMessage {
+  type: 'mode'; ts: number; vehicleId: string; mode: AttendanceMode;
+  since: number; operatorPresent: boolean;
+}
+export interface EscalationMessage {
+  type: 'escalation'; ts: number; vehicleId: string; missionId: string;
+  channel: string; payload: Record<string, unknown>; deliveredAt?: number;
+}
+/** Audit/provenance only — never a dispatch, a route or an altitude. */
+export interface CctvEventMessage {
+  type: 'cctvEvent'; ts: number; vehicleId: string;
+  cameraId: string; zone: string; class?: string; thumbnail?: string;
+}
+
+/** `must_rtl_by` is an EPOCH-MS deadline, unlike SortieState.must_rtl_by_s. */
+export interface FleetSortie { elapsed_s: number; must_rtl_by: number; }
 export interface FleetVehicle {
   vehicleId: string; battery: BatteryState; controlSource: ControlSource; failsafe: FailsafeStatus;
   readiness: Omit<ReadinessMessage, 'type' | 'ts' | 'vehicleId'>;
+  position: { lat: number; lon: number; relAlt: number };
+  plannedCorridor?: Corridor;
+  sortie: FleetSortie | null;
 }
 export interface FleetMessage { type: 'fleet'; ts: number; vehicleId: string; vehicles: FleetVehicle[]; }
+
+/** The durable per-mission audit record; carries vehicleId like every entry. */
+export interface MissionRecord {
+  missionId: string;
+  vehicleId: string;
+  anomalyId: string;
+  plan: MissionPlan;
+  verification: Verification;
+  report?: IncidentReport;
+  startedAt: number;
+  endedAt?: number;
+  mode: AttendanceMode;
+  task?: Task;
+  planTrace: PlanTraceEntry[];
+  corridor?: Corridor;
+  envelopeEvents: EnvelopeMessage[];
+  handoffFrom?: string;
+}
 export interface SimulationToggles {
   simulateGpsLoss: boolean; simulateRfInterference: boolean; simulateHostileDrone: boolean;
   simulateLinkLoss: boolean; simulateCameraFail: boolean; simulateCharging: boolean;

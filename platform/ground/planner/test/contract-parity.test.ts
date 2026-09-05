@@ -15,12 +15,20 @@ import {
   Anomaly,
   BatteryState,
   CapabilitiesMessage,
+  CctvEventMessage,
+  Corridor,
+  EnvelopeMessage,
+  EscalationMessage,
   FleetMessage,
+  GimbalState,
   HealthEventMessage,
   IncidentReport,
   MissionPlan,
   MissionProfile,
+  MissionRecord,
+  ModeMessage,
   PlanTool,
+  PlanTraceEntry,
   PlanCommandAckMessage,
   PlanCommandMessage,
   PlanHeartbeatMessage,
@@ -30,9 +38,16 @@ import {
   RfEventMessage,
   SimulationToggles,
   SpectrumMessage,
+  Task,
+  TaskMessage,
+  TASK_QUESTION_MAX_CHARS,
   Telemetry,
   Verification,
   VerificationCheck,
+  VerificationCheckName,
+  VERIFICATION_CHECK_NAMES,
+  GIMBAL_PITCH_MAX_DEG,
+  GIMBAL_PITCH_MIN_DEG,
 } from '../src/contract';
 
 /* ---- type-level mutual assignability (compile-time; evaluated by tsc) ---- */
@@ -61,6 +76,37 @@ const _spectrum: MutuallyAssignable<SpectrumMessage, Auth.SpectrumMessage> = tru
 const _fleet: MutuallyAssignable<FleetMessage, Auth.FleetMessage> = true;
 const _toggles: MutuallyAssignable<SimulationToggles, Auth.SimulationToggles> = true;
 
+/* Phase 1 additions: tasking, plan trace + corridor, envelope monitoring,
+ * attendance mode, escalation, the CCTV cue rail, the gimbal, and the durable
+ * mission record. */
+const _planTrace: MutuallyAssignable<PlanTraceEntry, Auth.PlanTraceEntry> = true;
+const _corridor: MutuallyAssignable<Corridor, Auth.Corridor> = true;
+const _checkName: MutuallyAssignable<VerificationCheckName, Auth.VerificationCheckName> = true;
+const _task: MutuallyAssignable<Task, Auth.Task> = true;
+const _taskMsg: MutuallyAssignable<TaskMessage, Auth.TaskMessage> = true;
+const _envelope: MutuallyAssignable<EnvelopeMessage, Auth.EnvelopeMessage> = true;
+const _mode: MutuallyAssignable<ModeMessage, Auth.ModeMessage> = true;
+const _escalation: MutuallyAssignable<EscalationMessage, Auth.EscalationMessage> = true;
+const _cctv: MutuallyAssignable<CctvEventMessage, Auth.CctvEventMessage> = true;
+const _gimbal: MutuallyAssignable<GimbalState, Auth.GimbalState> = true;
+const _record: MutuallyAssignable<MissionRecord, Auth.MissionRecord> = true;
+
+const _sharedPlanTrace: MutuallyAssignable<Shared.PlanTraceEntry, Auth.PlanTraceEntry> = true;
+const _sharedCorridor: MutuallyAssignable<Shared.Corridor, Auth.Corridor> = true;
+const _sharedMissionPlan: MutuallyAssignable<Shared.MissionPlan, Auth.MissionPlan> = true;
+const _sharedVerification: MutuallyAssignable<Shared.Verification, Auth.Verification> = true;
+const _sharedCheckName: MutuallyAssignable<Shared.VerificationCheckName, Auth.VerificationCheckName> = true;
+const _sharedTask: MutuallyAssignable<Shared.Task, Auth.Task> = true;
+const _sharedTaskMsg: MutuallyAssignable<Shared.TaskMessage, Auth.TaskMessage> = true;
+const _sharedEnvelope: MutuallyAssignable<Shared.EnvelopeMessage, Auth.EnvelopeMessage> = true;
+const _sharedMode: MutuallyAssignable<Shared.ModeMessage, Auth.ModeMessage> = true;
+const _sharedEscalation: MutuallyAssignable<Shared.EscalationMessage, Auth.EscalationMessage> = true;
+const _sharedCctv: MutuallyAssignable<Shared.CctvEventMessage, Auth.CctvEventMessage> = true;
+const _sharedGimbal: MutuallyAssignable<Shared.GimbalState, Auth.GimbalState> = true;
+const _sharedRecord: MutuallyAssignable<Shared.MissionRecord, Auth.MissionRecord> = true;
+const _sharedCommandName: MutuallyAssignable<Shared.CommandName, Auth.CommandName> = true;
+const _sharedCommand: MutuallyAssignable<Shared.Command, Auth.Command> = true;
+
 const _sharedProfile: MutuallyAssignable<Shared.MissionProfile, Auth.MissionProfile> = true;
 const _sharedPlanTool: MutuallyAssignable<Shared.PlanTool, Auth.PlanTool> = true;
 const _sharedAnomaly: MutuallyAssignable<Shared.Anomaly, Auth.Anomaly> = true;
@@ -87,7 +133,9 @@ describe('contract parity (planner mirror vs ground/ui/src/contract)', () => {
       _battery, _telemetry, _observation, _capabilities, _planCommand,
       _planCommandAck, _heartbeat, _readiness, _health, _rf, _spectrum,
       _fleet, _toggles,
-    ]).toEqual(new Array(20).fill(true));
+      _planTrace, _corridor, _checkName, _task, _taskMsg, _envelope, _mode,
+      _escalation, _cctv, _gimbal, _record,
+    ]).toEqual(new Array(31).fill(true));
   });
 
   it('PROFILE_SPEED_MPS values match the authoritative contract', () => {
@@ -101,7 +149,41 @@ describe('contract parity (planner mirror vs ground/ui/src/contract)', () => {
       _sharedTelemetry, _sharedObservation, _sharedCapabilities, _sharedPlanCommand,
       _sharedPlanCommandAck, _sharedHeartbeat, _sharedReadiness, _sharedHealth,
       _sharedRf, _sharedSpectrum, _sharedFleet, _sharedToggles,
-    ]).toEqual(new Array(16).fill(true));
+      _sharedPlanTrace, _sharedCorridor, _sharedMissionPlan, _sharedVerification,
+      _sharedCheckName, _sharedTask, _sharedTaskMsg, _sharedEnvelope, _sharedMode,
+      _sharedEscalation, _sharedCctv, _sharedGimbal, _sharedRecord,
+      _sharedCommandName, _sharedCommand,
+    ]).toEqual(new Array(31).fill(true));
+  });
+
+  it('Phase 1 shared constants match across all three mirrors', () => {
+    expect(TASK_QUESTION_MAX_CHARS).toBe(Auth.TASK_QUESTION_MAX_CHARS);
+    expect(Shared.TASK_QUESTION_MAX_CHARS).toBe(Auth.TASK_QUESTION_MAX_CHARS);
+    expect(VERIFICATION_CHECK_NAMES).toEqual(Auth.VERIFICATION_CHECK_NAMES);
+    expect(Shared.VERIFICATION_CHECK_NAMES).toEqual(Auth.VERIFICATION_CHECK_NAMES);
+    expect(VERIFICATION_CHECK_NAMES).toContain('attended');
+    expect(VERIFICATION_CHECK_NAMES).toContain('deconfliction');
+    expect([GIMBAL_PITCH_MIN_DEG, GIMBAL_PITCH_MAX_DEG])
+      .toEqual([Auth.GIMBAL_PITCH_MIN_DEG, Auth.GIMBAL_PITCH_MAX_DEG]);
+    expect([Shared.GIMBAL_PITCH_MIN_DEG, Shared.GIMBAL_PITCH_MAX_DEG])
+      .toEqual([Auth.GIMBAL_PITCH_MIN_DEG, Auth.GIMBAL_PITCH_MAX_DEG]);
+    // -30 up / 0 level / 90 down — matches the ARGUS console's convention.
+    expect(Auth.GIMBAL_PITCH_MIN_DEG).toBe(-30);
+    expect(Auth.GIMBAL_PITCH_MAX_DEG).toBe(90);
+  });
+
+  it('a Task carries no geometry beyond its anomalyId', () => {
+    const task: Auth.Task = {
+      taskId: 't-1', anomalyId: 'a-1', lookFor: 'vehicle',
+      question: 'Is there a vehicle at the flagged change?',
+      urgency: 'immediate', priority: 0.9, rationale: 'high-confidence change',
+      source: 'llm',
+    };
+    // The schema an LLM may emit: no lat/lon/alt, no tool, no setpoint.
+    const forbidden = ['lat', 'lon', 'alt', 'alt_m', 'tool', 'tools', 'radius',
+      'radius_m', 'speed_mps', 'profile', 'mode', 'waypoints'];
+    for (const key of Object.keys(task)) expect(forbidden).not.toContain(key);
+    expect(task.question.length).toBeLessThanOrEqual(TASK_QUESTION_MAX_CHARS);
   });
 
   it('profile speeds stay under the companion hard max-speed cap', () => {

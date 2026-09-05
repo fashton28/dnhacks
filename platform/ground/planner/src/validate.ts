@@ -180,18 +180,33 @@ export function validateAnomaly(data: unknown): Anomaly {
     throw new Error('invalid Anomaly: thumbnail must be a string');
   }
   const sources: AnomalySource[] = [
-    'sentinel2', 'sar', 'sdr', 'rf_drone', 'drone_survey', 'cctv',
+    'sentinel2', 'sar', 'sdr', 'rf_drone', 'drone_survey', 'cctv', 'fence_sensor',
   ];
   // Pre-Phase1 anomaly files are interpreted as optical satellite cues.
   const source = d.source === undefined ? 'sentinel2' : d.source;
   if (typeof source !== 'string' || !sources.includes(source as AnomalySource)) {
     throw new Error(`invalid Anomaly: source must be one of ${sources.join('|')}`);
   }
-  return {
+  // Cue-rail freshness fields are optional (undated satellite/SAR cues remain
+  // valid); when present they must be sane, and they are passed through.
+  if (d.observedAt !== undefined && !isFiniteNumber(d.observedAt)) {
+    throw new Error('invalid Anomaly: observedAt must be a finite epoch-ms number');
+  }
+  if (d.ttl_s !== undefined && (!isFiniteNumber(d.ttl_s) || d.ttl_s < 0)) {
+    throw new Error('invalid Anomaly: ttl_s must be a number >= 0 (seconds)');
+  }
+  if (d.cameraId !== undefined && typeof d.cameraId !== 'string') {
+    throw new Error('invalid Anomaly: cameraId must be a string');
+  }
+  const anomaly: Anomaly = {
     id: d.id, lat: d.lat, lon: d.lon,
     type: d.type, confidence: d.confidence, thumbnail: d.thumbnail,
     source: source as AnomalySource,
   };
+  if (d.observedAt !== undefined) anomaly.observedAt = d.observedAt;
+  if (d.ttl_s !== undefined) anomaly.ttl_s = d.ttl_s;
+  if (d.cameraId !== undefined) anomaly.cameraId = d.cameraId;
+  return anomaly;
 }
 
 /** Validate untyped data as an ObservationSummary. Throws on bad input. */

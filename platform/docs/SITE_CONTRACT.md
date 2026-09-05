@@ -44,6 +44,32 @@ sensor adapter, and simulator all consume the same selected file.
       "polygon": [[-26.0, 29.0], [-26.0, 29.1], [-26.1, 29.1]]
     }
   ],
+  "cameras": [
+    {
+      "id": "cam-east-north",
+      "lat": -26.0885,
+      "lon": 29.4769,
+      "heading_deg": 270,
+      "fov_deg": 90,
+      "range_m": 250,
+      "fov_polygon": [[-26.0, 29.0], [-26.0, 29.1], [-26.1, 29.1]],
+      "zones": [
+        {
+          "name": "east-fence-north",
+          "polygon": [[-26.0, 29.0], [-26.0, 29.1], [-26.1, 29.1]]
+        }
+      ]
+    }
+  ],
+  "pads": [
+    { "id": "pad-1", "lat": -26.09, "lon": 29.4719 }
+  ],
+  "no_image_zones": [
+    {
+      "name": "admin-block",
+      "polygon": [[-26.0, 29.0], [-26.0, 29.1], [-26.1, 29.1]]
+    }
+  ],
   "staging": [
     {
       "id": "komati-west-service-road",
@@ -62,6 +88,11 @@ sensor adapter, and simulator all consume the same selected file.
 Required fields are `home`, `perimeter`, `geofence`, `nfz_buffer_m`, `nfz`,
 `alt_band_m`, `clear_altitude_m`, `clutter`, and `staging`. Each staging entry
 requires both image paths, `image_kind`, `required_sensors`, and `truth`.
+
+`cameras`, `pads`, and `no_image_zones` are OPTIONAL: a site file without them
+is valid and every consumer must treat an absent array as empty. A file that
+declares one must declare it completely — the per-entry fields below are all
+required.
 
 ## Coordinate, polygon, and altitude semantics
 
@@ -85,6 +116,50 @@ requires both image paths, `image_kind`, `required_sensors`, and `truth`.
 - `clutter[].polygon` identifies areas requiring healthy LiDAR before dispatch.
   A LiDAR failure in flight causes a climb to `clear_altitude_m` before the route
   continues. These polygons also seed deterministic synthetic LiDAR geometry.
+
+## Camera semantics (`cameras`)
+
+- A camera entry is fixed ground infrastructure: `id`, `lat`, `lon`,
+  `heading_deg`, `fov_deg`, `range_m`, `fov_polygon`, and `zones`.
+- `id` is unique across the file and is the value carried by
+  `cctvEvent.cameraId` and by `anomaly.cameraId` for a cue this camera raised.
+- `heading_deg` is the true bearing of the optical axis, 0 = north, clockwise.
+  `fov_deg` is the total horizontal field of view (the axis ± `fov_deg / 2`).
+  `range_m` is the useful detection range along the axis.
+- `fov_polygon` is the ground footprint of that cone, as `[lat, lon]` vertices
+  in the same open-ring form as every other polygon here, first vertex at the
+  camera. It is derived from the other four fields and is provided so the map
+  and the verifier do not each re-derive it; a consumer that recomputes it must
+  match within a metre.
+- `zones[].name` is unique WITHIN a camera and is the value carried by
+  `cctvEvent.zone`. A zone polygon names a watched area inside the footprint.
+- **Camera geometry is not a flight constraint.** A camera may sit on the
+  perimeter outside `geofence`, and its footprint and zones may cover ground the
+  drone is not permitted to enter. Nothing may derive a route, an orbit or an
+  altitude from `cameras`; it exists for cue provenance and for drawing what a
+  camera can see.
+
+## Pad semantics (`pads`)
+
+- A pad entry is `{ id, lat, lon }` and must lie inside `geofence` and outside
+  every buffered NFZ. `id` is unique across the file.
+- `pads[0]` is the home pad and its coordinates equal `home.lat` / `home.lon`.
+  Consumers read the launch point from `home`, never from `pads`; the duplicate
+  exists so a multi-pad site can be drawn without special-casing home.
+- Pads carry no altitude: a pad is at terrain, and `home.alt_m` remains the one
+  elevation reference.
+
+## No-image zone semantics (`no_image_zones`)
+
+- Each entry is `{ name, polygon }` with a unique `name`, in the same open-ring
+  `[lat, lon]` form as `nfz` and `clutter`.
+- A no-image zone is an IMAGING restriction, not a flight restriction: transit
+  over it is permitted, and it never widens or narrows `geofence`, `nfz` or the
+  altitude band. Capture, retention and display of imagery whose footprint
+  intersects a no-image zone is prohibited — a mission that can only answer its
+  task by imaging inside one must be refused, not flown and redacted.
+- A no-image zone is unrelated to `nfz`: the two may overlap, abut, or be
+  disjoint, and neither implies the other.
 
 ## Staging semantics
 
@@ -115,6 +190,12 @@ NFZ buffer is negative, or `clear_altitude_m` is outside the altitude band.
 Unknown fields may be preserved for forward compatibility but cannot replace
 validation of the fields above.
 
+When present, `cameras`, `pads` and `no_image_zones` are refused when an `id` or
+`name` is duplicated, a polygon has fewer than three vertices, `fov_deg` is
+outside `(0, 360]`, `range_m` is not positive, `heading_deg` is outside
+`[0, 360)`, a pad falls outside `geofence` or inside a buffered NFZ, or
+`pads[0]` disagrees with `home`. A camera outside `geofence` is valid.
+
 The Komati stub's 45 m clear altitude intentionally exceeds the baseline
 companion's 30 m configured maximum. Until the companion/SITL profile is safely
 configured for the site's 80 m band, the effective intersection is invalid and
@@ -123,8 +204,14 @@ clear altitude down to an unsafe value.
 
 ## Additions log
 
+Rows landed with the change that introduced them name the phase rather than a
+short SHA, because the SHA does not exist until the commit is written.
+
 | Git commit | Fields | Decision |
 |---|---|---|
 | `178bf0a` | `geofence`, `nfz_buffer_m` | Separate the physical site boundary from the operational ArduPilot fence and apply one 25 m NFZ route buffer. |
 | `178bf0a` | `clear_altitude_m`, `clutter` | Make the LiDAR-degraded climb altitude and clutter readiness geometry site-owned. |
 | `178bf0a` | `thermal_image`, `image_kind`, `required_sensors` | Support paired staged modalities while identifying generated demo placeholders honestly. |
+| `phase-1` | `cameras` | Give the CCTV cue rail a site-owned provenance source: `cctvEvent.cameraId` / `.zone` and `anomaly.cameraId` resolve here, so no consumer hardcodes camera geometry. Footprints are observation-only and never a flight constraint. |
+| `phase-1` | `pads` | Name the launch/recovery points so a multi-vehicle fleet view can be drawn without inventing pad geometry. `pads[0]` restates `home`; `home` stays the single launch reference. |
+| `phase-1` | `no_image_zones` | Make the imaging restriction site-owned and explicitly distinct from `nfz`: transit is allowed, imaging is not, and a task answerable only by imaging inside one is refused rather than flown. |

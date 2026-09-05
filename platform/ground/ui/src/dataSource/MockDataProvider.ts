@@ -25,12 +25,15 @@
 import type {
   Anomaly,
   AnomalyMessage,
+  AttendanceMode,
   CapabilitiesMessage,
   CommandAck,
   Command,
   ConnectionConfig,
   ConnectionState,
   DetectedTarget,
+  EnvelopeMessage,
+  EscalationMessage,
   FleetMessage,
   HealthEventMessage,
   IncidentReportMessage,
@@ -38,6 +41,7 @@ import type {
   MissionPlan,
   MissionPlanMessage,
   Mode,
+  ModeMessage,
   ObservationMessage,
   ReadinessMessage,
   RfEventMessage,
@@ -45,6 +49,8 @@ import type {
   StatusText,
   SpectrumMessage,
   SimulationToggles,
+  Task,
+  TaskMessage,
   TestFaultName,
   Telemetry,
   TrackingState,
@@ -54,6 +60,7 @@ import type {
   VerificationMessage,
 } from '@/contract';
 import { PROFILE_SPEED_MPS } from '@/contract';
+import { GIMBAL_PITCH_MAX_DEG, GIMBAL_PITCH_MIN_DEG } from '@/contract';
 import { DEFAULT_VEHICLE_ID } from '@/contract';
 import type { MissionDataSource } from './types';
 
@@ -83,6 +90,15 @@ const MISSION_TIME_SCALE = 6;
 /** Scenario beat delays, ms (anomaly → failing plan → its verification →
  *  passing plan → its verification → await approval). */
 const SCENARIO_DELAYS_MS = [5000, 2500, 2000, 2500, 2000];
+
+/** Envelope report cadence while airborne, ms (5 Hz). */
+const ENVELOPE_PERIOD_MS = 200;
+
+/** Default gimbal pitch, degrees: looking down at the scene. */
+const DEFAULT_GIMBAL_PITCH_DEG = 45;
+
+/** Cue TTL the mock stamps on the scripted anomaly, seconds. */
+const SCRIPTED_CUE_TTL_S = 900;
 
 const DEFAULT_SIMULATION_TOGGLES: SimulationToggles = {
   simulateGpsLoss: false,
@@ -183,6 +199,10 @@ interface Callbacks {
   rf: Array<(m: RfEventMessage) => void>;
   spectrum: Array<(m: SpectrumMessage) => void>;
   fleet: Array<(m: FleetMessage) => void>;
+  task: Array<(m: TaskMessage) => void>;
+  envl: Array<(m: EnvelopeMessage) => void>;
+  mode: Array<(m: ModeMessage) => void>;
+  escl: Array<(m: EscalationMessage) => void>;
 }
 
 export class MockDataProvider implements MissionDataSource {
@@ -204,6 +224,10 @@ export class MockDataProvider implements MissionDataSource {
     rf: [],
     spectrum: [],
     fleet: [],
+    task: [],
+    envl: [],
+    mode: [],
+    escl: [],
   };
 
   private connState: ConnectionState = 'connected';
@@ -282,9 +306,16 @@ export class MockDataProvider implements MissionDataSource {
   private lastHealthSignature = '';
   private lastReadinessSignature = '';
 
+  // attendance mode + gimbal + envelope monitor (Phase 1 rails)
+  private attendance: AttendanceMode = 'attended';
+  private attendanceSince = now();
+  private gimbalPitchDeg = DEFAULT_GIMBAL_PITCH_DEG;
+  private _scnTask: Task | null = null;
+
   private _tel: ReturnType<typeof setInterval> | null = null;
   private _trk: ReturnType<typeof setInterval> | null = null;
   private _amb: ReturnType<typeof setInterval> | null = null;
+  private _env: ReturnType<typeof setInterval> | null = null;
 
   /* ---- DataSource: lifecycle ------------------------------------------- */
   connect(config: ConnectionConfig): Promise<void> {
@@ -390,6 +421,26 @@ export class MockDataProvider implements MissionDataSource {
     this.cbs.fleet.push(cb);
     return () => this._off('fleet', cb);
   }
+  onTask(cb: (m: TaskMessage) => void): Unsubscribe {
+    this.cbs.task.push(cb);
+    // A task already raised this session is replayed so a late subscriber
+    // (a panel mounted after the scenario beat) still sees it.
+    if (this._scnTask) cb(this.taskMessage(this._scnTask));
+    return () => this._off('task', cb);
+  }
+  onEnvelope(cb: (m: EnvelopeMessage) => void): Unsubscribe {
+    this.cbs.envl.push(cb);
+    return () => this._off('envl', cb);
+  }
+  onMode(cb: (m: ModeMessage) => void): Unsubscribe {
+    this.cbs.mode.push(cb);
+    cb(this.modeMessage()); // attendance is sticky state, like connection state
+    return () => this._off('mode', cb);
+  }
+  onEscalation(cb: (m: EscalationMessage) => void): Unsubscribe {
+    this.cbs.escl.push(cb);
+    return () => this._off('escl', cb);
+  }
   getVideoUrl(): string {
     return '';
   }
@@ -415,6 +466,10 @@ export class MockDataProvider implements MissionDataSource {
   private _emit(k: 'rf', msg: RfEventMessage): void;
   private _emit(k: 'spectrum', msg: SpectrumMessage): void;
   private _emit(k: 'fleet', msg: FleetMessage): void;
+  private _emit(k: 'task', msg: TaskMessage): void;
+  private _emit(k: 'envl', msg: EnvelopeMessage): void;
+  private _emit(k: 'mode', msg: ModeMessage): void;
+  private _emit(k: 'escl', msg: EscalationMessage): void;
   private _emit(k: keyof Callbacks, msg: unknown): void {
     const list = this.cbs[k] as Array<(m: unknown) => void>;
     list.forEach((f) => f(msg));
@@ -590,7 +645,78 @@ export class MockDataProvider implements MissionDataSource {
         controlSource: telemetry.controlSource,
         failsafe: failure,
         readiness: { ready: readiness.ready, reasons: readiness.reasons, eta_ready_s: readiness.eta_ready_s },
+        position: {
+          lat: telemetry.position.lat,
+          lon: telemetry.position.lon,
+          relAlt: telemetry.position.relAlt,
+        },
+        sortie: telemetry.sortie === null ? null : {
+          elapsed_s: telemetry.sortie.elapsed_s,
+          must_rtl_by: now() +
+            Math.max(0, telemetry.sortie.must_rtl_by_s - telemetry.sortie.elapsed_s) * 1000,
+        },
       }],
+    });
+  }
+
+  /* ---- Phase 1 rails: tasking, envelope, attendance, escalation --------- */
+
+  private taskMessage(task: Task): TaskMessage {
+    return { type: 'task', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, task };
+  }
+
+  private modeMessage(): ModeMessage {
+    return {
+      type: 'mode',
+      ts: now(),
+      vehicleId: DEFAULT_VEHICLE_ID,
+      mode: this.attendance,
+      since: this.attendanceSince,
+      // The mock always has an operator at the console; unattended mode is
+      // entered deliberately by command, never by losing the operator.
+      operatorPresent: true,
+    };
+  }
+
+  private setAttendance(mode: AttendanceMode): void {
+    if (this.attendance === mode) return;
+    this.attendance = mode;
+    this.attendanceSince = now();
+    this._emit('mode', this.modeMessage());
+  }
+
+  /** The scripted triage task raised for the flagged anomaly. It names WHAT to
+   *  look for and WHY — never a coordinate (beyond `anomalyId`), tool or
+   *  altitude, so the planner remains the only producer of geometry. */
+  private scriptedTaskFor(anomaly: Anomaly): Task {
+    const lookFor = anomaly.type === 'change' ? 'vehicle' : 'unknown';
+    return {
+      taskId: `task-${anomaly.id}`,
+      anomalyId: anomaly.id,
+      lookFor,
+      question: 'Is there a vehicle at the flagged change, and is the fence intact?',
+      urgency: anomaly.confidence >= 0.8 ? 'immediate' : 'next_sortie',
+      priority: clamp(anomaly.confidence, 0, 1),
+      rationale: `Change detection flagged ${anomaly.id} at ${(anomaly.confidence * 100).toFixed(0)}% confidence.`,
+      source: 'scripted',
+    };
+  }
+
+  /** 5 Hz envelope report while airborne. The baseline mock never breaches:
+   *  it reports the healthy state so the monitor's absence is distinguishable
+   *  from a monitor reporting "fine". */
+  private stepEnvelope(): void {
+    if (!this._started || this.s.relAlt <= 0.5) return;
+    const site = this.site;
+    const ceiling = site ? site.altBandM.max : 80;
+    this._emit('envl', {
+      type: 'envelope',
+      ts: now(),
+      vehicleId: DEFAULT_VEHICLE_ID,
+      state: 'in_envelope',
+      constraint: 'altitude',
+      margin_m: Math.max(0, ceiling - this.s.relAlt),
+      action: 'none',
     });
   }
 
@@ -636,6 +762,12 @@ export class MockDataProvider implements MissionDataSource {
         this.log('warning',
           `Satellite change detection flagged ${anomaly.id} (${anomaly.type}, ` +
           `conf ${(anomaly.confidence * 100).toFixed(0)}%)`);
+        // The triage task follows the cue on the same beat: the operator sees
+        // WHAT is being asked before any plan proposes HOW to answer it.
+        const task = this.scriptedTaskFor(anomaly);
+        this._scnTask = task;
+        this._emit('task', this.taskMessage(task));
+        this.log('info', `Triage task ${task.taskId} (${task.urgency}): ${task.question}`);
       } else if (step === 1) {
         if (this._scnAnomaly && site.nfz.length > 0) {
           this._scnFailing = this.planner.failingPlan(site, this._scnAnomaly);
@@ -705,7 +837,11 @@ export class MockDataProvider implements MissionDataSource {
       baked &&
       pointInPolygon({ lat: baked.lat, lon: baked.lon }, site.perimeter) &&
       site.staging.some((sp) => haversineMeters(sp, baked) < 100);
-    if (coherent) return { ...baked, source: baked.source ?? 'sentinel2' };
+    // Cue freshness: the baked tiles carry no observation time, so the mock
+    // stamps the cue as observed now with an explicit TTL rather than leaving
+    // consumers to guess whether a stale cue is still dispatchable.
+    const freshness = { observedAt: now(), ttl_s: SCRIPTED_CUE_TTL_S };
+    if (coherent) return { ...baked, source: baked.source ?? 'sentinel2', ...freshness };
     const anchor = site.staging[0] ??
       { lat: (site.home.lat + site.perimeter[0].lat) / 2, lon: (site.home.lon + site.perimeter[0].lon) / 2 };
     return {
@@ -716,6 +852,7 @@ export class MockDataProvider implements MissionDataSource {
       confidence: baked?.confidence ?? 0.9,
       thumbnail: baked?.thumbnail ?? '',
       source: baked?.source ?? 'sentinel2',
+      ...freshness,
     };
   }
 
@@ -918,6 +1055,39 @@ export class MockDataProvider implements MissionDataSource {
         message = `${p.fault} ${p.enabled ? 'enabled' : 'cleared'}`;
         break;
       }
+      case 'setGimbal': {
+        if (p.pitchDeg == null) {
+          ok = false;
+          message = 'setGimbal requires params.pitchDeg';
+          break;
+        }
+        const wanted = p.pitchDeg;
+        this.gimbalPitchDeg = clamp(wanted, GIMBAL_PITCH_MIN_DEG, GIMBAL_PITCH_MAX_DEG);
+        if (this.gimbalPitchDeg !== wanted) {
+          message = `Clamped to ${this.gimbalPitchDeg}° ` +
+            `(${GIMBAL_PITCH_MIN_DEG}..${GIMBAL_PITCH_MAX_DEG})`;
+        }
+        this.log('info', `Gimbal pitch → ${this.gimbalPitchDeg.toFixed(0)}°`);
+        break;
+      }
+      case 'enterUnattended':
+        if (!p.operatorId) {
+          ok = false;
+          message = 'enterUnattended requires params.operatorId';
+          break;
+        }
+        this.setAttendance('unattended');
+        this.log('warning', `Unattended mode entered by ${p.operatorId}`);
+        break;
+      case 'exitUnattended':
+        if (!p.operatorId) {
+          ok = false;
+          message = 'exitUnattended requires params.operatorId';
+          break;
+        }
+        this.setAttendance('attended');
+        this.log('info', `Attended mode restored by ${p.operatorId}`);
+        break;
       default:
         ok = false;
         message = 'Unknown command';
@@ -938,6 +1108,8 @@ export class MockDataProvider implements MissionDataSource {
     this._tel = setInterval(() => this.stepTelemetry(), 100); // 10 Hz
     this._trk = setInterval(() => this.stepTracking(), 120);
     this._amb = setInterval(() => this.ambientLog(), 7000);
+    this._env = setInterval(() => this.stepEnvelope(), ENVELOPE_PERIOD_MS); // 5 Hz
+    this._emit('mode', this.modeMessage());
     // Kick the site load early so the map has geometry before the anomaly.
     void getSiteModel().then((site) => this.adoptSite(site)).catch(() => undefined);
     this.scheduleScenario();
@@ -947,7 +1119,8 @@ export class MockDataProvider implements MissionDataSource {
     if (this._tel) clearInterval(this._tel);
     if (this._trk) clearInterval(this._trk);
     if (this._amb) clearInterval(this._amb);
-    this._tel = this._trk = this._amb = null;
+    if (this._env) clearInterval(this._env);
+    this._tel = this._trk = this._amb = this._env = null;
     if (this._scnTimer) clearTimeout(this._scnTimer);
     this._scnTimer = null; // scenario PROGRESS survives reconnects
     this._started = false;
@@ -1154,6 +1327,27 @@ export class MockDataProvider implements MissionDataSource {
       });
       this.log(report.verdict === 'escalate' ? 'critical' : 'info',
         `Incident report ${report.missionId}: ${report.verdict.toUpperCase()}`);
+      if (report.verdict === 'escalate') {
+        // An 'escalate' verdict is the only thing that raises an escalation;
+        // it is a notification of the report, never a new instruction.
+        const escalation: EscalationMessage = {
+          type: 'escalation',
+          ts: now(),
+          vehicleId: DEFAULT_VEHICLE_ID,
+          missionId: report.missionId,
+          channel: 'console',
+          payload: {
+            anomalyId: anomaly.id,
+            taskId: this._scnTask?.taskId ?? null,
+            verdict: report.verdict,
+            attendance: this.attendance,
+          },
+          deliveredAt: now(),
+        };
+        this._emit('escl', escalation);
+        this.log('critical',
+          `Escalation raised for ${report.missionId} on channel ${escalation.channel}`);
+      }
       })().catch((err: unknown) => this.log('error', `Incident report failed: ${(err as Error).message}`));
     }, 3000);
   }
@@ -1329,6 +1523,7 @@ export class MockDataProvider implements MissionDataSource {
       link: this.simulationToggles.simulateLinkLoss
         ? { rssi: -120, latencyMs: 9999 }
         : { rssi: s.rssi, latencyMs: s.latency },
+      gimbal: { pitchDeg: this.gimbalPitchDeg },
     };
     this._emit('tel', telemetry);
     this.emitAuxiliary(telemetry);
