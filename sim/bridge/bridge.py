@@ -225,7 +225,7 @@ class Bridge:
             self.last_vel_send = 0.0
             return Ack(cmd_id=cmd.cmd_id, ok=True)
         if isinstance(cmd, LookAt):
-            self.gimbal = max(0.0, min(90.0, cmd.pitch_deg))
+            self.gimbal = max(-30.0, min(90.0, cmd.pitch_deg))
             return Ack(cmd_id=cmd.cmd_id, ok=True)
         if isinstance(cmd, ReturnHome):
             self.intent = "rth"

@@ -69,7 +69,7 @@ export function renderTelemetry(el: HTMLElement, s: DroneState | undefined): voi
 
 export function renderHud(el: HTMLElement, s: DroneState | undefined, streaming: boolean, mode = "rgb"): void {
   if (!s) { el.innerHTML = ""; return; }
-  el.innerHTML = `<span>${esc(s.drone_id)} · ${s.alt.toFixed(1)} m · ${s.heading_deg.toFixed(0)}°</span><span>${mode !== "rgb" ? `<span class="mode">${esc(mode.toUpperCase())}</span>` : ""}${streaming ? '<span class="rec">LIVE</span>' : ""}${new Date(s.ts).toLocaleTimeString()}</span>`;
+  el.innerHTML = `<span>${esc(s.drone_id)} · ${s.alt.toFixed(1)} m · ${s.heading_deg.toFixed(0)}° · gimbal ${Math.round(s.gimbal_pitch_deg)}°</span><span>${mode !== "rgb" ? `<span class="mode">${esc(mode.toUpperCase())}</span>` : ""}${streaming ? '<span class="rec">LIVE</span>' : ""}${new Date(s.ts).toLocaleTimeString()}</span>`;
 }
 
 export function renderMission(el: HTMLElement, m: Mission | undefined, spec: MissionSpecView, validation: ValidationView, droneId: string | null): void {

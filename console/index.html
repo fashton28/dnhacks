@@ -68,6 +68,11 @@
               <span id="drone-view-id" class="mono sel-id">—</span>
               <span id="drone-view-status" class="chip"></span>
               <span class="head-spacer"></span>
+              <label class="gimbal" title="Camera gimbal pitch: drag, or [ and ] keys. -30° looks up, 90° straight down">
+                <span class="gimbal-label">GIMBAL</span>
+                <input type="range" id="gimbal" min="-30" max="90" step="1" value="45" aria-label="Gimbal pitch" />
+                <span id="gimbal-value" class="mono">45°</span>
+              </label>
               <div class="seg" id="vision-seg" role="group" aria-label="Vision mode" title="Sensor feed (V cycles)">
                 <button data-mode="rgb" class="on" title="Visible-light camera">RGB</button>
                 <button data-mode="thermal" title="Thermal infrared: heat sources stand out">Thermal</button>
