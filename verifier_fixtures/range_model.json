@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "vehicle_class": "quad_with_rgb_thermal_lidar",
+  "nominal_endurance_s": 1500,
+  "reserve_pct": 25.0,
+  "wind_time_factor_per_mps": 0.05,
+  "max_wind_mps": 12.0,
+  "anomaly_proximity_m": 200.0,
+  "max_sortie_s": 480,
+  "dispatch_min_soc_pct": 80.0,
+  "cell_imbalance_max_v": 0.1,
+  "batt_temp_max_c": 60.0,
+  "soc_divergence_max_pct_points": 10.0,
+  "calculation": {
+    "available_s": "nominal_endurance_s * max(0, (live_soc_pct - reserve_pct) / 100)",
+    "wind_adjusted_s": "estimated_flight_s * (1 + wind_time_factor_per_mps * wind_mps)",
+    "planner_time_budget_s": "min(available_s, max_sortie_s)",
+    "soc_selection": "min(coulomb_counted_soc_pct, voltage_derived_soc_pct) when estimates differ by more than soc_divergence_max_pct_points"
+  }
+}
