@@ -144,6 +144,10 @@ export class MockDataProvider implements DataSource {
   // manual (game-controller) piloting
   private manual: ManualState = { active: false, throttle: 0, yaw: 0, pitch: 0, roll: 0 };
 
+  // mission planner (executePlan): while active, controlSource is 'planner'.
+  // Full scripted anomaly→report flow lands in Phase 3; this only tracks the flag.
+  private plannerActive = false;
+
   private _searchT = 0;
   private _lostStart = 0;
   private _warn30 = false;
@@ -235,6 +239,7 @@ export class MockDataProvider implements DataSource {
         this.s.mode = 'LOITER';
         this.s.targetAlt = 0;
         this.manual.active = false;
+        this.plannerActive = false;
         this.manual.throttle = this.manual.yaw = this.manual.pitch = this.manual.roll = 0;
         if (this.track.state !== 'idle') {
           this.track.state = 'idle';
@@ -262,11 +267,13 @@ export class MockDataProvider implements DataSource {
       case 'land':
         this.s.phase = 'landing';
         this.s.mode = 'LAND';
+        this.plannerActive = false;
         this.log('info', 'Landing');
         break;
       case 'rtl':
         this.s.phase = 'rtl';
         this.s.mode = 'RTL';
+        this.plannerActive = false;
         this.log('info', 'Return to launch');
         break;
       case 'setMode':
@@ -274,6 +281,7 @@ export class MockDataProvider implements DataSource {
         this.log('info', `Mode → ${p.mode}`);
         break;
       case 'engageTracking':
+        this.plannerActive = false; // exactly one controlSource
         this.track.state = 'searching';
         this.log('info', 'Tracking engaged — searching');
         break;
@@ -301,6 +309,7 @@ export class MockDataProvider implements DataSource {
           break;
         }
         this.manual.active = true;
+        this.plannerActive = false; // manual takeover releases the planner
         this.s.mode = 'STABILIZE';
         if (this.s.phase === 'idle') this.s.phase = 'flying';
         if (this.track.state !== 'idle') {
@@ -316,6 +325,37 @@ export class MockDataProvider implements DataSource {
         this.manual.throttle = this.manual.yaw = this.manual.pitch = this.manual.roll = 0;
         if (this.s.armed) this.s.mode = 'LOITER';
         this.log('info', 'Manual released — position hold');
+        break;
+      case 'executePlan': {
+        if (!this.s.armed) {
+          ok = false;
+          message = 'Not armed';
+          break;
+        }
+        const plan = p.plan;
+        this.plannerActive = true;
+        this.s.mode = 'GUIDED';
+        if (this.s.phase === 'idle') this.s.phase = 'flying';
+        if (this.track.state !== 'idle') {
+          this.track.state = 'idle';
+          this.track.lockedTargetId = null;
+          this.track.estimatedDistance = null;
+          this.log('warning', 'Tracking released for planner');
+        }
+        this.log(
+          'info',
+          plan
+            ? `Executing plan ${plan.requestId} — ${plan.tools.length} step(s), profile ${plan.profile}`
+            : 'Executing plan',
+        );
+        break;
+      }
+      case 'abortPlan':
+        if (this.plannerActive) {
+          this.plannerActive = false;
+          if (this.s.armed) this.s.mode = 'LOITER';
+          this.log('warning', 'Plan aborted — position hold');
+        }
         break;
       default:
         ok = false;
@@ -450,7 +490,13 @@ export class MockDataProvider implements DataSource {
       ts: now(),
       armed: s.armed,
       mode: s.mode,
-      controlSource: this.manual.active ? 'manual' : this.track.state === 'locked' ? 'tracking' : 'auto',
+      controlSource: this.manual.active
+        ? 'manual'
+        : this.plannerActive
+          ? 'planner'
+          : this.track.state === 'locked'
+            ? 'tracking'
+            : 'auto',
       attitude: { roll: s.roll, pitch: s.pitch, yaw: s.heading },
       position: { lat: s.lat, lon: s.lon, relAlt: s.relAlt, absAlt: s.relAlt + 32 },
       velocity: { groundspeed: s.groundspeed, verticalSpeed: s.vspeed },

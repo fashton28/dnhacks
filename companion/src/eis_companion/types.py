@@ -36,6 +36,7 @@ class ControlSource(str, Enum):
     AUTO = "auto"
     TRACKING = "tracking"
     MANUAL = "manual"
+    PLANNER = "planner"  # mission planner (contract 'planner'; behavior wired in Phase 2)
 
 
 class TrackingState(str, Enum):

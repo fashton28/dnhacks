@@ -24,7 +24,7 @@ export type Mode =
 
 /** Authoritative active control source, reported by the vehicle. Exactly one is
  *  ever active. The UI may also track manual state locally for instant feedback. */
-export type ControlSource = 'auto' | 'tracking' | 'manual';
+export type ControlSource = 'auto' | 'tracking' | 'manual' | 'planner';
 
 export interface Telemetry {
   type: 'telemetry';
@@ -70,6 +70,88 @@ export interface StatusText {
 }
 
 /* ---------------------------------------------------------------------------
+ * Mission planner types (anomaly → plan → verification → incident report).
+ * ------------------------------------------------------------------------- */
+
+/** Named speed profile for planned missions. */
+export type MissionProfile = 'slow' | 'standard' | 'fast';
+
+/** Cruise speed per profile, m/s. These MUST stay under the companion
+ *  config.py hard max-speed cap (8 m/s — DEFAULTS.maxSpeedCap). */
+export const PROFILE_SPEED_MPS: Record<MissionProfile, number> = {
+  slow: 2.0,
+  standard: 4.0,
+  fast: 6.0,
+};
+
+/* One step of a mission plan, discriminated on `tool`. */
+export interface GotoGpsTool {
+  tool: 'goto_gps';
+  lat: number;
+  lon: number;
+  alt: number;               // m, relative
+  profile?: MissionProfile;  // optional speed override for this leg
+}
+
+export interface OrbitPointTool {
+  tool: 'orbit_point';
+  lat: number;
+  lon: number;
+  radius: number;            // m
+}
+
+export interface HoldTool {
+  tool: 'hold';
+  durationS?: number;        // seconds; omitted = indefinite
+}
+
+export interface RtlTool {
+  tool: 'rtl';
+}
+
+export type PlanTool = GotoGpsTool | OrbitPointTool | HoldTool | RtlTool;
+
+/** A detected site anomaly. `type` here is the anomaly KIND (e.g. 'change'),
+ *  NOT a message discriminant — the wire wrapper nests the payload precisely
+ *  to avoid that collision (see AnomalyMessage). */
+export interface Anomaly {
+  id: string;
+  lat: number;
+  lon: number;
+  type: string;        // anomaly kind, e.g. 'change'
+  confidence: number;  // 0..1
+  thumbnail: string;   // repo-relative path or data URL
+}
+
+export interface MissionPlan {
+  requestId: string;   // ground-side correlation only — never used by the ack path
+  anomalyId: string;
+  tools: PlanTool[];
+  profile: MissionProfile;
+  rationale: string;
+}
+
+export interface VerificationCheck {
+  name: string;
+  ok: boolean;
+  reason: string;
+  edit?: string;       // human-readable description of an applied correction
+}
+
+export interface Verification {
+  requestId: string;   // matches MissionPlan.requestId (ground-side correlation only)
+  verdict: 'pass' | 'corrected' | 'rejected';
+  checks: VerificationCheck[];
+  correctedPlan?: MissionPlan;  // present when verdict === 'corrected'
+}
+
+export interface IncidentReport {
+  missionId: string;
+  verdict: 'false_alarm' | 'log' | 'escalate';
+  markdown: string;
+}
+
+/* ---------------------------------------------------------------------------
  * Commands.  The base PRD §4 set plus the manual-piloting extension that was
  * added when the UI was built (engageManual / disengageManual).  High-rate
  * stick input is NOT a command — it travels via setManualInput() / the
@@ -86,7 +168,8 @@ export type CommandName =
   | 'arm' | 'disarm' | 'takeoff' | 'land' | 'rtl' | 'setMode'
   | 'engageTracking' | 'disengageTracking' | 'selectTarget'
   | 'setStandoff' | 'setMaxSpeed' | 'emergencyStop'
-  | 'engageManual' | 'disengageManual';
+  | 'engageManual' | 'disengageManual'
+  | 'executePlan' | 'abortPlan';
 
 export interface Command {
   type: 'command';
@@ -97,9 +180,13 @@ export interface Command {
     targetId?: number;     // selectTarget
     meters?: number;       // setStandoff
     mps?: number;          // setMaxSpeed
+    plan?: MissionPlan;    // executePlan: the full verified plan (abortPlan takes no params)
   };
 }
 
+/** Acks correlate by command NAME (first-match FIFO) — there is no requestId
+ *  on the ack path. The `requestId` inside MissionPlan / Verification exists
+ *  for ground-side correlation only and never participates in ack matching. */
 export interface CommandAck {
   type: 'ack';
   ts: number;
@@ -125,6 +212,34 @@ export interface ManualInputMessage extends ManualInput {
   ts: number;
 }
 
+/* Planner wire/event messages. Payloads are NESTED (e.g. `anomaly.type` is the
+ * anomaly kind) so payload fields never collide with the message `type`
+ * discriminant. They flow ground-internally through DataSource today and may
+ * later cross the socket unchanged. */
+export interface AnomalyMessage {
+  type: 'anomaly';
+  ts: number;
+  anomaly: Anomaly;
+}
+
+export interface MissionPlanMessage {
+  type: 'missionPlan';
+  ts: number;
+  plan: MissionPlan;
+}
+
+export interface VerificationMessage {
+  type: 'verification';
+  ts: number;
+  verification: Verification;
+}
+
+export interface IncidentReportMessage {
+  type: 'incidentReport';
+  ts: number;
+  report: IncidentReport;
+}
+
 export type ConnectionState =
   | 'disconnected' | 'connecting' | 'connected' | 'error';
 
@@ -136,7 +251,9 @@ export interface ConnectionConfig {
 }
 
 /** Any message the companion may push to the ground over the control socket. */
-export type InboundMessage = Telemetry | TrackingStatus | StatusText | CommandAck;
+export type InboundMessage =
+  | Telemetry | TrackingStatus | StatusText | CommandAck
+  | AnomalyMessage | MissionPlanMessage | VerificationMessage | IncidentReportMessage;
 /** Any message the ground may send to the companion over the control socket. */
 export type OutboundMessage = Command | ManualInputMessage;
 

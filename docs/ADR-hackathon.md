@@ -51,3 +51,19 @@ full gate is the Phase 4 exit criterion.
 generation time): stage-a shows a crude vehicle (truth `vehicle`), stage-b an
 empty pad (truth `false_alarm`). Live vision runs YOLO on whatever image the
 site file points at; scripted paths use the `truth` field directly.
+
+## D7 — `requestId` is ground-side correlation only
+
+Wire acks keep correlating by command **name** (the existing FIFO match in
+LiveDataProvider); `requestId` lives inside the MissionPlan/Verification
+payloads for ground-side plan↔verdict correlation. CommandAck is unchanged.
+
+## D8 — Toolchain reality: uv-managed 3.12 venv; SITL in Docker
+
+WSL2 on this box has only the docker-desktop utility distro (no usable
+userland), so the original "SITL under WSL2" assumption does not hold here.
+Companion tests run in a uv-managed CPython 3.12 venv at `companion/.venv`
+(numpy 1.26.4 pin does not build on the system 3.14). The Phase 4 e2e gate
+targets ArduCopter SITL in a Docker container exposing TCP MAVLink
+(`tcp:127.0.0.1:5760`); scripts keep a native/WSL2 path for boxes that have
+a Linux userland.
