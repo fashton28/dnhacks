@@ -16,9 +16,10 @@ import { useSettings } from '@/store';
 import { getSiteModel } from '@/site';
 import type { SiteModel } from '@/site';
 import { Tabs, Badge, Toast } from '@/components';
-import { LogConsole, MissionMap } from '@/panels';
+import { LogConsole } from '@/panels';
+import { SiteMap } from './panels/SiteMap';
 import { ArgusVideo } from './panels/ArgusVideo';
-import { useArgus, selectedDrone, activeMission } from './store';
+import { useArgus, activeMission, CAMERA_MODES, FOV_MAX, FOV_MIN, fovToZoom, zoomToFov, type CameraMode, type CameraView, type SceneProp } from './store';
 import { FleetPanel } from './panels/FleetPanel';
 import { OpsPanel, type OpsActions } from './panels/OpsPanel';
 import { DetectionsPanel, SpecPanel, ValidatorPanel, ReportPanel } from './panels/MissionPanel';
@@ -92,7 +93,7 @@ export default function ArgusApp(): JSX.Element {
             g.setFleet(drones);
             for (const m of (ev.missions as HubMission[]) ?? []) g.setMission(m);
             const sel = g.selected && drones.some((d) => d.drone_id === g.selected) ? g.selected : drones.sort((a, b) => a.drone_id.localeCompare(b.drone_id))[0]?.drone_id;
-            if (sel) { hub.setVehicle(sel); g.select(sel); }
+            if (sel) { hub.setVehicle(sel); g.select(sel); void loadCamera(sel); }
             break;
           }
           case 'drone_state': {
@@ -141,7 +142,8 @@ export default function ArgusApp(): JSX.Element {
             toast({ severity: ev.flown ? 'success' : 'warning', title: ev.flown ? `Flown by ${String(ev.drone_id)}` : 'Not flown', message: `${String(ev.detection_id)} · ${String(ev.attempts)} attempt(s)` });
             break;
           }
-          case 'scene': g.setOpenFences(((ev.state as { open_fences?: string[] })?.open_fences) ?? []); break;
+          case 'scene': { const sc = ev.state as { open_fences?: string[]; props?: SceneProp[] } | undefined; g.setOpenFences(sc?.open_fences ?? []); g.setSceneProps(sc?.props ?? []); break; }
+          case 'camera': g.setCamera(String(ev.drone_id), { mode: ev.mode as CameraMode, fov_deg: Number(ev.fov_deg) }); break;
           case 'frame': if (String(ev.drone_id) === (g.selected ?? '')) lastFrame.current = Date.now(); break;
           default: break;
         }
@@ -150,13 +152,19 @@ export default function ArgusApp(): JSX.Element {
     void s.setConn('connecting');
     hub.getJson('/detections').then((r) => { if (r.ok && Array.isArray(r.json)) for (const d of r.json as HubDetection[]) st.getState().addDetection(d); });
     hub.getJson('/missions').then((r) => { if (r.ok && Array.isArray(r.json)) for (const m of r.json as HubMission[]) st.getState().setMission(m); });
+    hub.getJson('/scene').then((r) => { if (r.ok && r.json) { const sc = r.json as { open_fences?: string[]; props?: SceneProp[] }; st.getState().setOpenFences(sc.open_fences ?? []); st.getState().setSceneProps(sc.props ?? []); } });
     const sampler = setInterval(() => st.getState().sampleHistory(), 1000);
     return () => { offs.forEach((f) => f()); clearInterval(sampler); hub.disconnect(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [settings.connection.host, settings.connection.controlPort]);
 
   /* ---- selection ---- */
-  const select = useCallback((id: string) => { hub.setVehicle(id); st.getState().select(id); st.getState().setManualActive(false); }, [st]);
+  const select = useCallback((id: string) => { hub.setVehicle(id); st.getState().select(id); st.getState().setManualActive(false); void loadCamera(id); }, [st]);
+  const loadCamera = useCallback(async (id: string) => {
+    const r = await hub.getJson(`/drones/${id}/camera`);
+    if (r.ok && r.json) { const c = r.json as CameraView; st.getState().setCamera(id, { mode: c.mode, fov_deg: c.fov_deg }); }
+  }, [st]);
+  useEffect(() => { const id = st.getState().selected; if (id) void loadCamera(id); }, [loadCamera, st]);
 
   /* ---- actions ---- */
   const post = useCallback(async (path: string, body: unknown, okMsg?: string): Promise<any> => {
@@ -230,9 +238,28 @@ export default function ArgusApp(): JSX.Element {
         }, 100);
       }
     },
+    cameraMode(mode: CameraMode) {
+      const id = st.getState().selected; if (!id) return;
+      const cur = st.getState().camera[id] ?? { mode: 'rgb' as CameraMode, fov_deg: 70 };
+      st.getState().setCamera(id, { ...cur, mode });
+      void post(`/drones/${id}/camera`, { mode }, `${id}: camera ${mode.toUpperCase()}`).catch(() => { /* toast shown by post */ });
+    },
+    cameraFov(fovDeg: number) {
+      const id = st.getState().selected; if (!id) return;
+      const v = Math.round(Math.max(FOV_MIN, Math.min(FOV_MAX, fovDeg)));
+      const cur = st.getState().camera[id] ?? { mode: 'rgb' as CameraMode, fov_deg: 70 };
+      st.getState().setCamera(id, { ...cur, fov_deg: v });
+      fovTarget.current = v;
+      if (fovTimer.current === null) fovTimer.current = window.setTimeout(async () => {
+        fovTimer.current = null; const t = fovTarget.current; if (t === null) return;
+        try { await hub.postJson(`/drones/${id}/camera`, { fov_deg: t }); } catch { /* the live camera event stays authoritative */ }
+      }, 100);
+    },
   }), [post, toast, log, base, st]);
   const gimbalTimer = useRef<number | null>(null);
   const gimbalTarget = useRef<number | null>(null);
+  const fovTimer = useRef<number | null>(null);
+  const fovTarget = useRef<number | null>(null);
 
   const dispatchId = useCallback(async (id: string) => {
     st.getState().setDispatching(id); setCenter('mission');
@@ -268,6 +295,8 @@ export default function ArgusApp(): JSX.Element {
       if (k === 'escape') { setHelp(false); return; }
       if (k === 'h') { if (st.getState().manualActive) void act.manualRelease(); return; }
       if (k === 'r') { void act.returnHome(); return; }
+      if (k === 'v') { const id = st.getState().selected; const cur = (id && st.getState().camera[id]?.mode) || 'rgb'; act.cameraMode(CAMERA_MODES[(CAMERA_MODES.indexOf(cur) + 1) % CAMERA_MODES.length]); return; }
+      if (k === '-' || k === '=' || k === '+') { const id = st.getState().selected; const fov = (id && st.getState().camera[id]?.fov_deg) || 70; act.cameraFov(zoomToFov(fovToZoom(fov) + (k === '-' ? -0.5 : 0.5))); return; }
       if (k === '[' || k === ']') { const cur = st.getState().gimbalPending ?? (st.getState().selected ? st.getState().fleet[st.getState().selected!]?.gimbal_pitch_deg : undefined) ?? 45; act.gimbal(cur + (k === ']' ? 5 : -5)); return; }
       if (['w', 'a', 's', 'd', 'q', 'e', 'arrowleft', 'arrowright'].includes(k)) {
         e.preventDefault();
@@ -325,14 +354,14 @@ export default function ArgusApp(): JSX.Element {
                 <ArgusVideo hubBase={base} lastFrameTs={lastFrame.current + frameTick * 0} onGimbal={(p) => act.gimbal(p)} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1fr)', gap: 8, minHeight: 0 }}>
-                <MissionMap site={site} tel={tel} trail={trail} anomalies={anomalies} plan={route} executing={!!mission} />
+                <SiteMap hubBase={base} onSelect={select} compact />
                 <LogConsole logs={logs} recording={recording} onToggleRecord={() => setRecording((r) => !r)} />
               </div>
             </div>
           ) : (
             <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: 'minmax(0, 1.15fr) minmax(0, 1fr)', gap: 8 }}>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)', gap: 8, minHeight: 0 }}>
-                <MissionMap site={site} tel={tel} trail={trail} anomalies={anomalies} plan={route} executing={!!mission} />
+                <SiteMap hubBase={base} onSelect={select} />
                 <DetectionsPanel hubBase={base} onDispatch={(id) => void dispatchId(id)} />
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: 8, minHeight: 0 }}>
@@ -358,7 +387,7 @@ export default function ArgusApp(): JSX.Element {
           <div className="a-in" onClick={(e) => e.stopPropagation()} style={{ background: 'var(--surface-panel)', border: '1px solid var(--border-default)', borderRadius: 10, padding: '14px 16px 16px', width: 400, boxShadow: 'var(--shadow-modal)' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}><Keyboard size={14} style={{ color: 'var(--text-secondary)' }} /><span className="a-title">Keyboard</span></div>
             <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '6px 14px', alignItems: 'center' }}>
-              {([['1 2 3', 'Select a Drone'], ['R', 'Return the selected Drone to its pad'], ['W S · A D', 'Forward and back · strafe (takes Manual Control)'], ['Q E', 'Down · up'], ['◄ ►', 'Yaw'], ['[ ]', 'Camera up · down, 5° steps'], ['H', 'Release Manual Control; a paused Mission resumes'], ['?  Esc', 'This help · close']] as const).map(([k, v]) => (
+              {([['1 2 3', 'Select a Drone'], ['R', 'Return the selected Drone to its pad'], ['W S · A D', 'Forward and back · strafe (takes Manual Control)'], ['Q E', 'Down · up'], ['◄ ►', 'Yaw'], ['[ ]', 'Camera up · down, 5° steps'], ['V', 'Sensor: RGB · Thermal · LiDAR'], ['- =', 'Zoom out · in'], ['H', 'Release Manual Control; a paused Mission resumes'], ['?  Esc', 'This help · close']] as const).map(([k, v]) => (
                 <React.Fragment key={k}><span className="a-key" style={{ height: 18, fontSize: 10, padding: '0 6px', justifySelf: 'start' }}>{k}</span><span className="a-body">{v}</span></React.Fragment>
               ))}
             </div>

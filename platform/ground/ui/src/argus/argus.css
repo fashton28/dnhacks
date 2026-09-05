@@ -115,3 +115,31 @@
   .argus-hint { display: none; }
   .a-num-lg { font-size: 17px; }
 }
+
+/* ---- segmented control (sensor mode) ---------------------------------------- */
+.a-seg { display: inline-flex; width: 100%; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); overflow: hidden; background: var(--bg-sunken); }
+.a-seg button { flex: 1; height: 24px; border: 0; background: transparent; color: var(--text-tertiary); font: 600 10px/1 var(--font-sans); letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; transition: background 120ms var(--ease-out), color 120ms var(--ease-out); }
+.a-seg button + button { border-left: 1px solid var(--border-subtle); }
+.a-seg button:hover:not(:disabled) { color: var(--text-primary); background: var(--surface-hover); }
+.a-seg button[data-on] { color: var(--a-ink); background: var(--text-primary); }
+.a-seg button:disabled { opacity: 0.45; cursor: default; }
+.a-icobtn[data-on] { color: var(--a-ink); background: var(--text-primary); border-color: var(--text-primary); }
+.a-modetag { font: 700 10px/1 var(--font-mono); letter-spacing: 0.1em; padding: 2px 6px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.35); color: #e8eef5; }
+.a-modetag[data-mode="thermal"] { color: #ffb347; border-color: rgba(255,179,71,0.7); }
+.a-modetag[data-mode="lidar"] { color: #7fd1ff; border-color: rgba(127,209,255,0.7); }
+
+/* ---- site map (MapLibre) ------------------------------------------------------ */
+.a-sitemap { background: #0a0d11; overflow: hidden; }
+.a-sitemap .maplibregl-map { width: 100%; height: 100%; font-family: var(--font-sans); }
+.a-sitemap .a-mapvignette { position: absolute; inset: 0; pointer-events: none; box-shadow: inset 0 0 90px 18px rgba(4, 6, 9, 0.55); }
+.a-sitemap .maplibregl-ctrl-attrib { background: rgba(10, 13, 17, 0.7) !important; color: var(--text-tertiary); font-size: 9px; }
+.a-sitemap .maplibregl-ctrl-attrib a { color: var(--text-secondary); }
+.a-sitemap .maplibregl-ctrl-scale { background: rgba(10, 13, 17, 0.7); color: var(--text-secondary); border-color: var(--text-tertiary); font: 500 9px/1.3 var(--font-mono); }
+.a-mapdrone { width: 30px; height: 30px; cursor: pointer; filter: drop-shadow(0 1px 3px rgba(0,0,0,0.7)); transition: filter 120ms var(--ease-out); }
+.a-mapdrone:hover { filter: drop-shadow(0 0 6px rgba(255,255,255,0.8)); }
+.a-mapdrone svg { width: 100%; height: 100%; overflow: visible; }
+.a-mapdrone .ring { fill: none; stroke-width: 1.5; opacity: 0.9; }
+.a-mapdrone.selected .ring { stroke-width: 2.5; stroke: #ffffff; }
+.a-mapdrone .batt { fill: none; stroke-width: 3; stroke-linecap: round; }
+.a-maplabel { position: absolute; left: 50%; top: 100%; transform: translate(-50%, 1px); white-space: nowrap; font: 600 9.5px/1.3 var(--font-mono); color: var(--text-primary); background: rgba(8, 11, 16, 0.78); padding: 1px 5px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); pointer-events: none; }
+.a-maplabel small { color: var(--text-tertiary); font-weight: 500; margin-left: 4px; }

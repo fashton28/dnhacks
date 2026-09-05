@@ -241,7 +241,8 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         q = reg().subscribe()
         try:
             await ws.send_json({"type": "snapshot", "site": SITE_NAME, "drones": [s.model_dump(mode="json") for s in reg().states()],
-                                "missions": [m.model_dump(mode="json") for m in runner().missions.values()]})
+                                "missions": [m.model_dump(mode="json") for m in runner().missions.values()],
+                                "scene": reg().scene.model_dump(mode="json"), "camera": app.state.camera_settings})
             while True:
                 ev = await q.get()
                 await ws.send_json(ev)

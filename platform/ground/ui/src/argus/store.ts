@@ -17,6 +17,14 @@ export interface IncidentView { title: string; severity: string; body_markdown: 
 export interface OverheadView { ref: string; ts: string }
 export interface ClampView { rule: string; ts: number }
 export interface AgentPlanView { mission_id: string; attempt: number; plan: AgentPlan }
+export interface SceneProp { id: string; kind: string; x: number; y: number; yaw_deg: number }
+export type CameraMode = 'rgb' | 'thermal' | 'lidar';
+export interface CameraView { mode: CameraMode; fov_deg: number }
+export const CAMERA_MODES: CameraMode[] = ['rgb', 'thermal', 'lidar'];
+export const FOV_MIN = 20;   // narrowest field of view (5.5x zoom)
+export const FOV_MAX = 110;  // widest (1x)
+export const fovToZoom = (fov: number): number => FOV_MAX / Math.max(FOV_MIN, Math.min(FOV_MAX, fov));
+export const zoomToFov = (zoom: number): number => Math.round(FOV_MAX / Math.max(1, Math.min(FOV_MAX / FOV_MIN, zoom)));
 
 const SELECTION_KEY = 'argus.gcs.selected';
 
@@ -41,6 +49,9 @@ export interface ArgusState {
   manualActive: boolean;
   dispatching: string | null;
   sceneOpenFences: string[];
+  sceneProps: SceneProp[];
+  /** Per-Drone Renderer camera settings (vision mode, field of view), brokered by the Hub. */
+  camera: Record<string, CameraView>;
   /** Optimistic gimbal pitch while a command is in flight; null when telemetry is authoritative. */
   gimbalPending: number | null;
 
@@ -64,6 +75,8 @@ export interface ArgusState {
   setManualActive(b: boolean): void;
   setDispatching(id: string | null): void;
   setOpenFences(ids: string[]): void;
+  setSceneProps(props: SceneProp[]): void;
+  setCamera(droneId: string, c: CameraView): void;
   setGimbalPending(v: number | null): void;
 }
 
@@ -88,6 +101,8 @@ export const useArgus = create<ArgusState>((set, get) => ({
   manualActive: false,
   dispatching: null,
   sceneOpenFences: [],
+  sceneProps: [],
+  camera: {},
   gimbalPending: null,
 
   setConn: (conn) => set({ conn }),
@@ -126,6 +141,8 @@ export const useArgus = create<ArgusState>((set, get) => ({
   setManualActive: (manualActive) => set({ manualActive }),
   setDispatching: (dispatching) => set({ dispatching }),
   setOpenFences: (sceneOpenFences) => set({ sceneOpenFences }),
+  setSceneProps: (sceneProps) => set({ sceneProps }),
+  setCamera: (droneId, c) => set((st) => ({ camera: { ...st.camera, [droneId]: c } })),
   setGimbalPending: (gimbalPending) => set({ gimbalPending }),
 }));
 
