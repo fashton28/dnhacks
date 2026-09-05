@@ -46,7 +46,9 @@
       "terminal",
       "loiter",
       "range",
-      "sortie"
+      "sortie",
+      "attended",
+      "deconfliction"
     ],
     "reasonContains": {
       "schema": [

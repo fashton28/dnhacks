@@ -1,0 +1,54 @@
+{
+  "id": "V33",
+  "scenario": "unattended_survey",
+  "description": "The same geometry flown as a survey. Survey is a longer, wider-tolerance pattern that deserves an operator, so unattended dispatch refuses it as needs_operator. Nothing is corrected: quietly downgrading the profile would hide the refusal a human is supposed to see.",
+  "covers": [
+    "unattended profile restriction",
+    "needs_operator",
+    "refusal is never corrected"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V33",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "survey",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 40
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 10,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 40,
+    "mode": "unattended",
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "attended"
+    ],
+    "reasonContains": {
+      "attended": [
+        "needs_operator",
+        "profile survey"
+      ]
+    }
+  }
+}

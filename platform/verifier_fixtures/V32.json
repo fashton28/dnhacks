@@ -1,0 +1,47 @@
+{
+  "id": "V32",
+  "scenario": "unattended_pass",
+  "description": "Unattended inspect inside UNATTENDED_ENVELOPE: 40 m AGL is inside the 30-50 m unattended band, the targets are inside the perimeter, the orbit is one lap, there is no hold, wind is calm and the hourly sortie budget has room. The attended check passes, which is what lets the orchestrator auto-approve without an operator.",
+  "covers": [
+    "unattended envelope",
+    "attended check pass",
+    "auto-approval precondition"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V32",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 40
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 40,
+    "mode": "unattended",
+    "unattendedSortiesLastHour": 1,
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000
+  },
+  "expected": {
+    "verdict": "pass",
+    "failingChecks": []
+  }
+}

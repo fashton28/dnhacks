@@ -1,0 +1,120 @@
+{
+  "id": "V31",
+  "scenario": "deconfliction_shared_orbit",
+  "description": "The peer is already orbiting this exact observation point. Two vehicles never share an orbit centre, and this one is not corrected: an altitude stagger would still leave both aircraft turning around the same point, so the verdict is rejected and the plan carries no edit.",
+  "covers": [
+    "shared orbit centre",
+    "deconfliction rejection",
+    "no correction offered"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V31",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000,
+    "fleet": [
+      {
+        "vehicleId": "eis-2",
+        "battery": {
+          "soc_pct": 92,
+          "voltage_v": 24.6,
+          "current_a": 12,
+          "cell_delta_v": 0.02,
+          "temp_c": 28,
+          "remaining_s": 1200,
+          "charge_state": "charged",
+          "fault": "",
+          "voltage": 24.6,
+          "current": 12,
+          "remaining": 92
+        },
+        "controlSource": "planner",
+        "failsafe": {
+          "state": "none",
+          "reason": ""
+        },
+        "readiness": {
+          "ready": true,
+          "reasons": [],
+          "eta_ready_s": 0
+        },
+        "position": {
+          "lat": -26.0869457,
+          "lon": 29.4719,
+          "relAlt": 25
+        },
+        "plannedCorridor": {
+          "legs": [
+            {
+              "from": {
+                "lat": -26.088,
+                "lon": 29.4719
+              },
+              "to": {
+                "lat": -26.0869457,
+                "lon": 29.4719
+              },
+              "lateral_tol_m": 10
+            }
+          ],
+          "orbits": [
+            {
+              "center": {
+                "lat": -26.0869457,
+                "lon": 29.4719
+              },
+              "radius_m": 25,
+              "radial_tol_m": 5
+            }
+          ],
+          "alt_band_m": {
+            "min": 20,
+            "max": 30
+          },
+          "generated_from": "fixture-V31-peer"
+        },
+        "sortie": {
+          "elapsed_s": 60,
+          "must_rtl_by": 1757117100000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "deconfliction"
+    ],
+    "editedChecks": [],
+    "reasonContains": {
+      "deconfliction": [
+        "orbit centre"
+      ]
+    }
+  }
+}

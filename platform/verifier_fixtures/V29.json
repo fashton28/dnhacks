@@ -1,0 +1,112 @@
+{
+  "id": "V29",
+  "scenario": "fleet_clear",
+  "description": "Second vehicle airborne on the west service road while this mission works the north yard. The corridors never come within 40 m and the sortie windows overlap, so deconfliction passes on separation alone — the check is only satisfied by distance here, never by a time gap.",
+  "covers": [
+    "deconfliction pass",
+    "peer corridor",
+    "overlapping sortie windows"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V29",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 45,
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000,
+    "fleet": [
+      {
+        "vehicleId": "eis-2",
+        "battery": {
+          "soc_pct": 92,
+          "voltage_v": 24.6,
+          "current_a": 12,
+          "cell_delta_v": 0.02,
+          "temp_c": 28,
+          "remaining_s": 1200,
+          "charge_state": "charged",
+          "fault": "",
+          "voltage": 24.6,
+          "current": 12,
+          "remaining": 92
+        },
+        "controlSource": "planner",
+        "failsafe": {
+          "state": "none",
+          "reason": ""
+        },
+        "readiness": {
+          "ready": true,
+          "reasons": [],
+          "eta_ready_s": 0
+        },
+        "position": {
+          "lat": -26.0926949,
+          "lon": 29.4678991,
+          "relAlt": 35
+        },
+        "plannedCorridor": {
+          "legs": [
+            {
+              "from": {
+                "lat": -26.093,
+                "lon": 29.469
+              },
+              "to": {
+                "lat": -26.0926949,
+                "lon": 29.4678991
+              },
+              "lateral_tol_m": 10
+            }
+          ],
+          "orbits": [
+            {
+              "center": {
+                "lat": -26.0926949,
+                "lon": 29.4678991
+              },
+              "radius_m": 25,
+              "radial_tol_m": 5
+            }
+          ],
+          "alt_band_m": {
+            "min": 30,
+            "max": 40
+          },
+          "generated_from": "fixture-V29-peer"
+        },
+        "sortie": {
+          "elapsed_s": 60,
+          "must_rtl_by": 1757117100000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "pass",
+    "failingChecks": []
+  }
+}

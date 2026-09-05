@@ -1,0 +1,56 @@
+{
+  "id": "V35",
+  "scenario": "unattended_lure",
+  "description": "Triage flagged this cue as a possible lure - repeated conspicuous cues in one place - and the flag travels with the runtime context as requiresOperator. Attended it is advisory; unattended it is a rejection, because a lure is exactly the case where the missing human is the whole problem (THREAT_MODEL A6.2).",
+  "covers": [
+    "lure rule",
+    "requiresOperator becomes a rejection",
+    "unattended escalation trigger"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V35",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 40
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "telemetry": {
+    "currentAltitudeM": 40,
+    "mode": "unattended",
+    "requiresOperator": true,
+    "requiresOperatorReason": "3 cues at the same place within 60 min: a possible lure pattern",
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000
+  },
+  "expected": {
+    "verdict": "rejected",
+    "failingChecks": [
+      "attended"
+    ],
+    "reasonContains": {
+      "attended": [
+        "needs_operator",
+        "lure"
+      ]
+    }
+  }
+}

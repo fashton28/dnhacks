@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { Anomaly, BatteryState, MissionPlan } from '../src/contract';
+import { Anomaly, BatteryState, FleetVehicle, MissionPlan } from '../src/contract';
 import { ScriptedPlanner } from '../src/scripted';
 import { SiteModel, pointInPolygon, validateSite } from '../src/site';
 import { CHECK_ORDER, VerificationContext, verifyMission } from '../src/verifier';
@@ -158,5 +158,42 @@ describe('ordered fail-closed verifier', () => {
       max_speed_mps:2, max_altitude_m:45,
     }] }));
     expect(tightened.checks.find(({name}) => name === 'sortie')?.ok).toBe(false);
+  });
+});
+
+/* The stale-peer rule is the one part of DECONFLICTION_POLICY the fixtures
+ * cannot pin, because it is a function of WHEN the fleet message arrived rather
+ * than of any geometry in the plan. Same corridors, same peer, same 55 m gap:
+ * only the age of the peer data changes, and 55 m is legal at 40 m and illegal
+ * at the doubled 80 m. */
+describe('peer-data age doubles the required separation', () => {
+  const NOW = 1757116800000;
+  const close: Anomaly = { ...anomaly, lat: -0.0005 };
+  /** 55 m east of the mission corridor, level with it, airborne, no sortie cap. */
+  const peer: FleetVehicle = {
+    vehicleId: 'eis-2', battery: battery(88), controlSource: 'planner',
+    failsafe: { state: 'none', reason: '' },
+    readiness: { ready: true, reasons: [], eta_ready_s: 0 },
+    position: { lat: -0.00025, lon: 0.000494, relAlt: 45 },
+    sortie: null,
+  };
+  const withFleet = (fleetTs: number): VerificationContext => ready({
+    anomaly: close, vehicleId: 'eis-1', fleet: [peer], fleetTs, now: NOW, dispatchAt: NOW,
+  });
+  const plan = basic([{ tool: 'goto_gps', lat: close.lat, lon: 0, alt: 45 }, { tool: 'rtl' }]);
+  const deconfliction = (fleetTs: number) =>
+    verifyMission(plan, site(), withFleet(fleetTs)).checks
+      .find(({ name }) => name === 'deconfliction');
+
+  it('clears a 55 m gap while the peer view is fresh', () => {
+    const check = deconfliction(NOW);
+    expect(check?.ok).toBe(true);
+    expect(check?.reason).toContain('eis-2');
+  });
+
+  it('refuses the same 55 m gap once the peer view is stale', () => {
+    const check = deconfliction(NOW - 5_000);
+    expect(check?.ok).toBe(false);
+    expect(check?.reason).toContain('80 m lateral');
   });
 });

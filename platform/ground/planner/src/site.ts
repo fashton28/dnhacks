@@ -1,5 +1,5 @@
 /* ============================================================================
- * eis-planner/site — site-model loading, validation, and geometry helpers.
+ * eis-planner/site — site-model loading and validation.
  *
  * The site model is consumed ONLY via the site JSON file described in
  * docs/SITE_CONTRACT.md. Nothing in this package hardcodes plant geometry —
@@ -13,24 +13,39 @@
  *  - NFZ semantics: flight inside the polygon AT OR BELOW `ceiling_m` AGL is
  *    forbidden; overflight strictly above the ceiling is permitted.
  *
- * Geometry helpers all work on {lat, lon} degree pairs. Internally they use a
- * local equirectangular projection (meters east/north of a reference point) —
- * accurate to well under 0.1% at plant scale (< a few km), which is far inside
- * the safety margins used by the verifier.
+ * The GEOMETRY that reads this model lives in `geometry.ts` — one library used
+ * by both the deterministic planner and the verifier. The helpers this module
+ * has always exported are re-exported below so existing importers (the UI, the
+ * Electron hosts, the tests) keep working unchanged.
  * ========================================================================== */
 
 import * as fs from 'fs';
 import * as path from 'path';
 
+import { LatLon, pointInOrOnPolygon } from './geometry';
+
+export {
+  EARTH_RADIUS_M,
+  M_PER_DEG_LAT,
+  distancePointToPolygonMeters,
+  distanceSegmentToPolygonMeters,
+  haversineMeters,
+  movePointAcrossBoundary,
+  movePointAwayFromPolygon,
+  movePointInsidePolygon,
+  nearestPointOnPolygonBoundary,
+  pointInOrOnPolygon,
+  pointInPolygon,
+  polygonCentroid,
+  segmentEntersPolygon,
+  segmentIntersectsPolygon,
+  segmentStaysInsidePolygon,
+} from './geometry';
+export type { LatLon, XY } from './geometry';
+
 /* ---------------------------------------------------------------------------
  * Types
  * ------------------------------------------------------------------------- */
-
-/** A WGS84 point in decimal degrees. */
-export interface LatLon {
-  lat: number;
-  lon: number;
-}
 
 /** Wire form used by the site JSON: [lat, lon] (lat FIRST — never lon-first). */
 export type LatLonPair = [number, number];
@@ -290,300 +305,4 @@ export function validateSite(data: unknown): SiteModel {
     clutter,
     staging,
   };
-}
-
-/* ---------------------------------------------------------------------------
- * Geometry helpers
- *
- * All distances are METERS; all coordinates are DEGREES ({lat, lon}).
- * ------------------------------------------------------------------------- */
-
-/** Mean earth radius, meters (WGS84 mean radius). */
-export const EARTH_RADIUS_M = 6371000;
-
-/** Meters per degree of latitude (near-constant over the globe). */
-export const M_PER_DEG_LAT = 111320;
-
-const DEG = Math.PI / 180;
-
-/**
- * Great-circle distance between two WGS84 points, in METERS (haversine
- * formula on a sphere of radius EARTH_RADIUS_M).
- */
-export function haversineMeters(a: LatLon, b: LatLon): number {
-  const dLat = (b.lat - a.lat) * DEG;
-  const dLon = (b.lon - a.lon) * DEG;
-  const sinLat = Math.sin(dLat / 2);
-  const sinLon = Math.sin(dLon / 2);
-  const h = sinLat * sinLat +
-    Math.cos(a.lat * DEG) * Math.cos(b.lat * DEG) * sinLon * sinLon;
-  return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(h)));
-}
-
-interface XY { x: number; y: number; } // meters east (x) / north (y) of origin
-
-/** Project a point to local meters (equirectangular, anchored at `origin`). */
-function toLocal(p: LatLon, origin: LatLon): XY {
-  return {
-    x: (p.lon - origin.lon) * M_PER_DEG_LAT * Math.cos(origin.lat * DEG),
-    y: (p.lat - origin.lat) * M_PER_DEG_LAT,
-  };
-}
-
-/** Inverse of toLocal. */
-function fromLocal(p: XY, origin: LatLon): LatLon {
-  return {
-    lat: origin.lat + p.y / M_PER_DEG_LAT,
-    lon: origin.lon + p.x / (M_PER_DEG_LAT * Math.cos(origin.lat * DEG)),
-  };
-}
-
-/**
- * Point-in-polygon (ray casting) for an OPEN ring in degree space.
- * Winding-agnostic. Points exactly on an edge are implementation-defined
- * (treated as inside/outside depending on float rounding) — the verifier
- * always applies a margin, so exact-boundary points never matter in practice.
- */
-export function pointInPolygon(p: LatLon, polygon: LatLon[]): boolean {
-  const origin = polygon[0];
-  const pt = toLocal(p, origin);
-  const ring = polygon.map((v) => toLocal(v, origin));
-  let inside = false;
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const a = ring[i];
-    const b = ring[j];
-    const crosses = (a.y > pt.y) !== (b.y > pt.y);
-    if (crosses) {
-      const xAtY = a.x + ((pt.y - a.y) / (b.y - a.y)) * (b.x - a.x);
-      if (pt.x < xAtY) inside = !inside;
-    }
-  }
-  return inside;
-}
-
-function orient(a: XY, b: XY, c: XY): number {
-  return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-}
-
-function onSegment(a: XY, b: XY, p: XY): boolean {
-  return Math.min(a.x, b.x) - 1e-9 <= p.x && p.x <= Math.max(a.x, b.x) + 1e-9 &&
-         Math.min(a.y, b.y) - 1e-9 <= p.y && p.y <= Math.max(a.y, b.y) + 1e-9;
-}
-
-function segmentsIntersect(p1: XY, p2: XY, p3: XY, p4: XY): boolean {
-  const d1 = orient(p3, p4, p1);
-  const d2 = orient(p3, p4, p2);
-  const d3 = orient(p1, p2, p3);
-  const d4 = orient(p1, p2, p4);
-  if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) &&
-      ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0))) {
-    return true;
-  }
-  if (d1 === 0 && onSegment(p3, p4, p1)) return true;
-  if (d2 === 0 && onSegment(p3, p4, p2)) return true;
-  if (d3 === 0 && onSegment(p1, p2, p3)) return true;
-  if (d4 === 0 && onSegment(p1, p2, p4)) return true;
-  return false;
-}
-
-/**
- * True when the segment a→b intersects ANY edge of the (open-ring) polygon,
- * including the implicit closing edge. A segment lying entirely inside or
- * entirely outside the polygon does NOT intersect its boundary.
- */
-export function segmentIntersectsPolygon(a: LatLon, b: LatLon, polygon: LatLon[]): boolean {
-  const origin = polygon[0];
-  const pa = toLocal(a, origin);
-  const pb = toLocal(b, origin);
-  const ring = polygon.map((v) => toLocal(v, origin));
-  for (let i = 0; i < ring.length; i++) {
-    const e1 = ring[i];
-    const e2 = ring[(i + 1) % ring.length];
-    if (segmentsIntersect(pa, pb, e1, e2)) return true;
-  }
-  return false;
-}
-
-/**
- * True when the whole segment a→b stays strictly inside a SIMPLE polygon:
- * both endpoints inside AND no boundary crossing. (For a simple polygon a
- * segment can only leave the interior by crossing the boundary.)
- */
-export function segmentStaysInsidePolygon(a: LatLon, b: LatLon, polygon: LatLon[]): boolean {
-  return pointInPolygon(a, polygon) &&
-         pointInPolygon(b, polygon) &&
-         !segmentIntersectsPolygon(a, b, polygon);
-}
-
-/**
- * True when the segment a→b enters the polygon at all: either endpoint
- * inside, or the segment crosses the boundary (pass-through counts).
- */
-export function segmentEntersPolygon(a: LatLon, b: LatLon, polygon: LatLon[]): boolean {
-  return pointInPolygon(a, polygon) ||
-         pointInPolygon(b, polygon) ||
-         segmentIntersectsPolygon(a, b, polygon);
-}
-
-function nearestPointOnSegmentXY(p: XY, a: XY, b: XY): XY {
-  const abx = b.x - a.x;
-  const aby = b.y - a.y;
-  const len2 = abx * abx + aby * aby;
-  if (len2 === 0) return { x: a.x, y: a.y };
-  let t = ((p.x - a.x) * abx + (p.y - a.y) * aby) / len2;
-  t = Math.max(0, Math.min(1, t));
-  return { x: a.x + t * abx, y: a.y + t * aby };
-}
-
-/** Minimum horizontal distance from a point to a polygon boundary, meters. */
-export function distancePointToPolygonMeters(p: LatLon, polygon: LatLon[]): number {
-  return haversineMeters(p, nearestPointOnPolygonBoundary(p, polygon));
-}
-
-/** Point containment that treats the polygon edge as inside. */
-export function pointInOrOnPolygon(p: LatLon, polygon: LatLon[]): boolean {
-  return pointInPolygon(p, polygon) || distancePointToPolygonMeters(p, polygon) <= 0.02;
-}
-
-/** Minimum distance between a line segment and a polygon, meters. */
-export function distanceSegmentToPolygonMeters(a: LatLon, b: LatLon, polygon: LatLon[]): number {
-  if (segmentEntersPolygon(a, b, polygon)) return 0;
-  const origin = polygon[0];
-  const pa = toLocal(a, origin);
-  const pb = toLocal(b, origin);
-  const ring = polygon.map((v) => toLocal(v, origin));
-  let best = Infinity;
-  const distancePointToSegment = (p: XY, s1: XY, s2: XY): number => {
-    const nearest = nearestPointOnSegmentXY(p, s1, s2);
-    return Math.hypot(p.x - nearest.x, p.y - nearest.y);
-  };
-  for (let i = 0; i < ring.length; i++) {
-    const e1 = ring[i];
-    const e2 = ring[(i + 1) % ring.length];
-    best = Math.min(
-      best,
-      distancePointToSegment(pa, e1, e2),
-      distancePointToSegment(pb, e1, e2),
-      distancePointToSegment(e1, pa, pb),
-      distancePointToSegment(e2, pa, pb),
-    );
-  }
-  return best;
-}
-
-/** Closest point on the polygon's boundary (including the closing edge). */
-export function nearestPointOnPolygonBoundary(p: LatLon, polygon: LatLon[]): LatLon {
-  const origin = polygon[0];
-  const pt = toLocal(p, origin);
-  const ring = polygon.map((v) => toLocal(v, origin));
-  let best: XY = ring[0];
-  let bestD2 = Infinity;
-  for (let i = 0; i < ring.length; i++) {
-    const cand = nearestPointOnSegmentXY(pt, ring[i], ring[(i + 1) % ring.length]);
-    const dx = cand.x - pt.x;
-    const dy = cand.y - pt.y;
-    const d2 = dx * dx + dy * dy;
-    if (d2 < bestD2) {
-      bestD2 = d2;
-      best = cand;
-    }
-  }
-  return fromLocal(best, origin);
-}
-
-/**
- * Move `p` to the nearest polygon-boundary point and then continue `marginM`
- * meters FURTHER along the same direction (p → boundary → beyond).
- *
- *  - p INSIDE the polygon  → result is OUTSIDE it by ~marginM (NFZ push-out).
- *  - p OUTSIDE the polygon → result is INSIDE it by ~marginM (perimeter pull-in).
- *
- * Degenerate case (p exactly on the boundary / zero distance): the direction
- * is taken from the polygon's vertex centroid through p instead, which points
- * outward for convex polygons. This is best-effort for pathological input.
- */
-export function movePointAcrossBoundary(p: LatLon, polygon: LatLon[], marginM: number): LatLon {
-  const origin = polygon[0];
-  const pt = toLocal(p, origin);
-  const boundary = toLocal(nearestPointOnPolygonBoundary(p, polygon), origin);
-  let dx = boundary.x - pt.x;
-  let dy = boundary.y - pt.y;
-  let len = Math.hypot(dx, dy);
-  if (len < 1e-9) {
-    // p is on the boundary: fall back to centroid→p direction.
-    const ring = polygon.map((v) => toLocal(v, origin));
-    const cx = ring.reduce((s, v) => s + v.x, 0) / ring.length;
-    const cy = ring.reduce((s, v) => s + v.y, 0) / ring.length;
-    dx = pt.x - cx;
-    dy = pt.y - cy;
-    len = Math.hypot(dx, dy);
-    if (len < 1e-9) {
-      dx = 1; dy = 0; len = 1; // fully degenerate: arbitrary but deterministic east
-    }
-  }
-  const scale = marginM / len;
-  return fromLocal({ x: boundary.x + dx * scale, y: boundary.y + dy * scale }, origin);
-}
-
-/** Move a point to a requested clearance OUTSIDE a polygon boundary. */
-export function movePointAwayFromPolygon(
-  p: LatLon,
-  polygon: LatLon[],
-  clearanceM: number,
-): LatLon {
-  const origin = polygon[0];
-  const pt = toLocal(p, origin);
-  const boundary = toLocal(nearestPointOnPolygonBoundary(p, polygon), origin);
-  const ring = polygon.map((v) => toLocal(v, origin));
-  const cx = ring.reduce((sum, v) => sum + v.x, 0) / ring.length;
-  const cy = ring.reduce((sum, v) => sum + v.y, 0) / ring.length;
-  let dx: number;
-  let dy: number;
-  if (pointInPolygon(p, polygon)) {
-    dx = boundary.x - pt.x;
-    dy = boundary.y - pt.y;
-  } else {
-    dx = pt.x - boundary.x;
-    dy = pt.y - boundary.y;
-  }
-  let length = Math.hypot(dx, dy);
-  if (length < 1e-9) {
-    dx = boundary.x - cx;
-    dy = boundary.y - cy;
-    length = Math.hypot(dx, dy);
-  }
-  if (length < 1e-9) {
-    dx = 1;
-    dy = 0;
-    length = 1;
-  }
-  return fromLocal({
-    x: boundary.x + dx / length * clearanceM,
-    y: boundary.y + dy / length * clearanceM,
-  }, origin);
-}
-
-/** Vertex centroid of a polygon (adequate for target placement, not area math). */
-export function polygonCentroid(polygon: LatLon[]): LatLon {
-  const lat = polygon.reduce((s, v) => s + v.lat, 0) / polygon.length;
-  const lon = polygon.reduce((s, v) => s + v.lon, 0) / polygon.length;
-  return { lat, lon };
-}
-
-/** Move an inside point away from its nearest boundary while staying inward. */
-export function movePointInsidePolygon(p: LatLon, polygon: LatLon[], clearanceM: number): LatLon {
-  const origin = polygon[0];
-  const pt = toLocal(p, origin);
-  const boundary = toLocal(nearestPointOnPolygonBoundary(p, polygon), origin);
-  let dx = pt.x - boundary.x;
-  let dy = pt.y - boundary.y;
-  let length = Math.hypot(dx, dy);
-  if (length < 1e-9) {
-    const ring = polygon.map((v) => toLocal(v, origin));
-    dx = ring.reduce((sum, v) => sum + v.x, 0) / ring.length - boundary.x;
-    dy = ring.reduce((sum, v) => sum + v.y, 0) / ring.length - boundary.y;
-    length = Math.hypot(dx, dy);
-  }
-  if (length < 1e-9) throw new Error('cannot derive inward direction for degenerate polygon');
-  return fromLocal({ x: boundary.x + dx / length * clearanceM, y: boundary.y + dy / length * clearanceM }, origin);
 }

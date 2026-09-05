@@ -107,8 +107,81 @@ describe('cli', () => {
     expect(report.markdown).toContain('## Recommendation');
   });
 
+  it('plan --task emits the deterministic plan and verify passes it', () => {
+    const taskPath = path.join(dir, 'task.json');
+    fs.writeFileSync(taskPath, JSON.stringify({
+      requestId: 'cli-task-1',
+      task: {
+        taskId: 'cli-task-1', anomalyId: anomaly.id, lookFor: 'fence_gap',
+        question: 'Is the fence line open at the cue?', urgency: 'immediate',
+        priority: 0.9, rationale: 'cli smoke', source: 'scripted',
+      },
+      anomaly,
+    }));
+    const planOut = runCli(['plan', '--task', taskPath, sitePath, '--context', contextPath]);
+    const plan = JSON.parse(planOut) as MissionPlan & { planTrace?: unknown[]; corridor?: unknown };
+    expect(plan.requestId).toBe('cli-task-1');
+    expect(plan.tools[plan.tools.length - 1].tool).toBe('rtl');
+    expect(plan.tools.some((tool) => tool.tool === 'hold')).toBe(true);
+    expect(Array.isArray(plan.planTrace)).toBe(true);
+    expect(plan.corridor).toBeDefined();
+
+    const planPath = path.join(dir, 'task-plan.json');
+    fs.writeFileSync(planPath, planOut);
+    const verification = JSON.parse(
+      runCli(['verify', planPath, sitePath, '--context', contextPath])) as Verification;
+    expect(verification.verdict).toBe('pass');
+  });
+
+  it('plan --task reports infeasible instead of an unsafe plan, still exit 0', () => {
+    const taskPath = path.join(dir, 'task-bad.json');
+    fs.writeFileSync(taskPath, JSON.stringify({
+      task: {
+        taskId: 'cli-task-2', anomalyId: anomaly.id, lookFor: 'person',
+        question: 'Anyone there?', urgency: 'immediate', priority: 0.5,
+        rationale: 'cli smoke', source: 'scripted',
+      },
+      anomaly,
+    }));
+    const badContext = path.join(dir, 'bad-context.json');
+    const bad = JSON.parse(fs.readFileSync(contextPath, 'utf8'));
+    bad.navSource = 'extnav';
+    fs.writeFileSync(badContext, JSON.stringify(bad));
+    const out = JSON.parse(runCli(['plan', '--task', taskPath, sitePath, '--context', badContext])) as
+      { infeasible: boolean; reason: string; planTrace: unknown[] };
+    expect(out.infeasible).toBe(true);
+    expect(out.reason).toContain('extnav');
+    expect(out.planTrace.length).toBeGreaterThan(0);
+  });
+
+  it('triage --scripted emits an ordered task list with no geometry', () => {
+    const cuesPath = path.join(dir, 'anomalies.json');
+    fs.writeFileSync(cuesPath, JSON.stringify({
+      now: 1757116800000,
+      anomalies: [
+        { ...anomaly, id: 'sat-cue', source: 'sentinel2', confidence: 0.95, observedAt: 1757116800000, ttl_s: 3600 },
+        { ...anomaly, id: 'fence-cue', source: 'fence_sensor', type: 'breach', confidence: 0.8,
+          observedAt: 1757116800000, ttl_s: 3600 },
+      ],
+      fleet: [{ vehicleId: 'eis-1', ready: true }],
+      cueBudget: { used: 0, cap: 2 },
+      mode: 'attended',
+    }));
+    const out = JSON.parse(runCli(['triage', '--scripted', cuesPath])) as
+      { tasks: Array<Record<string, unknown>>; source: string };
+    expect(out.source).toBe('scripted');
+    expect(out.tasks.map((task) => task.anomalyId)).toEqual(['fence-cue', 'sat-cue']);
+    expect(out.tasks[0].lookFor).toBe('fence_gap');
+    for (const task of out.tasks) {
+      for (const key of Object.keys(task)) {
+        expect(['lat', 'lon', 'alt', 'radius', 'tools', 'profile']).not.toContain(key);
+      }
+    }
+  });
+
   it('exits non-zero on bad input', () => {
     expect(() => runCli(['verify', path.join(dir, 'nope.json'), sitePath])).toThrow();
     expect(() => runCli(['frobnicate'])).toThrow();
+    expect(() => runCli(['plan', '--task', path.join(dir, 'nope.json'), sitePath])).toThrow();
   });
 });
