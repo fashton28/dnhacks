@@ -1,6 +1,4 @@
-###############################################################################
-# Drone Safety Platform -- COMPANION default configuration (REAL HARDWARE / Jetson).
-#
+################################################################################ Drone Safety Platform -- COMPANION default configuration (REAL HARDWARE / Jetson).#
 # Conservative, safety-first defaults (PRD 9 / 11). Every value here can be
 # overridden by an EIS_* environment variable (see .env.example) and is clamped
 # to the hard safety envelope by config.py (standoff floor 3 m, max-speed cap
@@ -11,6 +9,7 @@
 
 # Real flights are NOT SITL.
 sitl: false
+vehicle_id: eis-1
 
 # --- Hard safety + tuning envelope (eis_companion.types.Limits) ------------
 limits:
@@ -79,12 +78,25 @@ safety:
   min_battery_remaining:  20.0   # % gate enforced at arming
   rc_override_primacy:    true   # documented invariant; never disabled
 
+battery:
+  nominal_endurance_s:    1500
+  reserve_pct:            25
+  max_sortie_s:           480
+  dispatch_min_soc_pct:   80
+  cell_imbalance_max_v:   0.10
+  batt_temp_max_c:        60
+  capacity_mah:           5000
+  cell_count:             4
+  demo_charge_scale_s:    30
+  estimated_return_s:     30
+
 # --- Mission planner (power-plant security retrofit) ------------------------
 planner:
   # Cruise speed per mission profile, m/s. Mirrors the shared contract's
   # PROFILE_SPEED_MPS; clamped under the hard 8 m/s cap at load and re-clamped
   # to limits.max_speed per emitted setpoint (profiles only TIGHTEN).
-  profile_speed_mps: { slow: 2.0, standard: 4.0, fast: 6.0 }
+  profile_speed_mps: { follow: 2.0, inspect: 4.0, survey: 6.0, slow: 2.0, standard: 4.0, fast: 6.0 }
   site_file: ""                   # "" -> EIS_SITE_FILE env, else site/site.json
   arrival_radius_m: 2.0           # goto_gps arrival threshold (m)
   staging_arrival_radius_m: 15.0  # staging-point vision trigger radius (m)
+  heartbeat_timeout_ms: 2000

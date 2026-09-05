@@ -50,6 +50,10 @@ except Exception:  # pragma: no cover - exercised only on a broken install
 # ==========================================================================
 MAX_SPEED_CAP: float = 8.0       # m/s -- the hard ceiling for max_speed
 MIN_STANDOFF_FLOOR: float = 3.0  # m  -- standoff may never be set below this
+MAX_SORTIE_CAP_S: float = 480.0
+MIN_DISPATCH_SOC_PCT: float = 80.0
+MAX_CELL_IMBALANCE_V: float = 0.10
+MAX_BATT_TEMP_C: float = 60.0
 GEOFENCE_RADIUS_DEFAULT: float = 60.0  # m
 
 # Fallback mirror of the shared contract's PROFILE_SPEED_MPS (shared/shared.py /
@@ -59,6 +63,9 @@ GEOFENCE_RADIUS_DEFAULT: float = 60.0  # m
 # way every value is clamped under MAX_SPEED_CAP in _enforce_safety_floor --
 # mission profiles may only TIGHTEN the speed envelope, never relax it.
 PROFILE_SPEED_FALLBACK: Dict[str, float] = {
+    "follow": 2.0,
+    "inspect": 4.0,
+    "survey": 6.0,
     "slow": 2.0,
     "standard": 4.0,
     "fast": 6.0,
@@ -83,7 +90,9 @@ def _shared_profile_speeds() -> Dict[str, float]:
             shared_py = Path(__file__).resolve().parents[3] / "shared" / "shared.py"
             spec = importlib.util.spec_from_file_location("_eis_shared_contract", shared_py)
             if spec is not None and spec.loader is not None:
+                import sys
                 mod = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = mod
                 spec.loader.exec_module(mod)
                 loaded = getattr(mod, "PROFILE_SPEED_MPS", None)
                 if isinstance(loaded, dict) and loaded:
@@ -177,6 +186,21 @@ class SafetyConfig:
 
 
 @dataclass
+class BatteryConfig:
+    """Payload-adjusted battery, charging, and sortie policy."""
+    nominal_endurance_s: float = 1500.0
+    reserve_pct: float = 25.0
+    max_sortie_s: float = MAX_SORTIE_CAP_S
+    dispatch_min_soc_pct: float = MIN_DISPATCH_SOC_PCT
+    cell_imbalance_max_v: float = MAX_CELL_IMBALANCE_V
+    batt_temp_max_c: float = MAX_BATT_TEMP_C
+    capacity_mah: float = 5000.0
+    cell_count: int = 4
+    demo_charge_scale_s: float = 30.0
+    estimated_return_s: float = 30.0
+
+
+@dataclass
 class PlannerConfig:
     """Mission-planner execution config (power-plant security retrofit).
 
@@ -194,6 +218,7 @@ class PlannerConfig:
     site_file: str = ""                       # "" -> EIS_SITE_FILE, else site/site.json
     arrival_radius_m: float = 2.0             # goto_gps arrival threshold (m)
     staging_arrival_radius_m: float = 15.0    # staging-point vision trigger radius (m)
+    heartbeat_timeout_ms: int = 2000
 
 
 @dataclass
@@ -208,7 +233,9 @@ class AppConfig:
     fc: FcConfig = field(default_factory=FcConfig)
     tracking: TrackingConfig = field(default_factory=TrackingConfig)
     safety: SafetyConfig = field(default_factory=SafetyConfig)
+    battery: BatteryConfig = field(default_factory=BatteryConfig)
     planner: PlannerConfig = field(default_factory=PlannerConfig)
+    vehicle_id: str = "eis-1"
     source_path: Optional[str] = None     # the YAML path actually loaded
 
     # ---- convenience views ------------------------------------------------
@@ -471,6 +498,24 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         rc_override_primacy=bool(_g(saf_d, "rc_override_primacy", True)),
     )
 
+    bat_d = _section(raw, "battery")
+    battery = BatteryConfig(
+        nominal_endurance_s=float(_g(bat_d, "nominal_endurance_s", 1500.0)),
+        reserve_pct=float(_g(bat_d, "reserve_pct", 25.0)),
+        max_sortie_s=float(_g(bat_d, "max_sortie_s", MAX_SORTIE_CAP_S)),
+        dispatch_min_soc_pct=float(
+            _g(bat_d, "dispatch_min_soc_pct", MIN_DISPATCH_SOC_PCT)
+        ),
+        cell_imbalance_max_v=float(
+            _g(bat_d, "cell_imbalance_max_v", MAX_CELL_IMBALANCE_V)
+        ),
+        batt_temp_max_c=float(_g(bat_d, "batt_temp_max_c", MAX_BATT_TEMP_C)),
+        capacity_mah=float(_g(bat_d, "capacity_mah", 5000.0)),
+        cell_count=int(_g(bat_d, "cell_count", 4)),
+        demo_charge_scale_s=float(_g(bat_d, "demo_charge_scale_s", 30.0)),
+        estimated_return_s=float(_g(bat_d, "estimated_return_s", 30.0)),
+    )
+
     pl_d = _section(raw, "planner")
     speeds = _shared_profile_speeds()
     speeds_raw = pl_d.get("profile_speed_mps")
@@ -485,6 +530,7 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         site_file=str(_g(pl_d, "site_file", "")),
         arrival_radius_m=float(_g(pl_d, "arrival_radius_m", 2.0)),
         staging_arrival_radius_m=float(_g(pl_d, "staging_arrival_radius_m", 15.0)),
+        heartbeat_timeout_ms=int(_g(pl_d, "heartbeat_timeout_ms", 2000)),
     )
 
     return AppConfig(
@@ -497,7 +543,9 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         fc=fc,
         tracking=tracking,
         safety=safety,
+        battery=battery,
         planner=planner,
+        vehicle_id=str(_g(raw, "vehicle_id", "eis-1")),
     )
 
 
@@ -591,6 +639,24 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     f = _env_float("EIS_GEOFENCE_RADIUS_M")
     if f is not None:
         cfg.safety.geofence_radius_m = f
+    f = _env_float("EIS_MAX_SORTIE_S")
+    if f is not None:
+        cfg.battery.max_sortie_s = f
+    f = _env_float("EIS_DISPATCH_MIN_SOC_PCT")
+    if f is not None:
+        cfg.battery.dispatch_min_soc_pct = f
+    f = _env_float("EIS_CELL_IMBALANCE_MAX_V")
+    if f is not None:
+        cfg.battery.cell_imbalance_max_v = f
+    f = _env_float("EIS_BATT_TEMP_MAX_C")
+    if f is not None:
+        cfg.battery.batt_temp_max_c = f
+    f = _env_float("DEMO_CHARGE_SCALE")
+    if f is not None:
+        cfg.battery.demo_charge_scale_s = f
+    s = _env("EIS_VEHICLE_ID")
+    if s is not None:
+        cfg.vehicle_id = s
 
     # planner / site model
     s = _env("EIS_SITE_FILE")
@@ -599,6 +665,9 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
     f = _env_float("EIS_STAGING_RADIUS_M")
     if f is not None:
         cfg.planner.staging_arrival_radius_m = f
+    i = _env_int("EIS_PLANNER_HEARTBEAT_TIMEOUT_MS")
+    if i is not None:
+        cfg.planner.heartbeat_timeout_ms = i
 
 
 def _enforce_safety_floor(cfg: AppConfig) -> None:
@@ -631,6 +700,29 @@ def _enforce_safety_floor(cfg: AppConfig) -> None:
     # geofence radius floor
     cfg.safety.geofence_radius_m = max(10.0, float(cfg.safety.geofence_radius_m))
 
+    # These are hard safety bounds: overrides may only tighten them.
+    cfg.battery.max_sortie_s = max(
+        1.0, min(float(cfg.battery.max_sortie_s), MAX_SORTIE_CAP_S)
+    )
+    cfg.battery.dispatch_min_soc_pct = min(
+        100.0, max(float(cfg.battery.dispatch_min_soc_pct), MIN_DISPATCH_SOC_PCT)
+    )
+    cfg.battery.cell_imbalance_max_v = max(
+        0.001,
+        min(float(cfg.battery.cell_imbalance_max_v), MAX_CELL_IMBALANCE_V),
+    )
+    cfg.battery.batt_temp_max_c = max(
+        1.0, min(float(cfg.battery.batt_temp_max_c), MAX_BATT_TEMP_C)
+    )
+    cfg.battery.nominal_endurance_s = max(1.0, float(cfg.battery.nominal_endurance_s))
+    cfg.battery.reserve_pct = min(99.0, max(0.0, float(cfg.battery.reserve_pct)))
+    cfg.battery.capacity_mah = max(1.0, float(cfg.battery.capacity_mah))
+    cfg.battery.cell_count = max(1, int(cfg.battery.cell_count))
+    cfg.battery.demo_charge_scale_s = max(1.0, float(cfg.battery.demo_charge_scale_s))
+    cfg.battery.estimated_return_s = max(0.0, float(cfg.battery.estimated_return_s))
+    cfg.planner.heartbeat_timeout_ms = max(200, int(cfg.planner.heartbeat_timeout_ms))
+    cfg.vehicle_id = str(cfg.vehicle_id).strip() or "eis-1"
+
     # planner profile speeds: every profile is clamped UNDER the hard speed cap
     # (profiles may only tighten the envelope). A malformed/non-finite value
     # degrades to 0.0 = no motion, the safe direction; negative -> 0.0. The
@@ -662,6 +754,7 @@ __all__ = [
     "FcConfig",
     "TrackingConfig",
     "SafetyConfig",
+    "BatteryConfig",
     "PlannerConfig",
     "load_config",
     "MAX_SPEED_CAP",

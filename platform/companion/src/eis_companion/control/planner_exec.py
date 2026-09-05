@@ -112,6 +112,7 @@ class _OrbitLeg:
     lon: float
     radius: float          # raw; floored at limits.min_standoff at every tick
     speed: float
+    laps: float = 1.0
 
 
 @dataclass
@@ -226,6 +227,14 @@ class PlannerExecutor:
     def tool_count(self) -> int:
         return len(self._legs)
 
+    @property
+    def current_observation_radius_m(self) -> float:
+        if self._active and self._index < len(self._legs):
+            leg = self._legs[self._index]
+            if isinstance(leg, _OrbitLeg):
+                return max(float(leg.radius), self._limits.min_standoff)
+        return 0.0
+
     def progress(self) -> dict:
         """Plan progress for telemetry/status (camelCase, JSON-ready)."""
         tool = None
@@ -263,6 +272,7 @@ class PlannerExecutor:
                     "lon": leg.lon,
                     "radius": max(leg.radius, lim.min_standoff),
                     "speed": self._clamp_speed(leg.speed),
+                    "laps": leg.laps,
                 })
             elif isinstance(leg, _HoldLeg):
                 out.append({"tool": "hold", "durationS": leg.duration})
@@ -442,7 +452,7 @@ class PlannerExecutor:
             if self._orbit_prev_bearing is not None:
                 self._orbit_accum_deg += _wrap180(b - self._orbit_prev_bearing)
             self._orbit_prev_bearing = b
-        if abs(self._orbit_accum_deg) >= 360.0 * self._orbit_revolutions:
+        if abs(self._orbit_accum_deg) >= 360.0 * leg.laps:
             self._advance()
             return None
 
@@ -556,12 +566,18 @@ class PlannerExecutor:
             lat, lon = raw.get("lat"), raw.get("lon")
             if not _valid_latlon(lat, lon):
                 return False, "goto_gps needs finite lat/lon in range"
-            alt = raw.get("alt")
+            if "alt" in raw and "alt_m" in raw and raw["alt"] != raw["alt_m"]:
+                return False, "goto_gps has conflicting alt and alt_m"
+            alt = raw.get("alt_m", raw.get("alt"))
             if alt is not None:
                 if not _finite(alt):
                     return False, "goto_gps alt must be finite"
                 alt = float(alt)
             speed = plan_cap
+            if "speed_mps" in raw:
+                if not _finite(raw["speed_mps"]):
+                    return False, "goto_gps speed_mps must be finite"
+                speed = min(speed, _sanitize_speed(raw["speed_mps"]))
             prof = raw.get("profile")
             if isinstance(prof, str) and prof in self._profile_speeds:
                 mapped = self._profile_speeds[prof]
@@ -574,13 +590,25 @@ class PlannerExecutor:
             lat, lon = raw.get("lat"), raw.get("lon")
             if not _valid_latlon(lat, lon):
                 return False, "orbit_point needs finite lat/lon in range"
-            radius = raw.get("radius")
+            if "radius" in raw and "radius_m" in raw and raw["radius"] != raw["radius_m"]:
+                return False, "orbit_point has conflicting radius and radius_m"
+            radius = raw.get("radius_m", raw.get("radius"))
             if not _finite(radius):
                 return False, "orbit_point radius must be finite"
-            return True, _OrbitLeg(float(lat), float(lon), float(radius), plan_cap)
+            laps = raw.get("laps", self._orbit_revolutions)
+            if not _finite(laps) or float(laps) <= 0.0:
+                return False, "orbit_point laps must be positive and finite"
+            return True, _OrbitLeg(
+                float(lat), float(lon), float(radius), plan_cap, float(laps)
+            )
 
         if name == "hold":
-            duration = raw.get("durationS")
+            if (
+                "durationS" in raw and "duration_s" in raw
+                and raw["durationS"] != raw["duration_s"]
+            ):
+                return False, "hold has conflicting durationS and duration_s"
+            duration = raw.get("duration_s", raw.get("durationS"))
             if duration is not None:
                 if not _finite(duration):
                     return False, "hold durationS must be finite"
