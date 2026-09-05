@@ -42,6 +42,7 @@ from contracts.protocol import (
 from contracts.site import SITE_NAME
 from hub.audit import AuditLog
 from hub.autonomy import Autonomy
+from hub.detections import DetectionStore
 from hub.manual import ManualControl
 from hub.missions import MissionPhase, MissionRunner
 from hub.registry import Registry
@@ -104,6 +105,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.audit = AuditLog(settings.audit_path)
         app.state.missions = MissionRunner(app.state.registry, app.state.audit, settings.evidence_dir, settings.speed_factor)
         app.state.manual = ManualControl()
+        app.state.detections = DetectionStore()
         app.state.settings = settings
         app.state.autonomy = Autonomy(app, asyncio.get_running_loop(), settings.runs_dir)
 
@@ -126,6 +128,9 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
 
     def runner() -> MissionRunner:
         return app.state.missions
+
+    def dets() -> DetectionStore:
+        return app.state.detections
 
     # ---- controller protocol ------------------------------------------------------
     @app.websocket("/ws/controller")
@@ -413,6 +418,36 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.audit.append("overhead_captured", ref=body.ref)
         return ov.model_dump(mode="json", exclude={"png_b64"})
 
+    # ---- Detections (wide-area layer ingress) ---------------------------------------
+    @app.post("/detections", response_model=Detection, status_code=201)
+    async def post_detection(det: Detection) -> Detection:
+        """Accept one Detection from a wide-area layer and publish it to the Console.
+
+        Storing a Detection authorises nothing. Dispatch is an Operator action through
+        `/missions/fly`, and the Safety Validator still gates every FlightPlan. Any
+        free text in `metadata` is data, never instructions.
+        """
+        dets().add(det)
+        app.state.audit.append(
+            "detection_received",
+            detection_id=det.id,
+            change_type=det.change_type.value,
+            confidence=det.confidence,
+            source=det.metadata.get("source", "unknown"),
+        )
+        reg().publish({"type": "detection", **det.model_dump(mode="json")})
+        return det
+
+    @app.get("/detections", response_model=list[Detection])
+    async def list_detections() -> list[Detection]:
+        return dets().all()
+
+    @app.get("/detections/{detection_id}", response_model=Detection)
+    async def get_detection(detection_id: str) -> Detection:
+        det = dets().get(detection_id)
+        if det is None:
+            raise HTTPException(404, f"unknown detection {detection_id}")
+        return det
     # ---- wide-area layer and autonomy ---------------------------------------------------------
     @app.post("/widearea/detect", response_model=list[Detection])
     async def widearea_detect(body: DetectBody) -> list[Detection]:
@@ -423,24 +458,17 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         before, after = ev / body.before_ref, ev / body.after_ref
         if not before.exists() or not after.exists():
             raise HTTPException(404, "before/after overhead image not found; capture them first")
-        dets = await asyncio.to_thread(detect, before, after, footprint_from_meta(after.with_suffix(".json")), before_ref=body.before_ref, after_ref=body.after_ref, min_area_m2=body.min_area_m2)
-        for d in dets:
-            app.state.autonomy.add_detection(d)
-        app.state.audit.append("widearea_detect", before=body.before_ref, after=body.after_ref, detections=len(dets))
-        return dets
-
-    @app.post("/detections", response_model=Detection)
-    async def add_detection(d: Detection) -> Detection:
-        app.state.audit.append("detection_ingested", detection_id=d.id, change_type=d.change_type.value)
-        return app.state.autonomy.add_detection(d)
-
-    @app.get("/detections", response_model=list[Detection])
-    async def list_detections() -> list[Detection]:
-        return list(app.state.autonomy.detections.values())
+        found = await asyncio.to_thread(detect, before, after, footprint_from_meta(after.with_suffix(".json")), before_ref=body.before_ref, after_ref=body.after_ref, min_area_m2=body.min_area_m2)
+        for d in found:
+            dets().add(d)
+            app.state.audit.append("detection_received", detection_id=d.id, change_type=d.change_type.value, confidence=d.confidence, source="overhead-change-detection")
+            reg().publish({"type": "detection", **d.model_dump(mode="json")})
+        app.state.audit.append("widearea_detect", before=body.before_ref, after=body.after_ref, detections=len(found))
+        return found
 
     @app.post("/detections/{detection_id}/dispatch")
     async def dispatch_detection(detection_id: str) -> dict[str, Any]:
-        if detection_id not in app.state.autonomy.detections:
+        if dets().get(detection_id) is None:
             raise HTTPException(404, "unknown detection")
         app.state.audit.append("dispatch_requested", detection_id=detection_id, llm_mode=app.state.autonomy.mode)
         outcome = await app.state.autonomy.dispatch(detection_id)
@@ -450,7 +478,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
     @app.get("/autonomy")
     async def autonomy_status() -> dict[str, Any]:
         a = app.state.autonomy
-        return {"llm_mode": a.mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(a.detections), "outcomes": list(a.outcomes)}
+        return {"llm_mode": a.mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes)}
 
     @app.post("/drones/{drone_id}/render")
     async def render_drone(drone_id: str) -> dict[str, Any]:

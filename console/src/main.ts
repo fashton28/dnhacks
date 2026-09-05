@@ -179,7 +179,7 @@ liveFeed((ev) => {
     case "clamp": log(`Safety Validator clamped ${ev.drone_id}: ${ev.rule}`, "warn"); showClamp(ev.rule); break;
     case "manual": log(`${ev.drone_id}: Manual Control ${ev.active ? "taken" : "released"}${ev.mission_id ? ` (Mission ${ev.mission_id})` : ""}`, "warn"); break;
     case "overhead": log(`Overhead image stored: ${ev.ref}`, "good"); break;
-    case "detection": onDetection(ev.detection); break;
+    case "detection": onDetection(ev.detection ?? ev); break;
     case "mission_spec": missionSpec = { objective: ev.spec.objective, rationale: ev.spec.rationale, max_altitude_m: ev.spec.max_altitude_m, standoff_m: ev.spec.standoff_m }; log(`Triage Agent proposed a plan (attempt ${ev.spec.attempt ?? 1}): ${ev.spec.rationale}`); refreshMission(); switchTab("mission"); break;
     case "validation": validation = { verdict: ev.result.verdict, violations: ev.result.violations }; log(ev.result.verdict === "accept" ? `Safety Validator: ACCEPT (${ev.result.checks_passed ?? ""} checks)` : `Safety Validator: REJECT ${ev.result.violations.map((v: any) => v.rule).join(", ")}`, ev.result.verdict === "accept" ? "good" : "warn"); refreshMission(); break;
     case "triage": log(`Triage: ${String(ev.decision).toUpperCase()} (confidence ${ev.confidence}) ${ev.rationale ?? ""}`, ev.decision === "escalate" ? "warn" : "good"); break;

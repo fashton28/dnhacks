@@ -53,7 +53,8 @@ These remain required by the full brief; they are sequenced after a reliable min
 
 | Discrepancy | Basic-demo decision |
 | --- | --- |
-| `CONTEXT.md` describes PX4; the platform brief specifies ArduPilot GUIDED. | Run ArduPilot. Keep teammate documents identifiable as a separate component until the team aligns the shared description. |
+| `CONTEXT.md` line 4 still says "a PX4-flown drone"; both runtimes use ArduPilot. | Run ArduPilot. `CONTEXT.md` is now the live glossary for the ARGUS stack (`hub/`, `console/`, `sim/`, `contracts/`), so fix that one line rather than treating the document as a separate component. ADR 0001 is superseded by ADR 0002. |
+| Two runtimes now implement the basic demo: the ARGUS stack (`hub/`, `console/`, `sim/`, Three.js, ARGUS site) and the retrofit (`platform/`, Electron, Komati site). | Pick one for the basic demo and say which here. They do not share contracts, site models, or simulators, and there is no adapter between them. |
 | ARGUS scenarios describe Meridian; the platform stub is Komati. | Run one named Komati stub scenario. Do not combine coordinates or exclusion rules from different sites. |
 | Separate schemas use `Detection`, `MissionSpec`, `FlightPlan`, and `accept/reject`; the platform uses typed anomaly/mission/verification envelopes. | Convert explicitly at a boundary and reverify candidates with the platform's current site and live readiness. |
 | Separate manual-release and fleet concepts exceed current platform behavior. | Manual release holds. Keep the demo single-vehicle. |

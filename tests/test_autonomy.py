@@ -23,7 +23,7 @@ async def test_detection_dispatch_flies_and_reports(hub: HubHandle, live):
         assert status["facility"] == "meridian-station" and status["llm_mode"] == "mock"
         det = load_fixture("detection_intruder_vehicle.json")
         r = await c.post("/detections", json=det)
-        assert r.status_code == 200, r.text
+        assert r.status_code in (200, 201), r.text
         await c.post("/scenarios/run", json={"id": "scn-t", "kind": "intruder_vehicle", "params": {}})
         r = await c.post(f"/detections/{det['id']}/dispatch")
         assert r.status_code == 200, r.text

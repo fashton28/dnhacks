@@ -180,7 +180,6 @@ class Autonomy:
     def __init__(self, hub_app, loop: asyncio.AbstractEventLoop, runs_dir: Path):
         self.app = hub_app
         self.loop = loop
-        self.detections: dict[str, Detection] = {}
         self.outcomes: dict[str, dict[str, Any]] = {}
         self.facility = Facility.load(FACILITY)
         self.llm = LLM(mode=os.environ.get("ARGUS_LLM_MODE", "auto"))
@@ -194,13 +193,10 @@ class Autonomy:
     def mode(self) -> str:
         return "mock" if getattr(self.llm, "mock", True) else "live"
 
-    def add_detection(self, d: Detection) -> Detection:
-        self.detections[d.id] = d
-        self.app.state.registry.publish({"type": "detection", "detection": d.model_dump(mode="json")})
-        return d
-
     async def dispatch(self, detection_id: str) -> dict[str, Any]:
-        d = self.detections[detection_id]
+        d = self.app.state.detections.get(detection_id)
+        if d is None:
+            raise KeyError(detection_id)
         anomaly = detection_to_anomaly(d)
 
         def run():
