@@ -1,2 +1,0 @@
-# Needed only for ARGUS_LLM_MODE=live. Mock mode uses the Python standard library.
-google-genai>=1.0

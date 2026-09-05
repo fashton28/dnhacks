@@ -1,1 +1,0 @@
-"""Deterministic geometry only."""
