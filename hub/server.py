@@ -572,7 +572,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         return {"llm_mode": a.mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes)}
 
     @app.get("/drones/{drone_id}/mjpeg")
-    async def drone_mjpeg(drone_id: str, fps: float = 8.0) -> StreamingResponse:
+    async def drone_mjpeg(drone_id: str, fps: float = 12.0) -> StreamingResponse:
         """Live Drone view as an MJPEG stream (for <img> tags, e.g. the ground-control dashboard's video panel).
 
         Frames come from the connected Renderer: the Console streams the selected Drone at 10 Hz; for any other Drone

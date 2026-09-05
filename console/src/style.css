@@ -209,3 +209,12 @@ body.embed #world { grid-column: 1 / -1 !important; grid-row: 1 / -1 !important;
 .gimbal-label { font-size: 10px; letter-spacing: 0.1em; }
 .gimbal input[type="range"] { width: 96px; accent-color: var(--accent, #3fb950); }
 #gimbal-value { min-width: 34px; text-align: right; font-size: 12px; color: var(--fg); }
+
+/* Embed-drone mode (?embed=drone&drone=<id>): the Drone view alone, filling the frame, for the dashboard's live camera. */
+body.embed-drone header, body.embed-drone #top, body.embed-drone .banner, body.embed-drone #bottom, body.embed-drone #world, body.embed-drone #overview-panel, body.embed-drone .surface-head, body.embed-drone .telemetry, body.embed-drone .hud, body.embed-drone #clamp-banner { display: none !important; }
+body.embed-drone #app { grid-template-rows: 1fr !important; }
+body.embed-drone main { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; padding: 0 !important; gap: 0 !important; grid-row: 1 / -1 !important; }
+body.embed-drone #right { grid-column: 1 / -1 !important; grid-row: 1 / -1 !important; display: block !important; }
+body.embed-drone #drone-panel { height: 100%; border: 0 !important; border-radius: 0 !important; background: #000; }
+body.embed-drone .drone-frame { height: 100%; border: 0 !important; border-radius: 0 !important; }
+body.embed-drone #drone-canvas { width: 100% !important; height: 100% !important; aspect-ratio: auto !important; object-fit: cover; border-radius: 0 !important; }

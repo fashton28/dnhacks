@@ -12,8 +12,11 @@ const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as 
 const params = new URLSearchParams(location.search);
 const isHeadless = params.get("headless") === "1";
 if (isHeadless) document.body.classList.add("headless");
-const isEmbed = params.get("embed") === "1";
+const isEmbed = params.get("embed") === "1" || params.get("embed") === "drone";
+const isEmbedDrone = params.get("embed") === "drone";   // Drone view only: the dashboard's live camera feed
+const sensorFx = params.get("fx") === "1";               // grain, vignette, chromatic aberration are opt-in; default is clean imagery
 if (isEmbed) document.body.classList.add("embed");
+if (isEmbedDrone) document.body.classList.add("embed-drone");
 
 const feed = new LogFeed($("log"));
 const log = (msg: string, level: "info" | "good" | "warn" | "bad" = "info") => feed.push(msg, level);
@@ -51,24 +54,36 @@ droneRenderer.shadowMap.enabled = true;
 droneRenderer.toneMapping = THREE.ACESFilmicToneMapping;
 droneRenderer.outputColorSpace = THREE.SRGBColorSpace;
 droneRenderer.setPixelRatio(1);
-const droneCam = new THREE.PerspectiveCamera(70, 800 / 480, 0.05, 2000);
+const droneCam = new THREE.PerspectiveCamera(70, 1280 / 720, 0.05, 2000);
 const vision = new VisionModes(droneRenderer, world);
 (window as any).__argusVision = vision;
-const droneTarget = new THREE.WebGLRenderTarget(800, 480, { samples: 4, type: THREE.HalfFloatType });
+const DRONE_W = 1280, DRONE_H = 720;
+droneCanvas.width = DRONE_W; droneCanvas.height = DRONE_H;
+const droneTarget = new THREE.WebGLRenderTarget(DRONE_W, DRONE_H, { samples: 4, type: THREE.HalfFloatType });
+/** In embed-drone mode the canvas fills the frame: render at its displayed size (capped at 1080p, dpr up to 2). */
+function fitDroneCanvas(): void {
+  if (!isEmbedDrone) return;
+  const dpr = Math.min(window.devicePixelRatio, 2);
+  const w = Math.min(1920, Math.round(droneCanvas.clientWidth * dpr)), h = Math.min(1080, Math.round(droneCanvas.clientHeight * dpr));
+  if (w > 0 && h > 0 && (droneCanvas.width !== w || droneCanvas.height !== h)) {
+    droneCanvas.width = w; droneCanvas.height = h; droneRenderer.setSize(w, h, false); droneTarget.setSize(w, h);
+    droneCam.aspect = w / h; droneCam.updateProjectionMatrix();
+  }
+}
 const postScene = new THREE.Scene();
 const postCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 const postMat = new THREE.ShaderMaterial({
-  uniforms: { tDiffuse: { value: droneTarget.texture }, time: { value: 0 }, grain: { value: 0.045 }, vignette: { value: 0.35 } },
+  uniforms: { tDiffuse: { value: droneTarget.texture }, time: { value: 0 }, grain: { value: sensorFx ? 0.045 : 0.0 }, vignette: { value: sensorFx ? 0.35 : 0.0 }, ca: { value: sensorFx ? 0.0025 : 0.0 } },
   vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position.xy, 0.0, 1.0); }`,
-  fragmentShader: `uniform sampler2D tDiffuse; uniform float time; uniform float grain; uniform float vignette; varying vec2 vUv;
+  fragmentShader: `uniform sampler2D tDiffuse; uniform float time; uniform float grain; uniform float vignette; uniform float ca; varying vec2 vUv;
     float hash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7)) + time) * 43758.5453); }
     void main(){
       vec2 d = vUv - 0.5;
-      float ca = 0.0025 * length(d);
+      float caAmt = ca * length(d);  // chromatic aberration only when sensor effects are on
       vec3 c;
-      c.r = texture2D(tDiffuse, vUv + d * ca).r;
+      c.r = texture2D(tDiffuse, vUv + d * caAmt).r;
       c.g = texture2D(tDiffuse, vUv).g;
-      c.b = texture2D(tDiffuse, vUv - d * ca).b;
+      c.b = texture2D(tDiffuse, vUv - d * caAmt).b;
       c += (hash(vUv * 1000.0) - 0.5) * grain;
       c *= 1.0 - vignette * dot(d, d) * 2.2;
       gl_FragColor = vec4(c, 1.0);
@@ -143,7 +158,7 @@ function streamFrame(s: DroneState): void {
     reader.onloadend = () => { streamBusy = false; const url = String(reader.result); link.send({ type: "frame", ...meta, jpeg_b64: url.slice(url.indexOf(",") + 1), cmd_id: null }); };
     reader.onerror = () => { streamBusy = false; };
     reader.readAsDataURL(blob);
-  }, "image/jpeg", 0.65);
+  }, "image/jpeg", 0.82);
 }
 
 // overhead capture: orthographic top-down of the whole footprint
@@ -232,7 +247,8 @@ function onDrone(s: DroneState): void {
   overview.updateDrone(s);
   if (prev && prev.status !== s.status) log(`${s.drone_id}: ${prev.status.replace("_", " ")} → ${s.status.replace("_", " ")}${s.mode ? ` (${s.mode})` : ""}`, s.status === "offline" ? "bad" : "info");
   if (s.message?.startsWith("REFUSED") && lastRefused.get(s.drone_id) !== s.message) { lastRefused.set(s.drone_id, s.message); log(`${s.drone_id}: onboard fence ${s.message}`, "bad"); }
-  if (selected === null && s.status !== "offline" && (storedSelection === null || storedSelection === s.drone_id)) select(s.drone_id, { quiet: true });
+  if (droneParam) { if (s.drone_id === droneParam && selected !== droneParam) select(s.drone_id, { quiet: true }); }
+  else if (selected === null && s.status !== "offline" && (storedSelection === null || storedSelection === s.drone_id)) select(s.drone_id, { quiet: true });
   if (selected === null && !selectFallback) selectFallback = window.setTimeout(() => { if (selected === null && drones.size) select(sortedDrones()[0].drone_id, { quiet: true }); }, 2500);
   if (performance.now() - lastFleetRefresh > 200 || (prev && prev.status !== s.status)) { lastFleetRefresh = performance.now(); refreshFleet(); }
   if (s.drone_id === selected) { refreshSelected(); syncGimbal(s); }
@@ -285,6 +301,8 @@ function selectIndex(i: number): void {
   if (list[i]) select(list[i].drone_id);
 }
 (window as any).__argusSelect = (id: string) => select(id);
+window.addEventListener("message", (e) => { const m = e.data; if (m && m.type === "argus-select" && typeof m.drone_id === "string") select(m.drone_id, { quiet: true }); });
+const droneParam = params.get("drone");
 (window as any).__argus = { world, worldCam, controls, renderer, drones, missions };
 
 const refreshFleet = () => renderFleet($("fleet"), sortedDrones(), selected, select, justSelected);
@@ -519,13 +537,14 @@ function loop(now: number): void {
     worldCam.position.add(delta);
   }
   controls.update();
-  stage("world", () => { world.update(now / 1000, worldCam.position); world.renderWorld(renderer, worldCam); });
+  fitDroneCanvas();
+  stage("world", () => { world.update(now / 1000, worldCam.position); if (!isEmbedDrone) world.renderWorld(renderer, worldCam); });
   if (selected && drones.has(selected)) {
     const s = drones.get(selected)!;
     // the Drone view is a camera feed: 15 Hz is plenty and frees the GPU for the World view
-    if (now - lastDroneRender > 66) { lastDroneRender = now; stage("drone", () => renderDroneView(s)); }
+    if (isEmbedDrone || now - lastDroneRender > 33) { lastDroneRender = now; stage("drone", () => renderDroneView(s)); }
     const streaming = s.alt > 0.3;
-    if (streaming && now - lastStream > 125) { lastStream = now; stage("stream", () => streamFrame(s)); }
+    if (streaming && !isEmbedDrone && now - lastStream > 80) { lastStream = now; stage("stream", () => streamFrame(s)); }
     if (now - lastHud > 250) { lastHud = now; stage("ui", () => renderHud($("hud"), s, streaming, vision.mode)); }
   }
   frames++; perf.frames++;
