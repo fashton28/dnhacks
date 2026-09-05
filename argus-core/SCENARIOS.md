@@ -3,6 +3,22 @@
 This catalogue is for the fictional **Meridian Station** simulation only. It
 does not model a real facility or prescribe real-world security operations.
 
+| Scenario | What changes in simulation | What the drone should do |
+|---|---|---|
+| Fence discontinuity | A fence segment opens or bends | Inspect perimeter; escalate if confirmed |
+| Unauthorized vehicle | Unknown vehicle appears in an approved exterior zone | Observe from standoff; capture identifying visual details |
+| Unattended object | Crate/package appears near a gate or service area | Standoff observation; never fly directly overhead |
+| Equipment heat anomaly | One simulated asset has a thermal-color change | Inspect from safe distance; report abnormal heat |
+| Smoke/steam-like plume | Visual plume appears near generic process equipment | Observe; flag possible safety event |
+| Access-point anomaly | Gate remains open outside expected activity window | Inspect and report |
+| Contractor false alarm | Vehicle appears but has approved visual marking | Log as authorized / false alarm |
+| Shadow false positive | Lighting creates a suspicious shape | Drone confirms nothing is there |
+| Wildlife / debris | Small moving or static harmless object | False alarm |
+| Communication degradation | Selected drone’s link health becomes degraded | Do not dispatch it; dashboard shows failsafe state |
+| Low battery | Closest drone has insufficient usable battery | Dispatcher selects another drone or rejects mission |
+| Two simultaneous detections | A benign event and a serious event occur together | Prioritize, assign fleet, show one pending |
+| Unsafe route | Detection is near or beyond an exclusion zone | Safety layer rejects route and escalates to operator |
+
 ## Purpose
 
 A scenario creates a visible change in the simulated world. The wide-area
