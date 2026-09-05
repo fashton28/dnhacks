@@ -14,6 +14,7 @@ import { HoldButton } from '@/components/HoldButton';
 import { StatusPill } from '@/components/StatusPill';
 import { Slider } from '@/components/Slider';
 import type { Telemetry, TrackingStatus, ConnectionState, CommandName, Command, Mode } from '@/contract';
+import { GIMBAL_PITCH_MAX_DEG, GIMBAL_PITCH_MIN_DEG } from '@/contract';
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                               */
@@ -34,6 +35,9 @@ export interface ControlsPanelProps {
   onTakeoff: () => void;
   onEngage: () => void;
   checklistDone: boolean;
+  /** Commanded gimbal pitch, degrees (GIMBAL_PITCH_MIN_DEG..MAX). */
+  gimbalPitch?: number;
+  onSetGimbal?: (deg: number) => void;
 }
 
 /* ------------------------------------------------------------------ */
@@ -75,8 +79,12 @@ export function ControlsPanel({
   onTakeoff,
   onEngage,
   checklistDone,
+  gimbalPitch,
+  onSetGimbal,
 }: ControlsPanelProps) {
   const armed = tel?.armed ?? false;
+  const reportedPitch = tel?.gimbal?.pitchDeg;
+  const commandedPitch = gimbalPitch ?? reportedPitch ?? 0;
   const flying = (tel?.position?.relAlt ?? 0) > 0.5;
   const tState = tracking?.state ?? 'idle';
   const trackingOn = tState !== 'idle';
@@ -301,6 +309,36 @@ export function ControlsPanel({
             accent="var(--green)"
             onChange={onSetMaxSpeed}
           />
+
+          {/* Gimbal pitch: -30 looks UP, 0 is level, 90 is straight DOWN —
+              the same convention the vehicle reports back. */}
+          <div>
+            <Slider
+              label="Gimbal pitch"
+              value={commandedPitch}
+              min={GIMBAL_PITCH_MIN_DEG}
+              max={GIMBAL_PITCH_MAX_DEG}
+              step={1}
+              unit="°"
+              ticks={[`${GIMBAL_PITCH_MIN_DEG}° up`, 'level', `${GIMBAL_PITCH_MAX_DEG}° down`]}
+              accent="var(--amber)"
+              disabled={!onSetGimbal}
+              onChange={(v) => onSetGimbal?.(v)}
+            />
+            <div style={{
+              display: 'flex', alignItems: 'baseline', gap: 6, marginTop: 5,
+              fontFamily: 'var(--font-mono)', fontSize: 10, color: 'var(--text-tertiary)',
+              fontVariantNumeric: 'tabular-nums',
+            }}>
+              <span>REPORTED</span>
+              <span style={{ color: reportedPitch === undefined ? 'var(--text-disabled)' : 'var(--text-primary)' }}>
+                {reportedPitch === undefined ? 'no gimbal' : `${reportedPitch.toFixed(0)}°`}
+              </span>
+              <span style={{ marginLeft: 'auto' }}>
+                {commandedPitch <= 0 ? 'looking up / level' : commandedPitch >= 80 ? 'straight down' : 'oblique down'}
+              </span>
+            </div>
+          </div>
         </div>
       </Panel>
     </div>

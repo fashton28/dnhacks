@@ -5,7 +5,7 @@
    plan, and the operator gate: hold-to-approve (sends executePlan with the
    EFFECTIVE plan — corrected when present) or deny. */
 import React from 'react';
-import { Check, X, ShieldCheck, ShieldAlert, ShieldX } from 'lucide-react';
+import { Check, Clock, X, ShieldCheck, ShieldAlert, ShieldX } from 'lucide-react';
 import { Panel, Badge, Button, HoldButton } from '@/components';
 import type { MissionPlan, PlanTool, Verification } from '@/contract';
 import type { PlanProposal } from '@/store';
@@ -81,9 +81,23 @@ export function VerifierPanel({
     proposals[proposals.length - 1];
 
   const v = selected?.verification;
+
+  /* A delayed-dispatch correction: the plan is fine, but it must not be
+     dispatched before `holdUntil` (an attended window that has not opened, a
+     deconfliction wait). The gate re-opens on its own when the clock passes. */
+  const [nowMs, setNowMs] = React.useState(() => Date.now());
+  const holdUntil = v?.holdUntil;
+  React.useEffect(() => {
+    if (!holdUntil || holdUntil <= Date.now()) return;
+    const id = setInterval(() => setNowMs(Date.now()), 500);
+    return () => clearInterval(id);
+  }, [holdUntil]);
+  const holdLeftS = holdUntil && holdUntil > nowMs ? Math.ceil((holdUntil - nowMs) / 1000) : 0;
+
   const approvable =
     !!selected && !!v && (v.verdict === 'pass' || v.verdict === 'corrected') &&
-    !selected.approvedAt && !selected.deniedAt && !executing && readinessReady;
+    !selected.approvedAt && !selected.deniedAt && !executing && readinessReady &&
+    holdLeftS === 0;
 
   return (
     <Panel
@@ -181,6 +195,25 @@ export function VerifierPanel({
                     ))}
                   </div>
 
+                  {holdUntil !== undefined && (
+                    <div style={{
+                      display: 'flex', alignItems: 'center', gap: 7,
+                      padding: '5px 8px', marginBottom: 10,
+                      background: 'var(--amber-tint)',
+                      border: '1px solid var(--amber-line)',
+                      borderRadius: 'var(--radius-sm)',
+                      color: 'var(--caution-fg)', fontSize: 11, lineHeight: 1.5,
+                    }}>
+                      <Clock size={13} style={{ flex: 'none' }} />
+                      <span>
+                        Delayed dispatch: hold until {new Date(holdUntil).toLocaleTimeString()}
+                        {holdLeftS > 0
+                          ? ` — ${holdLeftS} s remaining, approval is closed until then.`
+                          : ' — the hold has expired; approval is open.'}
+                      </span>
+                    </div>
+                  )}
+
                   {v.verdict === 'corrected' && v.correctedPlan && (
                     <>
                       <SectionLabel>Original → corrected</SectionLabel>
@@ -220,6 +253,7 @@ export function VerifierPanel({
                     executing ? 'Mission in progress' :
                     !v ? 'Awaiting verification' :
                     v.verdict === 'rejected' ? 'Rejected by verifier' :
+                    holdLeftS > 0 ? `Dispatch held for ${holdLeftS} s` :
                     !readinessReady ? `Readiness blocked: ${readinessReasons.join('; ')}` :
                     'Hold to approve'
                   }

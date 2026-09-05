@@ -31,10 +31,15 @@ import type {
   Command,
   ConnectionConfig,
   ConnectionState,
+  Corridor,
   DetectedTarget,
+  EnvelopeAction,
+  EnvelopeConstraint,
   EnvelopeMessage,
+  EnvelopeState,
   EscalationMessage,
   FleetMessage,
+  FleetVehicle,
   HealthEventMessage,
   IncidentReportMessage,
   ManualInput,
@@ -50,6 +55,7 @@ import type {
   SpectrumMessage,
   SimulationToggles,
   Task,
+  TaskLookFor,
   TaskMessage,
   TestFaultName,
   Telemetry,
@@ -62,7 +68,14 @@ import type {
 import { PROFILE_SPEED_MPS } from '@/contract';
 import { GIMBAL_PITCH_MAX_DEG, GIMBAL_PITCH_MIN_DEG } from '@/contract';
 import { DEFAULT_VEHICLE_ID } from '@/contract';
-import type { MissionDataSource } from './types';
+import type { DemoScenario, FleetRow, MissionDataSource } from './types';
+import {
+  UNATTENDED_ENVELOPE,
+  corridorMargin,
+  nearestCorridorPoint,
+  withAttendanceChecks,
+  withCorridorAndTrace,
+} from './scriptedRails';
 
 import { getSiteModel } from '@/site';
 import type { SiteModel, SiteStagingPoint } from '@/site';
@@ -71,7 +84,7 @@ import { verifyMission } from '@planner/verifier';
 import type { VerificationContext } from '@planner/verifier';
 import { writeIncidentReport } from '@planner/report';
 import type { ObservationSummary } from '@planner/report';
-import { haversineMeters, pointInPolygon } from '@planner/site';
+import { distancePointToPolygonMeters, haversineMeters, pointInPolygon } from '@planner/site';
 import bakedAnomalies from '@satdata/anomalies.json';
 
 const HOME = { lat: 37.7699, lon: -122.4666 }; // generic park (pre-site fallback)
@@ -99,6 +112,23 @@ const DEFAULT_GIMBAL_PITCH_DEG = 45;
 
 /** Cue TTL the mock stamps on the scripted anomaly, seconds. */
 const SCRIPTED_CUE_TTL_S = 900;
+
+/** The peer vehicle in the two-vehicle fleet (ADR D26 — star topology). */
+const PEER_VEHICLE_ID = 'eis-2';
+
+/** Lateral push a scripted gust applies while it blows, m/s. Chosen so the
+ *  vehicle's limited lateral authority loses to it: the corridor tolerance is
+ *  crossed in a couple of seconds of demo time, not instantly. */
+const GUST_DRIFT_MPS = 1.95;
+/** How long a scripted gust blows, ms. */
+const GUST_DURATION_MS = 9000;
+
+/** How long the operator stays away for the operator-absent beat, ms. */
+const OPERATOR_ABSENT_MS = 14000;
+
+/** Scripted wind, m/s. Above UNATTENDED_ENVELOPE.maxWindMps this alone would
+ *  refuse an unattended dispatch; it is deliberately below it. */
+const SCRIPTED_WIND_MPS = 4.2;
 
 const DEFAULT_SIMULATION_TOGGLES: SimulationToggles = {
   simulateGpsLoss: false,
@@ -309,8 +339,48 @@ export class MockDataProvider implements MissionDataSource {
   // attendance mode + gimbal + envelope monitor (Phase 1 rails)
   private attendance: AttendanceMode = 'attended';
   private attendanceSince = now();
+  private operatorPresent = true;
+  private operatorReturnsAt: number | null = null;
   private gimbalPitchDeg = DEFAULT_GIMBAL_PITCH_DEG;
   private _scnTask: Task | null = null;
+  private _scnTasks: Task[] = [];
+  private operatorNote = '';
+  private triageRuns = 0;
+
+  /* Envelope monitor state. It reads position + corridor and NOTHING that
+     guidance owns, and guidance cannot clear it — only the monitor's own
+     hysteresis does (ADR D22). */
+  private envelopeState: EnvelopeState = 'in_envelope';
+  private envelopeHold = false;
+  private envelopeSince = now();
+  private envelopeEscalated = false;
+  /** The altitude check arms once the vehicle first reaches its cleared band. */
+  private envelopeArmed = false;
+  private gust: { startedAt: number; bearingRad: number } | null = null;
+
+  /* Second vehicle: a peer the hub relays, per ADR D26. It has its own
+     battery, sortie clock and cleared corridor; there is no vehicle-to-vehicle
+     link and no automatic reallocation. */
+  private peer = {
+    lat: 0,
+    lon: 0,
+    relAlt: 0,
+    heading: 90,
+    theta: 0,
+    battery: 91,
+    armed: false,
+    manualActive: false,
+    mode: 'LOITER' as Mode,
+    sortieStartedAt: null as number | null,
+    plan: null as MissionPlan | null,
+    flying: false,
+    trail: [] as Array<{ lat: number; lon: number }>,
+  };
+  private selectedVehicle: string = DEFAULT_VEHICLE_ID;
+  private fleetRowCbs: Array<(rows: FleetRow[]) => void> = [];
+  private handoffDone = false;
+  /** Monotonic counter that keeps every re-plan a distinct proposal. */
+  private replans = 0;
 
   private _tel: ReturnType<typeof setInterval> | null = null;
   private _trk: ReturnType<typeof setInterval> | null = null;
@@ -423,9 +493,9 @@ export class MockDataProvider implements MissionDataSource {
   }
   onTask(cb: (m: TaskMessage) => void): Unsubscribe {
     this.cbs.task.push(cb);
-    // A task already raised this session is replayed so a late subscriber
-    // (a panel mounted after the scenario beat) still sees it.
-    if (this._scnTask) cb(this.taskMessage(this._scnTask));
+    // Tasks already raised this session are replayed so a late subscriber
+    // (a panel mounted after the scenario beat) still sees them.
+    this._scnTasks.forEach((task) => cb(this.taskMessage(task)));
     return () => this._off('task', cb);
   }
   onEnvelope(cb: (m: EnvelopeMessage) => void): Unsubscribe {
@@ -638,25 +708,220 @@ export class MockDataProvider implements MissionDataSource {
       this.lastHealthSignature = healthSignature;
       health.forEach((event) => this._emit('health', event));
     }
+    const primary: FleetVehicle = {
+      vehicleId: DEFAULT_VEHICLE_ID,
+      battery: telemetry.battery,
+      controlSource: telemetry.controlSource,
+      failsafe: failure,
+      readiness: { ready: readiness.ready, reasons: readiness.reasons, eta_ready_s: readiness.eta_ready_s },
+      position: {
+        lat: telemetry.position.lat,
+        lon: telemetry.position.lon,
+        relAlt: telemetry.position.relAlt,
+      },
+      ...(this.mission?.plan.corridor ? { plannedCorridor: this.mission.plan.corridor } : {}),
+      sortie: telemetry.sortie === null ? null : {
+        elapsed_s: telemetry.sortie.elapsed_s,
+        must_rtl_by: now() +
+          Math.max(0, telemetry.sortie.must_rtl_by_s - telemetry.sortie.elapsed_s) * 1000,
+      },
+    };
     this._emit('fleet', {
-      type: 'fleet', ts: now(), vehicleId: DEFAULT_VEHICLE_ID,
-      vehicles: [{
-        vehicleId: DEFAULT_VEHICLE_ID, battery: telemetry.battery,
-        controlSource: telemetry.controlSource,
-        failsafe: failure,
-        readiness: { ready: readiness.ready, reasons: readiness.reasons, eta_ready_s: readiness.eta_ready_s },
-        position: {
-          lat: telemetry.position.lat,
-          lon: telemetry.position.lon,
-          relAlt: telemetry.position.relAlt,
-        },
-        sortie: telemetry.sortie === null ? null : {
-          elapsed_s: telemetry.sortie.elapsed_s,
-          must_rtl_by: now() +
-            Math.max(0, telemetry.sortie.must_rtl_by_s - telemetry.sortie.elapsed_s) * 1000,
-        },
-      }],
+      type: 'fleet', ts: now(), vehicleId: this.selectedVehicle,
+      vehicles: [primary, this.peerFleetVehicle()],
     });
+    this.publishFleetRows();
+  }
+
+  /* ---- second vehicle (ADR D26: two vehicles, star topology) ------------ */
+
+  /** Where the peer sits when it is not flying: its own staging pad. */
+  private peerAnchor(): { lat: number; lon: number } {
+    const site = this.site;
+    const pad = site?.staging[1] ?? site?.staging[0];
+    return pad
+      ? { lat: pad.lat, lon: pad.lon }
+      : { lat: this.homeLat() + 0.0004, lon: this.homeLon() + 0.0004 };
+  }
+
+  /** The peer's own cleared corridor, from the same deterministic planner. */
+  private ensurePeerPlan(): MissionPlan | null {
+    if (this.peer.plan) return this.peer.plan;
+    const site = this.site;
+    if (!site) return null;
+    const anchor = this.peerAnchor();
+    const cue: Anomaly = {
+      id: `peer-${site.staging[1]?.id ?? 'stage'}`,
+      lat: anchor.lat, lon: anchor.lon,
+      type: 'patrol', confidence: 0.5, thumbnail: '', source: 'drone_survey',
+      observedAt: now(), ttl_s: SCRIPTED_CUE_TTL_S,
+    };
+    this.peer.plan = withCorridorAndTrace(this.planner.passingPlan(site, cue), site);
+    return this.peer.plan;
+  }
+
+  private peerBatteryState(): Telemetry['battery'] {
+    return {
+      soc_pct: this.peer.battery,
+      voltage_v: 14.0 + (this.peer.battery / 100) * 2.8,
+      current_a: this.peer.armed ? 16 : 0.4,
+      cell_delta_v: 0.02,
+      temp_c: 29,
+      remaining_s: Math.max(0, Math.round((this.peer.battery / 100) * 1500)),
+      charge_state: this.peer.armed ? 'discharging' : 'charged',
+      voltage: 14.0 + (this.peer.battery / 100) * 2.8,
+      current: this.peer.armed ? 16 : 0.4,
+      remaining: this.peer.battery,
+    };
+  }
+
+  private peerFleetVehicle(): FleetVehicle {
+    const ready = this.peer.battery >= 80 && !this.peer.armed;
+    const corridor = this.peer.flying ? this.ensurePeerPlan()?.corridor : undefined;
+    const elapsed = this.peer.sortieStartedAt === null
+      ? 0 : Math.max(0, (now() - this.peer.sortieStartedAt) / 1000);
+    return {
+      vehicleId: PEER_VEHICLE_ID,
+      battery: this.peerBatteryState(),
+      controlSource: this.peer.manualActive ? 'manual' : this.peer.flying ? 'planner' : 'auto',
+      failsafe: { state: 'none', reason: '' },
+      readiness: {
+        ready,
+        reasons: ready ? [] : this.peer.armed
+          ? ['on a sortie']
+          : [`SoC ${this.peer.battery.toFixed(0)}% is below 80% dispatch minimum`],
+        eta_ready_s: 0,
+      },
+      position: { lat: this.peer.lat, lon: this.peer.lon, relAlt: this.peer.relAlt },
+      ...(corridor ? { plannedCorridor: corridor } : {}),
+      sortie: this.peer.sortieStartedAt === null ? null : {
+        elapsed_s: elapsed,
+        must_rtl_by: this.peer.sortieStartedAt + 420_000,
+      },
+    };
+  }
+
+  private fleetRows(): FleetRow[] {
+    const row = (v: FleetVehicle, mode: Mode): FleetRow => ({
+      vehicleId: v.vehicleId,
+      status: v.controlSource === 'manual' ? 'manual_control'
+        : v.controlSource === 'planner' ? 'on_mission'
+        : v.failsafe.state === 'rtl' ? 'returning' : 'idle',
+      batteryPct: v.battery.soc_pct,
+      altM: v.position.relAlt,
+      mode,
+    });
+    const primary: FleetVehicle = {
+      vehicleId: DEFAULT_VEHICLE_ID,
+      battery: this.batteryState(),
+      controlSource: this.manual.active ? 'manual' : this.plannerActive ? 'planner'
+        : this.track.state === 'locked' ? 'tracking' : 'auto',
+      failsafe: this.failureStatus(),
+      readiness: { ready: true, reasons: [], eta_ready_s: 0 },
+      position: { lat: this.s.lat, lon: this.s.lon, relAlt: this.s.relAlt },
+      sortie: null,
+    };
+    return [row(primary, this.s.mode), row(this.peerFleetVehicle(), this.peer.mode)];
+  }
+
+  private publishFleetRows(): void {
+    if (this.fleetRowCbs.length === 0) return;
+    const rows = this.fleetRows();
+    this.fleetRowCbs.forEach((cb) => cb(rows));
+  }
+
+  /* ---- fleet selection (FleetCapable — beyond the frozen contract) ------ */
+
+  onFleetRows(cb: (rows: FleetRow[]) => void): () => void {
+    this.fleetRowCbs.push(cb);
+    cb(this.fleetRows());
+    return () => { this.fleetRowCbs = this.fleetRowCbs.filter((f) => f !== cb); };
+  }
+
+  /** Follow another vehicle: telemetry AND the command target switch. */
+  setVehicle(id: string): void {
+    if (this.selectedVehicle === id) return;
+    this.selectedVehicle = id;
+    this.log('info', `Ground station now following ${id}`);
+    this._emit('tel', id === PEER_VEHICLE_ID ? this.peerTelemetry() : this.primaryTelemetry());
+  }
+
+  getVehicle(): string {
+    return this.selectedVehicle;
+  }
+
+  /** Peer kinematics: parked on its pad, or orbiting its own observation
+   *  point after a handoff. Deterministic, so the demo replays identically. */
+  private stepPeer(dt: number): void {
+    const anchor = this.peerAnchor();
+    if (!this.peer.flying) {
+      this.peer.lat = anchor.lat;
+      this.peer.lon = anchor.lon;
+      this.peer.relAlt = 0;
+      this.peer.mode = this.peer.armed ? 'GUIDED' : 'LOITER';
+      return;
+    }
+    // Altitude and radius come from the peer's OWN cleared corridor, so the
+    // monitor sees it comfortably inside its envelope rather than riding the
+    // tolerance edge on numbers picked here.
+    const corridor = this.ensurePeerPlan()?.corridor;
+    const targetAlt = corridor
+      ? (corridor.alt_band_m.min + corridor.alt_band_m.max) / 2
+      : 35;
+    this.peer.mode = this.peer.manualActive ? 'STABILIZE' : 'GUIDED';
+    this.peer.relAlt = lerp(this.peer.relAlt, targetAlt, 0.04);
+    if (this.peer.manualActive) {
+      this.peer.battery = clamp(this.peer.battery - 0.006 * dt * 10, 0, 100);
+      return;
+    }
+    const radius = corridor?.orbits[0]?.radius_m ?? 30;
+    const cosLat = Math.cos((this.homeLat() * Math.PI) / 180);
+    this.peer.theta += (PROFILE_SPEED_MPS.inspect * MISSION_TIME_SCALE * dt) / radius;
+    const e = radius * Math.cos(this.peer.theta);
+    const n = radius * Math.sin(this.peer.theta);
+    this.peer.lat = anchor.lat + n / M_PER_DEG_LAT;
+    this.peer.lon = anchor.lon + e / (M_PER_DEG_LAT * cosLat);
+    this.peer.heading = ((Math.atan2(-e, -n) * 180) / Math.PI + 360) % 360;
+    this.peer.battery = clamp(this.peer.battery - 0.008 * dt * 10, 0, 100);
+    const last = this.peer.trail[this.peer.trail.length - 1];
+    if (!last || Math.abs(last.lat - this.peer.lat) > 1e-5 || Math.abs(last.lon - this.peer.lon) > 1e-5) {
+      this.peer.trail = [...this.peer.trail.slice(-120), { lat: this.peer.lat, lon: this.peer.lon }];
+    }
+  }
+
+  /** Telemetry frame for the peer, used when the operator follows it. */
+  private peerTelemetry(): Telemetry {
+    const dLat = (this.peer.lat - this.homeLat()) * M_PER_DEG_LAT;
+    const dLon = (this.peer.lon - this.homeLon()) * M_PER_DEG_LAT *
+      Math.cos((this.homeLat() * Math.PI) / 180);
+    const elapsed = this.peer.sortieStartedAt === null
+      ? 0 : Math.max(0, (now() - this.peer.sortieStartedAt) / 1000);
+    return {
+      type: 'telemetry',
+      ts: now(),
+      vehicleId: PEER_VEHICLE_ID,
+      armed: this.peer.armed,
+      mode: this.peer.mode,
+      controlSource: this.peer.manualActive ? 'manual' : this.peer.flying ? 'planner' : 'auto',
+      navSource: 'gps',
+      gpsHealth: { fix: 3, sats: 15, hdop: 0.8 },
+      failsafeState: 'none',
+      failsafeReason: '',
+      attitude: { roll: 0, pitch: this.peer.flying ? -3 : 0, yaw: this.peer.heading },
+      position: { lat: this.peer.lat, lon: this.peer.lon, relAlt: this.peer.relAlt, absAlt: this.peer.relAlt + 32 },
+      velocity: {
+        groundspeed: this.peer.flying && !this.peer.manualActive ? PROFILE_SPEED_MPS.inspect : 0,
+        verticalSpeed: 0,
+      },
+      heading: this.peer.heading,
+      battery: this.peerBatteryState(),
+      gps: { fixType: 3, satellites: 15, hdop: 0.8 },
+      sortie: this.peer.sortieStartedAt === null
+        ? null : { elapsed_s: elapsed, cap_s: 480, must_rtl_by_s: 420 },
+      home: { lat: this.homeLat(), lon: this.homeLon(), distance: Math.hypot(dLat, dLon) },
+      link: { rssi: -52, latencyMs: 44 },
+      gimbal: { pitchDeg: this.gimbalPitchDeg },
+    };
   }
 
   /* ---- Phase 1 rails: tasking, envelope, attendance, escalation --------- */
@@ -672,9 +937,10 @@ export class MockDataProvider implements MissionDataSource {
       vehicleId: DEFAULT_VEHICLE_ID,
       mode: this.attendance,
       since: this.attendanceSince,
-      // The mock always has an operator at the console; unattended mode is
-      // entered deliberately by command, never by losing the operator.
-      operatorPresent: true,
+      // Unattended mode is entered deliberately by a signed command, never by
+      // losing the operator; `operatorPresent` is the independent liveness
+      // signal the operator-absent beat drives.
+      operatorPresent: this.operatorPresent,
     };
   }
 
@@ -685,39 +951,237 @@ export class MockDataProvider implements MissionDataSource {
     this._emit('mode', this.modeMessage());
   }
 
-  /** The scripted triage task raised for the flagged anomaly. It names WHAT to
-   *  look for and WHY — never a coordinate (beyond `anomalyId`), tool or
-   *  altitude, so the planner remains the only producer of geometry. */
-  private scriptedTaskFor(anomaly: Anomaly): Task {
-    const lookFor = anomaly.type === 'change' ? 'vehicle' : 'unknown';
-    return {
-      taskId: `task-${anomaly.id}`,
+  /** The scripted triage tasks raised for the flagged anomaly. A task names
+   *  WHAT to look for and WHY — never a coordinate (beyond `anomalyId`), a
+   *  tool or an altitude, so the planner remains the only producer of
+   *  geometry. This is exactly the surface an LLM would be allowed to emit. */
+  private scriptedTasksFor(anomaly: Anomaly): Task[] {
+    // Task ids are stable across triage runs: a re-run UPDATES the same three
+    // tasks (so the operator's ordering survives) rather than piling up a
+    // second copy of the queue.
+    const note = this.operatorNote.trim();
+    const noted = (text: string): string =>
+      note ? `${text} Operator note carried into this run: "${note}".` : text;
+    const spec: Array<{ id: string; lookFor: TaskLookFor; question: string; urgency: Task['urgency']; priority: number; why: string }> = [
+      {
+        id: 'primary',
+        lookFor: anomaly.type === 'change' ? 'vehicle' : 'unknown',
+        question: 'Is there a vehicle at the flagged change, and is the fence intact?',
+        urgency: anomaly.confidence >= 0.8 ? 'immediate' : 'next_sortie',
+        priority: clamp(anomaly.confidence, 0, 1),
+        why: `Change detection flagged ${anomaly.id} at ${(anomaly.confidence * 100).toFixed(0)}% confidence.`,
+      },
+      {
+        id: 'fence',
+        lookFor: 'fence_gap',
+        question: 'Is the perimeter fence continuous either side of the flagged change?',
+        urgency: 'next_sortie',
+        priority: clamp(anomaly.confidence * 0.75, 0, 1),
+        why: 'A change adjacent to the perimeter is worth a continuity pass even if the first look is clean.',
+      },
+      {
+        id: 'structure',
+        lookFor: 'structure',
+        question: 'Has anything been built or placed at the flagged location since the baseline?',
+        urgency: 'defer',
+        priority: clamp(anomaly.confidence * 0.5, 0, 1),
+        why: 'Baseline comparison is cheap to answer on the same sortie and closes the cue.',
+      },
+    ];
+    return spec.map((entry) => ({
+      taskId: `task-${anomaly.id}-${entry.id}`,
       anomalyId: anomaly.id,
-      lookFor,
-      question: 'Is there a vehicle at the flagged change, and is the fence intact?',
-      urgency: anomaly.confidence >= 0.8 ? 'immediate' : 'next_sortie',
-      priority: clamp(anomaly.confidence, 0, 1),
-      rationale: `Change detection flagged ${anomaly.id} at ${(anomaly.confidence * 100).toFixed(0)}% confidence.`,
+      lookFor: entry.lookFor,
+      question: entry.question,
+      urgency: entry.urgency,
+      priority: entry.priority,
+      rationale: noted(entry.why),
       source: 'scripted',
-    };
+      assignedTo: DEFAULT_VEHICLE_ID,
+    }));
   }
 
-  /** 5 Hz envelope report while airborne. The baseline mock never breaches:
-   *  it reports the healthy state so the monitor's absence is distinguishable
-   *  from a monitor reporting "fine". */
-  private stepEnvelope(): void {
-    if (!this._started || this.s.relAlt <= 0.5) return;
+  private emitTasks(tasks: Task[]): void {
+    this._scnTasks = [...this._scnTasks.filter((t) => !tasks.some((n) => n.taskId === t.taskId)), ...tasks];
+    this._scnTask = tasks[0] ?? this._scnTask;
+    tasks.forEach((task) => this._emit('task', this.taskMessage(task)));
+  }
+
+  /* ---- envelope monitor -------------------------------------------------
+   * Reads position, altitude and the CLEARED CORRIDOR, and nothing that
+   * guidance or the planner owns. Nothing in this class can switch it off:
+   * the mission stepper asks it (`envelopeHold`) rather than the other way
+   * round, and only the monitor's own hysteresis clears a breach. */
+
+  /**
+   * The constraints the monitor weighs. The corridor and its altitude band
+   * apply only to a vehicle flying a CLEARED PLAN — a manual or tracking
+   * flight is not inside a corridor and must not be reported as breaching one.
+   * The geofence always applies.
+   */
+  private envelopeCandidates(
+    pos: { lat: number; lon: number },
+    relAlt: number,
+    corridor?: Corridor,
+    altitudeArmed = true,
+  ): Array<{ constraint: EnvelopeConstraint; marginM: number; toleranceM: number }> {
+    const out: Array<{ constraint: EnvelopeConstraint; marginM: number; toleranceM: number }> = [];
+    if (corridor) {
+      const m = corridorMargin(pos, corridor);
+      if (m.element !== 'none') {
+        out.push({ constraint: 'corridor', marginM: m.marginM, toleranceM: m.toleranceM });
+      }
+      // The altitude check ARMS on first entry into the band: a vehicle still
+      // climbing to its cleared band has not left it.
+      if (altitudeArmed) {
+        out.push({
+          constraint: 'altitude',
+          marginM: Math.min(relAlt - corridor.alt_band_m.min, corridor.alt_band_m.max - relAlt),
+          toleranceM: 5,
+        });
+      }
+    }
     const site = this.site;
-    const ceiling = site ? site.altBandM.max : 80;
+    if (site) {
+      const inside = pointInPolygon(pos, site.perimeter);
+      const d = distancePointToPolygonMeters(pos, site.perimeter);
+      out.push({ constraint: 'geofence', marginM: inside ? d : -d, toleranceM: 10 });
+    }
+    return out;
+  }
+
+  /** 5 Hz envelope report while airborne, for both vehicles. */
+  private stepEnvelope(): void {
+    if (!this._started) return;
+    if (this.peer.flying && this.peer.relAlt > 0.5) {
+      const corridor = this.ensurePeerPlan()?.corridor;
+      const peerArmed = !!corridor &&
+        this.peer.relAlt >= corridor.alt_band_m.min && this.peer.relAlt <= corridor.alt_band_m.max;
+      const peerCandidates = this.envelopeCandidates(
+        { lat: this.peer.lat, lon: this.peer.lon }, this.peer.relAlt, corridor, peerArmed,
+      );
+      const peerBinding = peerCandidates.reduce<{ constraint: EnvelopeConstraint; marginM: number; toleranceM: number } | null>(
+        (best, c) => (best === null || c.marginM < best.marginM ? c : best), null,
+      );
+      if (peerBinding) {
+        this._emit('envl', {
+          type: 'envelope', ts: now(), vehicleId: PEER_VEHICLE_ID,
+          state: peerBinding.marginM >= 0 ? 'in_envelope' : 'warning',
+          constraint: peerBinding.constraint,
+          margin_m: Math.round(peerBinding.marginM * 10) / 10,
+          action: peerBinding.marginM >= 0 ? 'none' : 'slow',
+        });
+      }
+    }
+
+    if (this.s.relAlt <= 0.5) {
+      if (this.envelopeState !== 'in_envelope') {
+        this.envelopeState = 'in_envelope';
+        this.envelopeHold = false;
+      }
+      return;
+    }
+
+    const corridor = this.mission?.plan.corridor;
+    if (corridor && !this.envelopeArmed &&
+        this.s.relAlt >= corridor.alt_band_m.min && this.s.relAlt <= corridor.alt_band_m.max) {
+      this.envelopeArmed = true;
+    }
+    const candidates = this.envelopeCandidates(
+      { lat: this.s.lat, lon: this.s.lon }, this.s.relAlt, corridor, this.envelopeArmed,
+    );
+    const binding = candidates.reduce<{ constraint: EnvelopeConstraint; marginM: number; toleranceM: number } | null>(
+      (best, c) => (best === null || c.marginM < best.marginM ? c : best), null,
+    );
+    if (!binding) return;
+
+    // Hysteresis: a condition clears only once the measurement is back inside
+    // the tolerance BY A MARGIN, so a vehicle riding the edge cannot flap.
+    const clearAt = binding.toleranceM * 0.2;
+    let state: EnvelopeState;
+    if (binding.marginM < -binding.toleranceM) state = 'breach';
+    else if (binding.marginM < 0) state = 'warning';
+    else if (this.envelopeState !== 'in_envelope' && binding.marginM < clearAt) state = 'warning';
+    else state = 'in_envelope';
+
+    const action: EnvelopeAction = state === 'breach'
+      ? (binding.constraint === 'geofence' || binding.constraint === 'nfz' ? 'rtl' : 'hold')
+      : state === 'warning' ? 'slow' : 'none';
+
+    if (state !== this.envelopeState) {
+      this.envelopeState = state;
+      this.envelopeSince = now();
+      this.log(state === 'breach' ? 'critical' : state === 'warning' ? 'warning' : 'info',
+        state === 'in_envelope'
+          ? `Envelope recovered — inside the ${binding.constraint} tolerance`
+          : `Envelope ${state.toUpperCase()} on ${binding.constraint}: ` +
+            `${binding.marginM.toFixed(1)} m of margin → ${action}`);
+    }
+    this.envelopeHold = state === 'breach' && action === 'hold';
+
+    // A breach that persists escalates (ADR D22) — once per breach.
+    if (state === 'breach' && !this.envelopeEscalated && now() - this.envelopeSince > 5000) {
+      this.envelopeEscalated = true;
+      this.raiseEscalation(
+        this.mission?.plan.requestId ?? 'no-mission',
+        'envelope_breach_persisted',
+        {
+          constraint: binding.constraint,
+          margin_m: Math.round(binding.marginM * 10) / 10,
+          heldForS: Math.round((now() - this.envelopeSince) / 1000),
+        },
+      );
+    }
+    if (state === 'in_envelope') this.envelopeEscalated = false;
+
     this._emit('envl', {
       type: 'envelope',
       ts: now(),
       vehicleId: DEFAULT_VEHICLE_ID,
-      state: 'in_envelope',
-      constraint: 'altitude',
-      margin_m: Math.max(0, ceiling - this.s.relAlt),
-      action: 'none',
+      state,
+      constraint: binding.constraint,
+      margin_m: Math.round(binding.marginM * 10) / 10,
+      action,
     });
+  }
+
+  /** Monitor-commanded back-off after a hold: creep back to the nearest point
+   *  of the cleared corridor. Not a plan and not a guidance setpoint. */
+  private stepEnvelopeBackoff(dt: number): boolean {
+    if (!this.envelopeHold || this.gust) return false;
+    const corridor = this.mission?.plan.corridor;
+    if (!corridor) return false;
+    const target = nearestCorridorPoint({ lat: this.s.lat, lon: this.s.lon }, corridor);
+    if (!target) return false;
+    this.moveToward(target.lat, target.lon, 2.5 * MISSION_TIME_SCALE * dt);
+    this.s.groundspeed = 2.5;
+    this.s.vspeed = 0;
+    return true;
+  }
+
+  /** Escalation raised on the scripted channel: appended to the local outbox
+   *  and the audit trail. It never contacts anyone outside the site. */
+  private raiseEscalation(
+    missionId: string,
+    reason: string,
+    payload: Record<string, unknown> = {},
+  ): void {
+    const escalation: EscalationMessage = {
+      type: 'escalation',
+      ts: now(),
+      vehicleId: DEFAULT_VEHICLE_ID,
+      missionId,
+      channel: 'console',
+      payload: {
+        reason,
+        attendance: this.attendance,
+        operatorPresent: this.operatorPresent,
+        ...payload,
+      },
+      deliveredAt: now(),
+    };
+    this._emit('escl', escalation);
+    this.log('critical', `Escalation raised for ${missionId}: ${reason.replace(/_/g, ' ')}`);
   }
 
   /* ---- mission scenario (anomaly → plans → verifications) --------------- */
@@ -762,15 +1226,14 @@ export class MockDataProvider implements MissionDataSource {
         this.log('warning',
           `Satellite change detection flagged ${anomaly.id} (${anomaly.type}, ` +
           `conf ${(anomaly.confidence * 100).toFixed(0)}%)`);
-        // The triage task follows the cue on the same beat: the operator sees
+        // The triage tasks follow the cue on the same beat: the operator sees
         // WHAT is being asked before any plan proposes HOW to answer it.
-        const task = this.scriptedTaskFor(anomaly);
-        this._scnTask = task;
-        this._emit('task', this.taskMessage(task));
-        this.log('info', `Triage task ${task.taskId} (${task.urgency}): ${task.question}`);
+        const tasks = this.scriptedTasksFor(anomaly);
+        this.emitTasks(tasks);
+        this.log('info', `Triage raised ${tasks.length} task(s); top: ${tasks[0].question}`);
       } else if (step === 1) {
         if (this._scnAnomaly && site.nfz.length > 0) {
-          this._scnFailing = this.planner.failingPlan(site, this._scnAnomaly);
+          this._scnFailing = this.dressPlan(this.planner.failingPlan(site, this._scnAnomaly), site);
           this._emit('plan', {
             type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan: this._scnFailing,
           });
@@ -778,7 +1241,10 @@ export class MockDataProvider implements MissionDataSource {
         }
       } else if (step === 2) {
         if (this._scnFailing) {
-          const v = verifyMission(this._scnFailing, site, this.verifierContext(this._scnAnomaly ?? this.deriveAnomaly(site)));
+          const v = this.dressVerification(
+            verifyMission(this._scnFailing, site, this.verifierContext(this._scnAnomaly ?? this.deriveAnomaly(site))),
+            this._scnFailing,
+          );
           this._emit('verf', {
             type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification: v,
           });
@@ -795,14 +1261,15 @@ export class MockDataProvider implements MissionDataSource {
               capabilities: this.capabilitiesMessage(),
               context: this.verifierContext(this._scnAnomaly),
             });
-            this._scnPassing = result.plan;
-            this._scnPassingVerification = result.verification;
+            this._scnPassing = this.dressPlan(result.plan, site);
+            this._scnPassingVerification = this.dressVerification(result.verification, this._scnPassing);
             if (result.fallbackReason) this.log('warning', `Live planner fallback: ${result.fallbackReason}`);
             if (result.escalationReason) this.log('error', result.escalationReason);
           } else {
-            this._scnPassing = this.planner.passingPlan(site, this._scnAnomaly);
-            this._scnPassingVerification = verifyMission(
-              this._scnPassing, site, this.verifierContext(this._scnAnomaly),
+            this._scnPassing = this.dressPlan(this.planner.passingPlan(site, this._scnAnomaly), site);
+            this._scnPassingVerification = this.dressVerification(
+              verifyMission(this._scnPassing, site, this.verifierContext(this._scnAnomaly)),
+              this._scnPassing,
             );
           }
           this._emit('plan', {
@@ -856,8 +1323,385 @@ export class MockDataProvider implements MissionDataSource {
     };
   }
 
+  /* ---- scripted demo rails --------------------------------------------- *
+   * Everything below drives the OFFLINE demo. Plans always come from the
+   * deterministic planner in ground/planner and verdicts always come from the
+   * real MissionVerifier; these methods only decide WHEN a beat happens and
+   * under WHAT conditions, never what geometry is flown. */
+
+  /** Attach the corridor + rule trace the deterministic planner does not emit
+   *  yet (see scriptedRails.ts). The plan's geometry is never changed. */
+  private dressPlan(plan: MissionPlan, site: SiteModel): MissionPlan {
+    return withCorridorAndTrace(plan, site, this._scnTasks[0] ?? null);
+  }
+
+  /** Fold in the `attended` + `deconfliction` checks the verifier does not
+   *  produce yet. They can only ever make a verdict stricter. */
+  private dressVerification(v: Verification, plan: MissionPlan): Verification {
+    const site = this.site;
+    if (!site) return v;
+    const sensors = this.sensorHealth();
+    const toggles = this.simulationToggles;
+    const peerCorridor = this.peer.flying ? this.ensurePeerPlan()?.corridor : undefined;
+    return withAttendanceChecks(
+      v,
+      {
+        mode: this.attendance,
+        operatorPresent: this.operatorPresent,
+        plan,
+        site,
+        navSourceIsGps: !toggles.simulateGpsLoss,
+        rfInterference: toggles.simulateRfInterference,
+        hostileDrone: toggles.simulateHostileDrone && !this.hostileOverride,
+        nightWithoutThermal: toggles.simulateNight && sensors.thermal !== 'ok',
+        windMps: SCRIPTED_WIND_MPS,
+      },
+      {
+        corridor: plan.corridor,
+        peerCorridor,
+        peerDataTs: peerCorridor ? now() : undefined,
+        now: now(),
+      },
+    );
+  }
+
+  /** Re-run triage. The operator's note is carried into the task rationale —
+   *  it never becomes geometry, a tool or an altitude. */
+  runTriage(note: string): void {
+    this.operatorNote = note;
+    const anomaly = this._scnAnomaly;
+    if (!anomaly) {
+      this.log('warning', 'Triage has nothing to run on — no cue has been raised yet');
+      return;
+    }
+    this.triageRuns += 1;
+    const tasks = this.scriptedTasksFor(anomaly);
+    this.emitTasks(tasks);
+    this.log('info',
+      `Triage re-run ${this.triageRuns} for ${anomaly.id}` +
+      (note.trim() ? ` with operator note: "${note.trim()}"` : ''));
+  }
+
+  /**
+   * The operator dragged the cue somewhere else on the map. The provider
+   * RE-PLANS from the moved cue through the deterministic planner and the
+   * real verifier; the UI never edits a plan. Dropping the cue inside the
+   * switchyard no-fly zone is exactly the case the verifier must refuse.
+   */
+  moveAnomaly(anomalyId: string, lat: number, lon: number): void {
+    const site = this.site;
+    if (!site) return;
+    if (!this._scnAnomaly || this._scnAnomaly.id !== anomalyId) return;
+    const moved: Anomaly = { ...this._scnAnomaly, lat, lon, observedAt: now() };
+    this._scnAnomaly = moved;
+    this._emit('anom', { type: 'anomaly', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, anomaly: moved });
+    const zone = site.nfz.find((z) => pointInPolygon(moved, z.polygon));
+    this.log('warning',
+      `Operator moved cue ${moved.id}${zone ? ` into no-fly zone "${zone.name}"` : ''} — re-planning`);
+
+    this.replans += 1;
+    const planned = this.planner.passingPlan(site, moved);
+    // requestId is ground-side correlation ONLY (ADR D7): suffixing it keeps
+    // each re-plan a distinct proposal in the verifier panel's history.
+    const plan = this.dressPlan(
+      { ...planned, requestId: `${planned.requestId}-replan-${this.replans}` },
+      site,
+    );
+    this._emit('plan', { type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan });
+    const verification = this.dressVerification(
+      verifyMission(plan, site, this.verifierContext(moved)), plan,
+    );
+    this._emit('verf', {
+      type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification,
+    });
+    this.log(verification.verdict === 'rejected' ? 'error' : 'info',
+      `MissionVerifier: ${plan.requestId} → ${verification.verdict.toUpperCase()}` +
+      (verification.verdict === 'rejected'
+        ? ` (${verification.checks.filter((c) => !c.ok).map((c) => c.name).join(', ')})`
+        : ''));
+    if (verification.verdict === 'rejected') {
+      this.raiseEscalation(plan.requestId, 'plan_refused_after_operator_move', {
+        anomalyId: moved.id,
+        failedChecks: verification.checks.filter((c) => !c.ok).map((c) => c.name),
+      });
+    }
+  }
+
+  /** One scripted beat. Each is a real condition, never a doctored readout. */
+  runScenario(name: DemoScenario): void {
+    switch (name) {
+      case 'gust': {
+        if (!this.plannerActive || !this.mission?.plan.corridor) {
+          this.log('warning', 'Gust needs a mission executing inside a cleared corridor');
+          return;
+        }
+        this.gust = {
+          startedAt: now(),
+          bearingRad: ((this.s.heading + 90) * Math.PI) / 180,
+        };
+        this.log('warning',
+          `Scripted gust: ${GUST_DRIFT_MPS.toFixed(1)} m/s of lateral disturbance for ` +
+          `${(GUST_DURATION_MS / 1000).toFixed(0)} s`);
+        return;
+      }
+      case 'operatorAbsent': {
+        this.operatorPresent = false;
+        this.operatorReturnsAt = now() + OPERATOR_ABSENT_MS;
+        this._emit('mode', this.modeMessage());
+        this.log('critical',
+          `Operator presence lost — attended approvals expire until the operator reconnects ` +
+          `(${(OPERATOR_ABSENT_MS / 1000).toFixed(0)} s)`);
+        this.raiseEscalation(
+          this.mission?.plan.requestId ?? this._scnPassing?.requestId ?? 'no-mission',
+          'operator_absent',
+          { expiresApprovals: true },
+        );
+        if (this.plannerActive && this.s.armed) {
+          this.envelopeHold = false;
+          this.s.mode = 'LOITER';
+          this.log('warning', 'Mission holding — an attended mission may not run unattended');
+        }
+        return;
+      }
+      case 'unattendedInEnvelope':
+        this.unattendedDispatch(true);
+        return;
+      case 'unattendedOutOfEnvelope':
+        this.unattendedDispatch(false);
+        return;
+      case 'handoff': {
+        if (this.sortieStartedAt === null) {
+          this.log('warning', 'Handoff needs a vehicle on a sortie');
+          return;
+        }
+        this.setSimulationToggles({ simulateSortieExpiry: true });
+        this.log('warning', 'Sortie clock forced to the must-RTL deadline');
+        return;
+      }
+    }
+  }
+
+  scenarioHint(name: DemoScenario): string {
+    switch (name) {
+      case 'gust':
+        return this.plannerActive && this.mission?.plan.corridor
+          ? 'Drift the vehicle off its corridor'
+          : 'Approve and execute a plan first';
+      case 'operatorAbsent':
+        return this.operatorPresent
+          ? 'Expire approvals and escalate'
+          : 'Operator already away';
+      case 'unattendedInEnvelope':
+        return this.attendance === 'unattended'
+          ? 'Auto-dispatch inside UNATTENDED_ENVELOPE'
+          : 'Enter unattended mode first';
+      case 'unattendedOutOfEnvelope':
+        return this.attendance === 'unattended'
+          ? 'Refuse and escalate'
+          : 'Enter unattended mode first';
+      case 'handoff':
+        return this.sortieStartedAt === null
+          ? 'Needs a vehicle on a sortie'
+          : this.handoffDone ? 'Already handed off' : 'Hand the task to eis-2 at must_rtl_by';
+    }
+  }
+
+  /**
+   * Unattended tasking. In unattended mode a task inside UNATTENDED_ENVELOPE
+   * is dispatched without an operator gate; a task outside it is REFUSED and
+   * the refusal escalates — an unattended request the system declined is
+   * precisely what a human needs to see (ADR D23).
+   */
+  private unattendedDispatch(inEnvelope: boolean): void {
+    const site = this.site;
+    const anomaly = this._scnAnomaly;
+    if (!site || !anomaly) {
+      this.log('warning', 'Unattended tasking needs a cue and a loaded site model');
+      return;
+    }
+    if (this.attendance !== 'unattended') {
+      this.log('error',
+        'Unattended dispatch refused — unattended mode is entered by a signed operator command only');
+      return;
+    }
+    // The out-of-envelope beat is a REAL condition, not a doctored verdict:
+    // RF interference makes GNSS integrity unverifiable, which the envelope
+    // refuses outright.
+    if (!inEnvelope && !this.simulationToggles.simulateRfInterference) {
+      this.setSimulationToggles({ simulateRfInterference: true });
+    }
+
+    this.replans += 1;
+    const task: Task = {
+      taskId: `task-unattended-${this.replans}`,
+      anomalyId: anomaly.id,
+      lookFor: 'vehicle',
+      question: 'Is the flagged change still present, and is anything moving near it?',
+      urgency: 'immediate',
+      priority: 0.88,
+      rationale: `Unattended cue check for ${anomaly.id}; no operator gate is available.`,
+      source: 'scripted',
+      assignedTo: DEFAULT_VEHICLE_ID,
+    };
+    this.emitTasks([task]);
+
+    const planned = this.planner.passingPlan(site, anomaly);
+    const plan = this.dressPlan(
+      { ...planned, requestId: `${planned.requestId}-unattended-${this.replans}` }, site,
+    );
+    this._emit('plan', { type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan });
+    const verification = this.dressVerification(
+      verifyMission(plan, site, this.verifierContext(anomaly)), plan,
+    );
+    this._emit('verf', {
+      type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification,
+    });
+
+    if (verification.verdict === 'rejected') {
+      const attended = verification.checks.find((c) => c.name === 'attended');
+      this.log('error', `Unattended dispatch REFUSED — ${attended?.reason ?? 'outside the envelope'}`);
+      this.raiseEscalation(plan.requestId, 'unattended_dispatch_refused', {
+        taskId: task.taskId,
+        failedChecks: verification.checks.filter((c) => !c.ok).map((c) => c.name),
+      });
+      return;
+    }
+    if (verification.holdUntil && verification.holdUntil > now()) {
+      this.log('warning',
+        `Unattended dispatch held until ${new Date(verification.holdUntil).toLocaleTimeString()} — deconfliction`);
+      return;
+    }
+    this.log('warning', `Unattended auto-dispatch of ${plan.requestId} (no operator gate)`);
+    void this.sendCommand({
+      type: 'command', vehicleId: DEFAULT_VEHICLE_ID, command: 'executePlan', params: { plan },
+    });
+  }
+
+  /** Lateral disturbance while a gust blows. Pure kinematics — it does not
+   *  touch the plan, and the monitor sees it the same way it would see wind. */
+  private applyGust(dt: number): void {
+    const g = this.gust;
+    if (!g) return;
+    if (now() - g.startedAt > GUST_DURATION_MS) {
+      this.gust = null;
+      this.log('info', 'Gust subsided — monitor backing the vehicle off to the corridor');
+      return;
+    }
+    // Wind blows from a fixed compass direction, not relative to the airframe:
+    // on a leg that pushes the vehicle sideways, on an orbit it pushes the
+    // whole ring off centre. Either way the monitor sees a real excursion.
+    const cosLat = Math.cos((this.homeLat() * Math.PI) / 180);
+    const step = GUST_DRIFT_MPS * MISSION_TIME_SCALE * dt;
+    this.s.lat += (Math.cos(g.bearingRad) * step) / M_PER_DEG_LAT;
+    this.s.lon += (Math.sin(g.bearingRad) * step) / (M_PER_DEG_LAT * cosLat);
+  }
+
+  /**
+   * At `must_rtl_by` the sortie ends. Task handoff between vehicles is an
+   * explicit, audited action, never an emergent one (ADR D26): the task is
+   * re-issued to the peer and the primary returns to launch.
+   */
+  private maybeHandoff(telemetry: Telemetry): void {
+    if (this.handoffDone || !telemetry.sortie) return;
+    if (telemetry.sortie.elapsed_s < telemetry.sortie.must_rtl_by_s) return;
+    const task = this._scnTasks[0];
+    if (!task) return;
+    this.handoffDone = true;
+    const missionId = this.mission?.plan.requestId ?? task.taskId;
+    this.peer.flying = true;
+    this.peer.armed = true;
+    this.peer.sortieStartedAt = now();
+    this.ensurePeerPlan();
+    this.emitTasks([{
+      ...task,
+      assignedTo: PEER_VEHICLE_ID,
+      rationale: `${task.rationale} Handed off from ${DEFAULT_VEHICLE_ID} at the must-RTL deadline.`,
+    }]);
+    this.log('critical',
+      `must_rtl_by reached on ${missionId} — task ${task.taskId} handed to ${PEER_VEHICLE_ID}; ` +
+      `${DEFAULT_VEHICLE_ID} returning to launch`);
+    if (this.s.armed && this.s.phase !== 'rtl' && this.s.phase !== 'landing') {
+      this.s.phase = 'rtl';
+      this.s.mode = 'RTL';
+      this.plannerActive = false;
+      this.mission = null;
+      this.envelopeHold = false;
+      this.gust = null;
+    }
+    this.publishFleetRows();
+  }
+
+  /**
+   * Commands addressed to the peer. Each vehicle keeps its own state; there is
+   * no vehicle-to-vehicle path, so this is the hub relaying to the peer. What
+   * the mock does not model is refused with a reason, never silently ignored —
+   * except manual, which must always be available (manual preempts everything).
+   */
+  private peerCommand(cmd: Command): Promise<CommandAck> {
+    let ok = true;
+    let message = 'OK';
+    switch (cmd.command) {
+      case 'arm':
+        this.peer.armed = true;
+        this.peer.sortieStartedAt ??= now();
+        this.log('info', `${PEER_VEHICLE_ID} ARMED`);
+        break;
+      case 'disarm':
+      case 'emergencyStop':
+        this.peer.armed = false;
+        this.peer.flying = false;
+        this.peer.manualActive = false;
+        this.peer.sortieStartedAt = null;
+        this.peer.relAlt = 0;
+        this.log(cmd.command === 'emergencyStop' ? 'critical' : 'warning',
+          `${PEER_VEHICLE_ID} ${cmd.command === 'emergencyStop' ? 'EMERGENCY STOP' : 'DISARMED'}`);
+        break;
+      case 'land':
+      case 'rtl':
+        this.peer.flying = false;
+        this.peer.manualActive = false;
+        this.peer.relAlt = 0;
+        this.log('info', `${PEER_VEHICLE_ID} returning to its pad`);
+        break;
+      case 'takeoff':
+        if (!this.peer.armed) { ok = false; message = 'Not armed'; break; }
+        this.peer.flying = true;
+        this.ensurePeerPlan();
+        this.log('info', `${PEER_VEHICLE_ID} on station`);
+        break;
+      case 'engageManual':
+        if (!this.peer.armed) { ok = false; message = 'Not armed'; break; }
+        // Manual preempts everything, on either vehicle.
+        this.peer.manualActive = true;
+        this.log('warning', `MANUAL CONTROL engaged on ${PEER_VEHICLE_ID}`);
+        break;
+      case 'disengageManual':
+        this.peer.manualActive = false;
+        this.log('info', `Manual released on ${PEER_VEHICLE_ID} — position hold`);
+        break;
+      case 'setGimbal':
+        if (cmd.params?.pitchDeg == null) { ok = false; message = 'setGimbal requires params.pitchDeg'; break; }
+        this.gimbalPitchDeg = clamp(cmd.params.pitchDeg, GIMBAL_PITCH_MIN_DEG, GIMBAL_PITCH_MAX_DEG);
+        break;
+      case 'enterUnattended':
+      case 'exitUnattended':
+        // Attendance is a ground-station-wide state in this mock.
+        return this.sendCommand({ ...cmd, vehicleId: DEFAULT_VEHICLE_ID });
+      default:
+        ok = false;
+        message = `${cmd.command} is not modelled on the peer vehicle`;
+    }
+    const ack: CommandAck = {
+      type: 'ack', ts: now(), vehicleId: cmd.vehicleId, command: cmd.command, success: ok, message,
+    };
+    setTimeout(() => this._emit('ack', ack), 60);
+    this.publishFleetRows();
+    return Promise.resolve(ack);
+  }
+
   /* ---- command handling ------------------------------------------------ */
   sendCommand(cmd: Command): Promise<CommandAck> {
+    if (cmd.vehicleId === PEER_VEHICLE_ID) return this.peerCommand(cmd);
     const p = cmd.params || {};
     let ok = true;
     let message = 'OK';
@@ -884,6 +1728,10 @@ export class MockDataProvider implements MissionDataSource {
         this.plannerActive = false;
         this.mission = null;
         this.obs = null;
+        this.gust = null;
+        this.envelopeHold = false;
+        this.envelopeState = 'in_envelope';
+        this.envelopeArmed = false;
         this.manual.throttle = this.manual.yaw = this.manual.pitch = this.manual.roll = 0;
         if (this.track.state !== 'idle') {
           this.track.state = 'idle';
@@ -992,6 +1840,17 @@ export class MockDataProvider implements MissionDataSource {
           this.log('error', `Mission refused — ${message}`);
           break;
         }
+        // Attendance gate: an attended mission may not dispatch while the
+        // operator is away — the approval that authorised it has expired.
+        if (this.attendance === 'attended' && !this.operatorPresent) {
+          ok = false;
+          message = 'operator approval expired — the operator is not present';
+          this.log('error', `Mission refused — ${message}`);
+          this.raiseEscalation(plan.requestId, 'dispatch_refused_operator_absent', {
+            anomalyId: plan.anomalyId,
+          });
+          break;
+        }
         // exactly one controlSource: release manual + tracking
         this.manual.active = false;
         this.manual.throttle = this.manual.yaw = this.manual.pitch = this.manual.roll = 0;
@@ -1012,6 +1871,10 @@ export class MockDataProvider implements MissionDataSource {
         this.s.mode = 'GUIDED';
         this.s.phase = 'flying';
         this.mission = { plan, toolIndex: 0, orbit: null, holdLeftS: null, observed: false };
+        this.envelopeArmed = false;
+        this.envelopeState = 'in_envelope';
+        this.envelopeHold = false;
+        this.envelopeEscalated = false;
         this.log('info',
           `Executing plan ${plan.requestId} — ${plan.tools.length} step(s), profile ${plan.profile}`);
         break;
@@ -1021,6 +1884,10 @@ export class MockDataProvider implements MissionDataSource {
           this.plannerActive = false;
           this.mission = null;
           this.obs = null;
+          this.gust = null;
+          this.envelopeHold = false;
+          this.envelopeState = 'in_envelope';
+          this.envelopeArmed = false;
           if (this.s.armed) this.s.mode = 'LOITER';
           this.log('warning', 'Plan aborted — position hold');
         }
@@ -1085,7 +1952,11 @@ export class MockDataProvider implements MissionDataSource {
           message = 'exitUnattended requires params.operatorId';
           break;
         }
+        // Exiting unattended mode IS the operator connecting.
+        this.operatorPresent = true;
+        this.operatorReturnsAt = null;
         this.setAttendance('attended');
+        this._emit('mode', this.modeMessage());
         this.log('info', `Attended mode restored by ${p.operatorId}`);
         break;
       default:
@@ -1193,8 +2064,18 @@ export class MockDataProvider implements MissionDataSource {
         const omega = (speed * MISSION_TIME_SCALE * dt) / r; // rad per tick
         m.orbit.theta += omega;
         m.orbit.laps += omega / (2 * Math.PI);
-        const e = r * Math.cos(m.orbit.theta);
-        const n = r * Math.sin(m.orbit.theta);
+        // Advance along the ring from where the vehicle ACTUALLY is, and pull
+        // the radius back toward r with LIMITED authority. Snapping onto the
+        // ideal ring point each tick would give the airframe infinite lateral
+        // authority and no disturbance could ever move it off its corridor.
+        const dNow = Math.hypot(
+          (s.lat - tool.lat) * M_PER_DEG_LAT,
+          (s.lon - tool.lon) * M_PER_DEG_LAT * cosLat,
+        ) || r;
+        const maxRadialCorrection = stepM * 0.35;
+        const nextR = dNow + clamp(r - dNow, -maxRadialCorrection, maxRadialCorrection);
+        const e = nextR * Math.cos(m.orbit.theta);
+        const n = nextR * Math.sin(m.orbit.theta);
         s.lat = tool.lat + n / M_PER_DEG_LAT;
         s.lon = tool.lon + e / (M_PER_DEG_LAT * cosLat);
         // face the orbit centre
@@ -1418,7 +2299,21 @@ export class MockDataProvider implements MissionDataSource {
     ) {
       // planned-mission kinematics (goto / orbit / hold / rtl)
       s.mode = 'GUIDED';
-      this.stepMission(0.1);
+      // An ATTENDED mission may not keep flying with nobody on the loop: the
+      // approval that authorised it has lapsed, so the vehicle holds until the
+      // operator reconnects. The envelope monitor holds for its own reasons.
+      const attendanceHold = this.attendance === 'attended' && !this.operatorPresent;
+      if (this.envelopeHold || attendanceHold) {
+        // Plan progress stops. Once a disturbance has passed, the monitor backs
+        // the vehicle off to its corridor (ADR D22: hold, then back off).
+        s.groundspeed = 0;
+        s.vspeed = 0;
+        s.mode = 'LOITER';
+        if (this.envelopeHold) this.stepEnvelopeBackoff(0.1);
+      } else {
+        this.stepMission(0.1);
+      }
+      this.applyGust(0.1);
     } else {
       // gentle attitude motion when flying (autonomous)
       s.roll = flying
@@ -1461,11 +2356,6 @@ export class MockDataProvider implements MissionDataSource {
     s.rssi = Math.round(clamp(-48 + Math.sin(this.t * 0.3) * 6 - (flying ? 4 : 0), -95, -40));
     s.latency = Math.round(clamp(38 + Math.sin(this.t * 0.7) * 12 + (flying ? 8 : 0), 20, 120));
 
-    // distance to home (haversine-ish, small scale)
-    const dLat = (s.lat - this.homeLat()) * M_PER_DEG_LAT;
-    const dLon = (s.lon - this.homeLon()) * M_PER_DEG_LAT * Math.cos((this.homeLat() * Math.PI) / 180);
-    const homeDist = Math.sqrt(dLat * dLat + dLon * dLon);
-
     // battery warnings
     const b = Math.round(s.battery);
     if (b === 30 && !this._warn30) {
@@ -1485,9 +2375,38 @@ export class MockDataProvider implements MissionDataSource {
       this.mission = null;
       this.log('critical', `Automatic RTL — ${failure.reason}`);
     }
+    this.stepPeer(0.1);
+    if (this.operatorReturnsAt !== null && now() >= this.operatorReturnsAt) {
+      this.operatorReturnsAt = null;
+      this.operatorPresent = true;
+      this.log('info', 'Operator reconnected');
+      // The safe direction is always toward supervision: reconnecting the
+      // operator reverts unattended mode automatically (ADR D23).
+      if (this.attendance === 'unattended') {
+        this.setAttendance('attended');
+        this.log('warning', 'Unattended mode auto-reverted on operator connect');
+      } else {
+        this._emit('mode', this.modeMessage());
+      }
+    }
+
+    const telemetry = this.primaryTelemetry();
+    this.maybeHandoff(telemetry);
+    this._emit('tel', this.selectedVehicle === PEER_VEHICLE_ID ? this.peerTelemetry() : telemetry);
+    this.emitAuxiliary(telemetry);
+  }
+
+  /** The primary vehicle's telemetry frame. Always computed (the fleet view
+   *  and the sortie deadline depend on it) even while the operator follows
+   *  the peer. */
+  private primaryTelemetry(): Telemetry {
+    const s = this.s;
+    const failure = this.failureStatus();
+    const dLat = (s.lat - this.homeLat()) * M_PER_DEG_LAT;
+    const dLon = (s.lon - this.homeLon()) * M_PER_DEG_LAT * Math.cos((this.homeLat() * Math.PI) / 180);
     const sortieElapsed = this.sortieStartedAt === null ? 0 : Math.max(0, (now() - this.sortieStartedAt) / 1000);
     const forcedSortieElapsed = this.simulationToggles.simulateSortieExpiry ? 425 + sortieElapsed : sortieElapsed;
-    const telemetry: Telemetry = {
+    return {
       type: 'telemetry',
       ts: now(),
       vehicleId: DEFAULT_VEHICLE_ID,
@@ -1519,14 +2438,12 @@ export class MockDataProvider implements MissionDataSource {
         cap_s: 480,
         must_rtl_by_s: 420,
       },
-      home: { lat: this.homeLat(), lon: this.homeLon(), distance: homeDist },
+      home: { lat: this.homeLat(), lon: this.homeLon(), distance: Math.hypot(dLat, dLon) },
       link: this.simulationToggles.simulateLinkLoss
         ? { rssi: -120, latencyMs: 9999 }
         : { rssi: s.rssi, latencyMs: s.latency },
       gimbal: { pitchDeg: this.gimbalPitchDeg },
     };
-    this._emit('tel', telemetry);
-    this.emitAuxiliary(telemetry);
   }
 
   private stepTracking(): void {

@@ -13,7 +13,15 @@ import { IconButton } from '@/components/IconButton';
 import { BatteryGauge } from '@/instruments/BatteryGauge';
 import { SignalGauge } from '@/instruments/SignalGauge';
 import logoMark from '@/assets/logo-mark.svg';
-import type { Telemetry, ConnectionState, HealthEventMessage, SpectrumMessage } from '@/contract';
+import type {
+  ConnectionState,
+  EnvelopeMessage,
+  EnvelopeState,
+  HealthEventMessage,
+  ModeMessage,
+  SpectrumMessage,
+  Telemetry,
+} from '@/contract';
 
 /* ------------------------------------------------------------------ */
 /*  Helpers                                                             */
@@ -29,6 +37,26 @@ function Sep() {
   return (
     <div style={{ width: 1, height: 22, background: 'var(--border-subtle)', flex: 'none' }} />
   );
+}
+
+/** Compact status-bar control, sized to sit alongside the badges. */
+function miniButton(bg: string, border: string, fg: string): React.CSSProperties {
+  return {
+    display: 'inline-flex',
+    alignItems: 'center',
+    height: 18,
+    padding: '0 7px',
+    background: bg,
+    border: `1px solid ${border}`,
+    borderRadius: 'var(--radius-xs)',
+    color: fg,
+    fontFamily: 'var(--font-mono)',
+    fontSize: 'var(--text-2xs)',
+    fontWeight: 600,
+    lineHeight: 1,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+  };
 }
 
 /* ------------------------------------------------------------------ */
@@ -55,7 +83,30 @@ export interface StatusBarProps {
   fleet?: { vehicleId: string; status: string; batteryPct: number }[];
   selectedVehicle?: string;
   onSelectVehicle?: (id: string) => void;
+  /** Envelope monitor report for the followed vehicle. */
+  envelope?: EnvelopeMessage | null;
+  /** Attendance mode + the operator-presence liveness signal behind it. */
+  attendance?: ModeMessage | null;
+  /** Escalations raised this session, and how many are still undelivered. */
+  escalationCount?: number;
+  undeliveredCount?: number;
+  onOpenOutbox?: () => void;
+  /** Opens the signed-confirmation flow for entering unattended mode. */
+  onEnterUnattended?: () => void;
+  onExitUnattended?: () => void;
 }
+
+const ENVELOPE_TONE: Record<EnvelopeState, 'nominal' | 'caution' | 'danger'> = {
+  in_envelope: 'nominal',
+  warning: 'caution',
+  breach: 'danger',
+};
+
+const ENVELOPE_LABEL: Record<EnvelopeState, string> = {
+  in_envelope: 'IN ENVELOPE',
+  warning: 'WARNING',
+  breach: 'BREACH',
+};
 
 /* ------------------------------------------------------------------ */
 /*  Component                                                           */
@@ -80,6 +131,13 @@ export function StatusBar({
   fleet,
   selectedVehicle,
   onSelectVehicle,
+  envelope = null,
+  attendance = null,
+  escalationCount = 0,
+  undeliveredCount = 0,
+  onOpenOutbox,
+  onEnterUnattended,
+  onExitUnattended,
 }: StatusBarProps) {
   const b = tel?.battery?.remaining ?? 100;
   const armed = tel?.armed ?? false;
@@ -226,6 +284,94 @@ export function StatusBar({
         <Badge tone={health.link?.state === 'nominal' ? 'nominal' : health.link ? 'danger' : 'outline'}>LINK {health.link?.state ?? '?'}</Badge>
         <Badge tone={health.planner?.state === 'nominal' ? 'nominal' : health.planner ? 'danger' : 'outline'}>PLAN {health.planner?.state ?? '?'}</Badge>
       </span>
+
+      <Sep />
+
+      {/* Envelope monitor: state, the binding constraint, and the margin to it.
+          A missing report reads as unknown — never as "fine". */}
+      <span
+        title={
+          envelope
+            ? `Envelope ${envelope.state}` +
+              (envelope.constraint ? ` · binding constraint: ${envelope.constraint}` : '') +
+              (envelope.margin_m !== undefined ? ` · margin ${envelope.margin_m.toFixed(1)} m` : '') +
+              (envelope.action && envelope.action !== 'none' ? ` · action ${envelope.action}` : '')
+            : 'No envelope report for this vehicle'
+        }
+        style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}
+      >
+        <Badge tone={envelope ? ENVELOPE_TONE[envelope.state] : 'outline'} mono>
+          {envelope ? ENVELOPE_LABEL[envelope.state] : 'ENVELOPE ?'}
+        </Badge>
+        {envelope?.constraint && (
+          <Badge tone="outline" mono>
+            {envelope.constraint}
+            {envelope.margin_m !== undefined
+              ? ` ${envelope.margin_m >= 0 ? '+' : ''}${envelope.margin_m.toFixed(1)} m`
+              : ''}
+          </Badge>
+        )}
+        {envelope?.action && envelope.action !== 'none' && (
+          <Badge tone="danger" mono>{envelope.action.toUpperCase()}</Badge>
+        )}
+      </span>
+
+      {/* Attendance mode + the signed entry control. */}
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+        <Badge
+          tone={attendance?.mode === 'unattended' ? 'caution' : 'nominal'}
+          mono
+          style={attendance ? undefined : { opacity: 0.6 }}
+        >
+          {(attendance?.mode ?? 'attended').toUpperCase()}
+        </Badge>
+        {attendance && !attendance.operatorPresent && (
+          <Badge tone="danger" mono>OPERATOR ABSENT</Badge>
+        )}
+        {attendance?.mode === 'unattended'
+          ? onExitUnattended && (
+              <button
+                type="button"
+                onClick={onExitUnattended}
+                title="Return to attended operation"
+                style={miniButton('var(--amber-tint)', 'var(--amber-line)', 'var(--caution-fg)')}
+              >
+                Exit unattended
+              </button>
+            )
+          : onEnterUnattended && (
+              <button
+                type="button"
+                onClick={onEnterUnattended}
+                title="Enter unattended mode — requires a typed confirmation and an operator id"
+                style={miniButton('var(--surface-input)', 'var(--border-input)', 'var(--text-secondary)')}
+              >
+                Enter unattended mode
+              </button>
+            )}
+      </span>
+
+      {/* Escalation outbox */}
+      <button
+        type="button"
+        onClick={onOpenOutbox}
+        title={
+          escalationCount === 0
+            ? 'No escalations raised'
+            : `${escalationCount} escalation(s), ${undeliveredCount} undelivered`
+        }
+        style={{
+          ...miniButton(
+            undeliveredCount > 0 ? 'var(--red-tint)' : 'var(--surface-input)',
+            undeliveredCount > 0 ? 'var(--red-line)' : 'var(--border-input)',
+            undeliveredCount > 0 ? 'var(--danger-fg)' : 'var(--text-secondary)',
+          ),
+          cursor: onOpenOutbox ? 'pointer' : 'default',
+        }}
+      >
+        OUTBOX {escalationCount}
+        {undeliveredCount > 0 ? ` · ${undeliveredCount}!` : ''}
+      </button>
 
       {/* Right side: controller indicator + actions + DISARM */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>

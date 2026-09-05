@@ -25,6 +25,11 @@ const KIND_COLOR: Record<AuditKind, string> = {
   abort: 'var(--danger-fg)',
   health: 'var(--nominal-fg)',
   rf: 'var(--caution-fg)',
+  task: 'var(--accent-text)',
+  envelope: 'var(--caution-fg)',
+  mode: 'var(--text-primary)',
+  escalation: 'var(--danger-fg)',
+  handoff: 'var(--caution-fg)',
 };
 
 const KIND_TAG: Record<AuditKind, string> = {
@@ -41,6 +46,11 @@ const KIND_TAG: Record<AuditKind, string> = {
   abort: 'ABRT',
   health: 'HLTH',
   rf: 'RF  ',
+  task: 'TASK',
+  envelope: 'ENVL',
+  mode: 'MODE',
+  escalation: 'ESCL',
+  handoff: 'HAND',
 };
 
 function fmtClock(ts: number): string {
