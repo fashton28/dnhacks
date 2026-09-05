@@ -18,6 +18,8 @@ export interface VerifierPanelProps {
   onSelect: (requestId: string) => void;
   onApprove: (proposal: PlanProposal) => void;
   onDeny: (proposal: PlanProposal) => void;
+  readinessReady?: boolean;
+  readinessReasons?: string[];
 }
 
 const VERDICT_TONE: Record<Verification['verdict'], 'nominal' | 'caution' | 'danger'> = {
@@ -71,6 +73,8 @@ export function VerifierPanel({
   onSelect,
   onApprove,
   onDeny,
+  readinessReady = false,
+  readinessReasons = ['readiness unavailable'],
 }: VerifierPanelProps): React.ReactElement {
   const selected =
     proposals.find((p) => p.plan.requestId === selectedRequestId) ??
@@ -79,7 +83,7 @@ export function VerifierPanel({
   const v = selected?.verification;
   const approvable =
     !!selected && !!v && (v.verdict === 'pass' || v.verdict === 'corrected') &&
-    !selected.approvedAt && !selected.deniedAt && !executing;
+    !selected.approvedAt && !selected.deniedAt && !executing && readinessReady;
 
   return (
     <Panel
@@ -216,6 +220,7 @@ export function VerifierPanel({
                     executing ? 'Mission in progress' :
                     !v ? 'Awaiting verification' :
                     v.verdict === 'rejected' ? 'Rejected by verifier' :
+                    !readinessReady ? `Readiness blocked: ${readinessReasons.join('; ')}` :
                     'Hold to approve'
                   }
                   icon={

@@ -12,3 +12,6 @@ export * from './SatellitePanel';
 export * from './VerifierPanel';
 export * from './ReportPanel';
 export * from './AuditLogPanel';
+export * from './ObservationPanel';
+export * from './MissionStatusStrip';
+export * from './SimulationPanel';

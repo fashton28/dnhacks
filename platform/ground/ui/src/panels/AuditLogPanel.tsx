@@ -23,6 +23,8 @@ const KIND_COLOR: Record<AuditKind, string> = {
   operator: 'var(--text-primary)',
   status: 'var(--text-tertiary)',
   abort: 'var(--danger-fg)',
+  health: 'var(--nominal-fg)',
+  rf: 'var(--caution-fg)',
 };
 
 const KIND_TAG: Record<AuditKind, string> = {
@@ -37,6 +39,8 @@ const KIND_TAG: Record<AuditKind, string> = {
   operator: 'OPER',
   status: 'STAT',
   abort: 'ABRT',
+  health: 'HLTH',
+  rf: 'RF  ',
 };
 
 function fmtClock(ts: number): string {

@@ -203,7 +203,14 @@ export type CommandName =
   | 'engageTracking' | 'disengageTracking' | 'selectTarget'
   | 'setStandoff' | 'setMaxSpeed' | 'emergencyStop'
   | 'engageManual' | 'disengageManual'
-  | 'executePlan' | 'abortPlan' | 'continueMission';
+  | 'executePlan' | 'abortPlan' | 'continueMission' | 'testFault';
+
+/** SITL-only; reject unless config.sitl && EIS_ENABLE_TEST_HOOKS=true. */
+export type TestFaultName =
+  | 'gps_loss' | 'rf_interference' | 'hostile_drone' | 'link_loss'
+  | 'planner_heartbeat' | 'camera' | 'thermal' | 'lidar'
+  | 'battery_fault' | 'battery_drain' | 'sortie_expiry' | 'charge'
+  | 'wind' | 'raw_out_of_fence';
 
 export interface Command {
   type: 'command';
@@ -216,6 +223,9 @@ export interface Command {
     meters?: number;       // setStandoff
     mps?: number;          // setMaxSpeed
     plan?: MissionPlan;    // executePlan: the full verified plan (abortPlan takes no params)
+    fault?: TestFaultName;
+    enabled?: boolean;
+    value?: number;
   };
 }
 

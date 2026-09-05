@@ -10,16 +10,36 @@
  * ========================================================================== */
 import type {
   AnomalyMessage,
+  CapabilitiesMessage,
   DataSource,
+  FleetMessage,
+  HealthEventMessage,
   IncidentReportMessage,
   MissionPlanMessage,
+  ObservationMessage,
+  ReadinessMessage,
+  RfEventMessage,
+  SimulationToggles,
+  SpectrumMessage,
   Unsubscribe,
   VerificationMessage,
 } from '@/contract';
 
 export interface MissionDataSource extends DataSource {
+  readonly kind: 'mock' | 'live';
   onAnomaly(cb: (m: AnomalyMessage) => void): Unsubscribe;
   onMissionPlan(cb: (m: MissionPlanMessage) => void): Unsubscribe;
   onVerification(cb: (m: VerificationMessage) => void): Unsubscribe;
   onIncidentReport(cb: (m: IncidentReportMessage) => void): Unsubscribe;
+  onObservation(cb: (m: ObservationMessage) => void): Unsubscribe;
+  onCapabilities(cb: (m: CapabilitiesMessage) => void): Unsubscribe;
+  onReadiness(cb: (m: ReadinessMessage) => void): Unsubscribe;
+  onHealthEvent(cb: (m: HealthEventMessage) => void): Unsubscribe;
+  onRfEvent(cb: (m: RfEventMessage) => void): Unsubscribe;
+  onSpectrum(cb: (m: SpectrumMessage) => void): Unsubscribe;
+  onFleet(cb: (m: FleetMessage) => void): Unsubscribe;
+  setSimulationToggles?(next: Partial<SimulationToggles>): void;
+  getSimulationToggles?(): Readonly<SimulationToggles>;
+  /** Passive receive-only RF events may be forwarded to the companion. */
+  forwardRfEvent?(event: RfEventMessage): void;
 }
