@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="./favicon.svg" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" />
+    <title>ARGUS Console</title>
+  </head>
+  <body>
+    <div id="app">
+      <header id="top">
+        <div class="brand"><span class="brand-mark">◈</span><span class="brand-name">ARGUS</span><span class="brand-sub" id="site-name">Meridian Station</span></div>
+        <nav class="toolbar" aria-label="Actions">
+          <button id="fly-square" class="btn primary" title="Fly the square fixture with the selected Drone">Fly square</button>
+          <button id="capture-overhead" class="btn" title="Render a top-down overhead image for the wide-area layer">Capture overhead</button>
+          <button id="return-home" class="btn" title="Return the selected Drone to its pad (R)">Return home</button>
+          <span class="divider"></span>
+          <span class="toolbar-label">Scenario</span>
+          <button class="btn ghost" data-scenario="intruder_vehicle">Intruder vehicle</button>
+          <button class="btn ghost" data-scenario="fence_breach">Fence breach</button>
+          <button class="btn ghost" data-scenario="unattended_object">Unattended object</button>
+          <button id="reset-scene" class="btn ghost" title="Restore the Site baseline: remove Scenario props, close fences">Reset</button>
+        </nav>
+        <div class="status">
+          <span id="clock" class="clock mono">--:--:--</span>
+          <span id="hub-status" class="pill" title="Live feed from the Hub">hub</span>
+          <span id="renderer-status" class="pill" title="This tab is a Renderer: it draws Drone cameras for the Hub">renderer</span>
+          <span id="fps" class="pill mono" title="World view frame rate">-- fps</span>
+          <button id="help-btn" class="btn ghost icon" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
+        </div>
+      </header>
+
+      <div id="manual-banner" class="banner" hidden>
+        <span class="banner-title">MANUAL CONTROL</span>
+        <span id="manual-text"></span>
+        <span class="banner-keys mono">W S A D · Q E · ◄ ► · H resume · X abort · R home</span>
+      </div>
+
+      <main>
+        <section id="world" class="surface">
+          <canvas id="world-canvas"></canvas>
+          <div class="surface-label">World view</div>
+          <div class="surface-controls">
+            <button id="focus-drone" class="btn small" title="Ease the camera to the selected Drone (F)">Focus <span id="focus-id" class="mono"></span></button>
+            <button id="fit-site" class="btn small ghost" title="Ease the camera back to the Site overview (G)">Fit Site</button>
+          </div>
+          <div class="surface-hint">drag to orbit · wheel to zoom</div>
+        </section>
+
+        <aside id="right">
+          <section id="overview-panel" class="surface">
+            <div id="overview"></div>
+            <div class="surface-label">Overview</div>
+          </section>
+
+          <section id="drone-panel" class="surface">
+            <div class="surface-head">
+              <span class="surface-label static">Drone view</span>
+              <span id="drone-view-id" class="mono sel-id">—</span>
+              <span id="drone-view-status" class="chip"></span>
+              <span class="head-spacer"></span>
+              <div class="seg" id="vision-seg" role="group" aria-label="Vision mode" title="Sensor feed (V cycles)">
+                <button data-mode="rgb" class="on" title="Visible-light camera">RGB</button>
+                <button data-mode="thermal" title="Thermal infrared: heat sources stand out">Thermal</button>
+                <button data-mode="lidar" title="LiDAR range image">LiDAR</button>
+              </div>
+            </div>
+            <div class="drone-frame">
+              <canvas id="drone-canvas" width="800" height="480"></canvas>
+              <div id="clamp-banner" class="clamp" hidden>CLAMPED</div>
+              <div id="hud" class="hud mono"></div>
+            </div>
+            <div id="drone-telemetry" class="telemetry mono"></div>
+          </section>
+        </aside>
+
+        <section id="bottom">
+          <div class="tabs" role="tablist">
+            <button class="tab active" data-tab="fleet" role="tab">Fleet</button>
+            <button class="tab" data-tab="mission" role="tab">Mission</button>
+            <button class="tab" data-tab="log" role="tab">Log</button>
+            <span class="tabs-spacer"></span>
+            <span class="tabs-help">Keys <span class="mono">1 2 3</span> select · <span class="mono">?</span> shortcuts</span>
+          </div>
+          <div id="tab-fleet" class="tabpane active"><div id="fleet" class="fleet"></div></div>
+          <div id="tab-mission" class="tabpane"><div id="mission" class="mission"></div></div>
+          <div id="tab-log" class="tabpane"><div id="log" class="log mono"></div></div>
+        </section>
+      </main>
+    </div>
+    <dialog id="help" class="help">
+      <div class="help-head"><span>Keyboard</span><button id="help-close" class="btn ghost small" aria-label="Close">Close</button></div>
+      <div class="help-grid mono">
+        <span>1 · 2 · 3</span><em>select Drone</em>
+        <span>F</span><em>focus World view on the selected Drone</em>
+        <span>G</span><em>fit the Site in the World view</em>
+        <span>V</span><em>cycle vision mode (RGB · Thermal · LiDAR)</em>
+        <span>W · S</span><em>Manual Control: forward · back</em>
+        <span>A · D</span><em>strafe left · right</em>
+        <span>Q · E</span><em>down · up</em>
+        <span>◄ · ►</span><em>yaw</em>
+        <span>H</span><em>hand back, resume the paused Mission</em>
+        <span>X</span><em>hand back, abort the Mission</em>
+        <span>R</span><em>return home</em>
+        <span>?</span><em>this dialog</em>
+      </div>
+      <p class="help-note">Manual Control starts on the first movement key. The Safety Validator clamps every command at the geofence, the altitude limits and the no-fly zone.</p>
+    </dialog>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
