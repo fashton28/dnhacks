@@ -1,0 +1,13 @@
+{
+  "geofence": [[39.9490, -75.1920], [39.9490, -75.1880], [39.9520, -75.1880], [39.9520, -75.1920]],
+  "limits": {
+    "min_altitude_m": 10,
+    "max_altitude_m": 60,
+    "default_inspection_altitude_m": 30,
+    "default_standoff_m": 15,
+    "battery_reserve_pct": 25,
+    "cruise_speed_mps": 8,
+    "battery_drain_pct_per_min": 4,
+    "capture_dwell_s": 3
+  }
+}

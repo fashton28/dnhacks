@@ -1,0 +1,7 @@
+{
+  "drone_id": "drone-1",
+  "lat": 39.9495,
+  "lon": -75.1900,
+  "battery_pct": 90,
+  "link_state": "healthy"
+}
