@@ -18,8 +18,9 @@ import time
 from pathlib import Path
 from typing import Any
 
-from contracts.models import Detection, DroneStatus, FlightPlan, Waypoint
+from contracts.models import Detection, DroneStatus, FlightPlan, Verdict, Waypoint
 from contracts.site import distance_m, latlon_to_enu
+from hub.safety import validate
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT_DIR = ROOT / "mock-drone-agent"
@@ -92,6 +93,21 @@ class HubExecutor:
             if not idle:
                 raise RuntimeError("no idle Drone available")
             drone_id = max(idle, key=lambda s: s.battery_pct).drone_id
+            fp.drone_id = drone_id
+
+            # The Hub's Safety Validator gates the agent's plans too. The agent's own
+            # verifier has already checked this plan against the Facility, but that is a
+            # separate model with separate rules, and a pass there is not a pass here
+            # (docs/REPOSITORY_REVIEW.md). Defence in depth is the agent's verifier, then
+            # this against the real Site geometry, then ArduPilot's own polygon fence.
+            result = validate(fp, self.app.state.limits, reg.drones[drone_id].state)
+            self.app.state.audit.append("plan_validated", mission_id=fp.mission_id, source="autonomy",
+                                        verdict=result.verdict.value, rules=[v.rule for v in result.violations])
+            reg.publish({"type": "validation", "mission_id": fp.mission_id, "source": "hub_safety_validator",
+                         "result": result.model_dump(mode="json")})
+            if result.verdict is Verdict.reject:
+                raise RuntimeError("Safety Validator refused the plan: "
+                                   + "; ".join(f"[{v.rule}] {v.detail}" for v in result.violations))
             return runner.start(fp, drone_id)
 
         m = self._run(start())
