@@ -1,7 +1,7 @@
 # 0001. Webots as the simulator, native flight controller instead of PX4
 
 Date: 2026-09-05
-Status: Accepted
+Status: Superseded by 0002 (Three.js renderer, ArduPilot SITL)
 
 ## Context
 

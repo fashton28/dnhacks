@@ -29,7 +29,7 @@ The deterministic expansion of a MissionSpec into waypoints with estimated durat
 _Avoid_: route (the drawn line on the map is the FlightPlan's route)
 
 **Safety Validator**:
-The deterministic, rule-based gate that turns a FlightPlan into a ValidationResult before dispatch, and clamps Manual Control commands at the same limits in flight. Contains no LLM.
+The deterministic, rule-based gate that turns a FlightPlan into a ValidationResult before dispatch, and clamps Manual Control commands at the same limits in flight. Contains no LLM. It is layer one; the Drone's own onboard geofence is the independent layer two.
 _Avoid_: verifier, trust layer (pitch language for the same thing), guardrail
 
 **ValidationResult**:
@@ -59,20 +59,28 @@ The Console's top-down map of the Site showing every Drone in the Fleet, its tra
 _Avoid_: satellite view, fleet view, map (map is the widget, Overview is the screen)
 
 **World view**:
-The live 3D rendering of the simulated Site streamed into the Console. For showcase; it is not what the agent sees.
+The Console's live 3D rendering of the Site with the Fleet and the current Scenario, drawn by the Renderer. For the audience and the Operator.
 _Avoid_: simulator view, 3D view
 
 **Drone view**:
-The Console screen for one Drone: its live camera, telemetry, current Mission and agent reasoning, with the option to take Manual Control.
+The Console screen for one Drone: its live camera (the Renderer's camera at the Drone's pose and gimbal angle), telemetry, current Mission and agent reasoning, with the option to take Manual Control.
 _Avoid_: drop-in, cockpit, FPV
+
+**Renderer**:
+The Three.js scene that draws the Site, the Fleet and the Scenario from the Hub's live state, and produces every camera frame: Drone views, evidence captures, and overhead images. Runs in the Console, or headless for unattended captures.
+_Avoid_: simulator, engine, viewer
 
 **Manual Control**:
 The Operator flying one Drone directly from its Drone view with velocity commands. Pauses the Drone's Mission. The Safety Validator still applies: geofence, altitude ceiling, and no-fly zones are hard limits the Operator cannot cross. Ends with resume or abort of the Mission.
 _Avoid_: teleop, override, full control (pitch language for Manual Control)
 
 **Drone**:
-One simulated quadcopter with a home pad, battery state, and gimballed camera. Flies either a Mission or under Manual Control, never both. One of many in a Fleet.
-_Avoid_: UAV, vehicle (vehicle is what a Drone might detect), robot (simulator term)
+One simulated quadcopter: an ArduPilot flight stack with its own physics, a home pad, battery state, and a gimballed camera drawn by the Renderer. Flies either a Mission or under Manual Control, never both. One of many in a Fleet.
+_Avoid_: UAV, vehicle (vehicle is what a Drone might detect), SITL instance (implementation term)
+
+**Bridge**:
+The per-Drone process that translates between the Hub controller protocol and the Drone's MAVLink flight stack. The Hub cannot tell a bridged Drone from a fake Drone.
+_Avoid_: adapter, driver
 
 **Fleet**:
 The set of Drones available at a Site. Its size is configured by the Operator, not fixed by the system.
@@ -81,9 +89,9 @@ The set of Drones available at a Site. Its size is configured by the Operator, n
 A scripted change to the Site that creates something to detect: an intruder vehicle appears at the perimeter, a fence section opens, an object is left near a building. Scenarios are what the wide-area layer's after image differs by.
 _Avoid_: test case, event, anomaly
 
-**Supervisor**:
-The simulation-side script with authority over the Site itself: it runs Scenarios, captures overhead images, and resets the world. It never flies a Drone.
-_Avoid_: god mode, orchestrator
+**Scenario engine**:
+The part of the Hub with authority over the Site itself: it runs Scenarios, holds the scene state every Renderer draws, requests overhead images, and resets the Site. It never flies a Drone.
+_Avoid_: supervisor (ADR 0001 term), god mode, orchestrator
 
 **Hub**:
 The single backend process that connects Drones, the Triage Agent, the Safety Validator, the Console, and the audit log. Every command to a Drone passes through the Hub.

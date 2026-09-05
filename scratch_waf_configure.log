@@ -1,0 +1,49 @@
+Setting top to                           : /Users/fashton/development/ardupilot 
+Setting out to                           : /Users/fashton/development/ardupilot/build 
+Autoconfiguration                        : enabled 
+Checking for program 'python'            : /Users/fashton/development/dnhacks/.venv/bin/python 
+Checking for python version >= 3.9.0     : 3.12.14 
+Setting board to                         : sitl 
+Processing /Users/fashton/development/ardupilot/libraries/AP_HAL_SITL/hwdef/sitl/hwdef.dat
+Writing hwdef setup in /Users/fashton/development/ardupilot/build/sitl/hwdef.h
+Using toolchain                          : native 
+Checking for 'g++' (C++ compiler)        : not found 
+Checking for 'clang++' (C++ compiler)    : /usr/bin/clang++ 
+Checking for 'gcc' (C compiler)          : not found 
+Checking for 'clang' (C compiler)        : /usr/bin/clang 
+Checking for c flags '-MMD'              : yes 
+Checking for cxx flags '-MMD'            : yes 
+CXX Compiler                             : clang++ 21.0.0 
+Checking for feenableexcept              : no 
+Disabling SLP for clang++
+Enabling -Werror                         : no 
+Enabled OpenDroneID                      : no 
+Enabled firmware ID checking             : no 
+GPS Debug Logging                        : no 
+Checking for HAVE_CMATH_ISFINITE         : yes 
+Checking for HAVE_CMATH_ISINF            : yes 
+Checking for HAVE_CMATH_ISNAN            : yes 
+Checking for NEED_CMATH_ISFINITE_STD_NAMESPACE : yes 
+Checking for NEED_CMATH_ISINF_STD_NAMESPACE    : yes 
+Checking for NEED_CMATH_ISNAN_STD_NAMESPACE    : yes 
+Checking for header endian.h                   : not found 
+Checking for header byteswap.h                 : not found 
+Checking for HAVE_MEMRCHR                      : no 
+Configured VSCode Intellisense:                : no 
+DC_DSDL compiler in                            : /Users/fashton/development/ardupilot/modules/DroneCAN/dronecan_dsdlc 
+Source is git repository                       : yes 
+Update submodules                              : yes 
+Checking for program 'git'                     : /opt/homebrew/bin/git 
+Littlefs                                       : disabled 
+Checking for program 'size'                    : /usr/bin/size 
+Benchmarks                                     : disabled 
+Unit tests                                     : enabled 
+Scripting                                      : maybe 
+Scripting runtime checks                       : enabled 
+Debug build                                    : disabled 
+Coverage build                                 : disabled 
+Consistent build                               : disabled 
+Force 32-bit build                             : disabled 
+Checking for program 'rsync'                   : /usr/bin/rsync 
+Removing target_list file /Users/fashton/development/ardupilot/build/sitl/target_list
+'configure' finished successfully (0.999s)
