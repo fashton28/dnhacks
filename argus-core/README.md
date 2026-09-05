@@ -1,5 +1,11 @@
 # ARGUS core — portable decision and safety slice
 
+**NOTE: to run, do the following commands
+
+export GEMINI_API_KEY="your key"
+export ARGUS_LLM_MODE=live
+python3 run_vision_pipeline.py**
+
 This folder is deliberately independent of the simulator, dashboard, SDR, and
 LLM provider. It uses only Python's standard library and exchanges ordinary
 JSON-shaped dictionaries. It is designed to be copied into the eventual shared
