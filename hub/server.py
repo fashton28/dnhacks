@@ -29,6 +29,7 @@ from contracts.models import (
     ManualCommand,
     Scenario,
     SceneProp,
+    IncidentReport,
     SceneState,
     ValidationResult,
     Verdict,
@@ -55,6 +56,7 @@ from contracts.site import SITE_NAME
 from hub.audit import AuditLog
 from hub.autonomy import Autonomy
 from hub.detections import DetectionStore
+from hub.incidents import IncidentStore
 from hub.manual import ManualControl
 from hub.safety import validate
 from hub.missions import MissionPhase, MissionRunner
@@ -120,6 +122,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.missions = MissionRunner(app.state.registry, app.state.audit, settings.evidence_dir, settings.speed_factor)
         app.state.manual = ManualControl()
         app.state.detections = DetectionStore()
+        app.state.incidents = IncidentStore()
         app.state.limits = SiteLimits.load()
         app.state.settings = settings
         app.state.autonomy = Autonomy(app, asyncio.get_running_loop(), settings.runs_dir)
@@ -146,6 +149,9 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
 
     def dets() -> DetectionStore:
         return app.state.detections
+
+    def incs() -> IncidentStore:
+        return app.state.incidents
 
     # ---- controller protocol ------------------------------------------------------
     @app.websocket("/ws/controller")
@@ -515,6 +521,23 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             reg().publish({"type": "detection", **d.model_dump(mode="json")})
         app.state.audit.append("widearea_detect", before=body.before_ref, after=body.after_ref, detections=len(found))
         return found
+
+    # ---- Incident Reports ------------------------------------------------------------
+    @app.get("/incidents", response_model=list[IncidentReport])
+    async def list_incidents() -> list[IncidentReport]:
+        """Every Incident Report this Hub has produced, newest last.
+
+        Reports are also broadcast once as an event and written to runs/reports/*.md;
+        this is what lets the Console rebuild its incident list after a reload.
+        """
+        return incs().all()
+
+    @app.get("/incidents/{mission_id}", response_model=IncidentReport)
+    async def get_incident(mission_id: str) -> IncidentReport:
+        report = incs().get(mission_id)
+        if report is None:
+            raise HTTPException(404, f"no Incident Report for mission {mission_id}")
+        return report
 
     @app.post("/detections/{detection_id}/dispatch")
     async def dispatch_detection(detection_id: str) -> dict[str, Any]:

@@ -20,6 +20,7 @@ from typing import Any
 
 from contracts.models import Detection, DroneStatus, FlightPlan, Verdict, Waypoint
 from contracts.site import distance_m, latlon_to_enu
+from hub.incidents import from_agent_outcome
 from hub.safety import validate
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -225,5 +226,16 @@ class Autonomy:
 
         outcome = await asyncio.to_thread(run)
         self.outcomes[detection_id] = outcome
+
+        # The agent's report is a markdown blob on the event stream and a file on disk.
+        # Store it as a contract IncidentReport too, so it survives a page reload and
+        # carries the evidence frames its verdict rests on.
+        report = from_agent_outcome(outcome)
+        self.app.state.incidents.add(report)
+        self.app.state.audit.append("incident_report", mission_id=report.mission_id, detection_id=detection_id,
+                                    verdict=report.verdict.value, evidence=len(report.evidence_refs))
+        self.app.state.registry.publish({"type": "incident_report", "detection_id": detection_id,
+                                         "report": report.model_dump(mode="json")})
+
         self.app.state.registry.publish({"type": "dispatch_outcome", "detection_id": detection_id, **{k: outcome[k] for k in ("mission_id", "flown", "attempts", "triage", "drone_id")}})
         return outcome
