@@ -1,0 +1,226 @@
+/* ==========================================================================
+   Drone Safety Platform — global stylesheet (ported from the design-system tokens).
+   Fonts are self-hosted via @fontsource (imported in main.tsx) — no Google
+   Fonts dependency, so the Electron build works fully offline.
+   ========================================================================== */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  /* ---- Base neutral ramp (cool charcoal) --------------------------------- */
+  --gray-0:  #06070a;
+  --gray-1:  #0b0d11;
+  --gray-2:  #111419;
+  --gray-3:  #171b22;
+  --gray-4:  #1e232b;
+  --gray-5:  #272d37;
+  --gray-6:  #333a45;
+  --gray-7:  #475160;
+  --gray-8:  #6b7686;
+  --gray-9:  #98a3b3;
+  --gray-10: #c4ccd6;
+  --gray-11: #e6eaf0;
+  --gray-12: #f6f8fb;
+
+  /* ---- Accent (blue) ----------------------------------------------------- */
+  --blue-bright: #5aa0ff;
+  --blue:        #2f81f7;
+  --blue-deep:   #1f6fe0;
+  --blue-ink:    #11233d;
+  --blue-tint:   rgba(47, 129, 247, 0.14);
+  --blue-tint-2: rgba(47, 129, 247, 0.22);
+  --blue-line:   rgba(47, 129, 247, 0.45);
+
+  /* ---- Status: nominal / safe (green) ------------------------------------ */
+  --green-bright: #4ee08a;
+  --green:        #25c46d;
+  --green-deep:   #16a058;
+  --green-tint:   rgba(37, 196, 109, 0.14);
+  --green-line:   rgba(37, 196, 109, 0.42);
+
+  /* ---- Status: caution (amber) ------------------------------------------- */
+  --amber-bright: #ffc24b;
+  --amber:        #f5a623;
+  --amber-deep:   #d4860a;
+  --amber-tint:   rgba(245, 166, 35, 0.15);
+  --amber-line:   rgba(245, 166, 35, 0.45);
+
+  /* ---- Status: danger / critical (red) ----------------------------------- */
+  --red-bright: #ff6b66;
+  --red:        #f04438;
+  --red-deep:   #d92d20;
+  --red-tint:   rgba(240, 68, 56, 0.15);
+  --red-tint-2: rgba(240, 68, 56, 0.26);
+  --red-line:   rgba(240, 68, 56, 0.5);
+
+  /* ---- Semantic aliases -------------------------------------------------- */
+  --bg-app:        var(--gray-1);
+  --bg-sunken:     var(--gray-0);
+  --surface-panel: var(--gray-2);
+  --surface-raised:var(--gray-3);
+  --surface-input: var(--gray-4);
+  --surface-hover: var(--gray-5);
+  --surface-overlay: #14181f;
+  --scrim:         rgba(4, 6, 9, 0.66);
+
+  --border-subtle:  rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.10);
+  --border-strong:  rgba(255, 255, 255, 0.16);
+  --border-input:   var(--gray-6);
+
+  --text-primary:   var(--gray-11);
+  --text-secondary: var(--gray-9);
+  --text-tertiary:  var(--gray-8);
+  --text-disabled:  var(--gray-7);
+  --text-on-accent: #ffffff;
+
+  --accent:         var(--blue);
+  --accent-hover:   var(--blue-bright);
+  --accent-active:  var(--blue-deep);
+  --accent-text:    var(--blue-bright);
+  --accent-subtle:  var(--blue-tint);
+  --accent-border:  var(--blue-line);
+  --focus-ring:     rgba(47, 129, 247, 0.55);
+
+  --nominal:  var(--green);
+  --caution:  var(--amber);
+  --danger:   var(--red);
+  --critical: var(--red-bright);
+  --inactive: var(--gray-7);
+  --info:     var(--blue);
+
+  --nominal-fg:  var(--green-bright);
+  --caution-fg:  var(--amber-bright);
+  --danger-fg:   var(--red-bright);
+
+  --nominal-bg:  var(--green-tint);
+  --caution-bg:  var(--amber-tint);
+  --danger-bg:   var(--red-tint);
+  --info-bg:     var(--blue-tint);
+
+  /* ---- Typography -------------------------------------------------------- */
+  --font-sans: 'Geist Variable', 'Geist', 'Geist Sans', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono Variable', 'JetBrains Mono', ui-monospace, 'SF Mono', 'Cascadia Code', monospace;
+
+  --text-2xs:  10px;
+  --text-xs:   11px;
+  --text-sm:   12px;
+  --text-base: 13px;
+  --text-md:   14px;
+  --text-lg:   16px;
+  --text-xl:   20px;
+  --text-2xl:  26px;
+  --text-3xl:  34px;
+
+  --readout-sm: 15px;
+  --readout-md: 22px;
+  --readout-lg: 32px;
+  --readout-xl: 44px;
+
+  --weight-light: 300;
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-bold: 700;
+
+  --leading-tight: 1.1;
+  --leading-snug: 1.25;
+  --leading-normal: 1.45;
+
+  --tracking-label: 0.06em;
+  --tracking-tight: -0.01em;
+  --tracking-mono: 0.01em;
+
+  /* ---- Spacing & sizing -------------------------------------------------- */
+  --space-1: 4px; --space-2: 8px; --space-3: 12px; --space-4: 16px;
+  --space-5: 20px; --space-6: 24px; --space-7: 32px; --space-8: 40px;
+  --space-9: 48px; --space-10: 64px;
+
+  --pad-panel: var(--space-4);
+  --pad-panel-sm: var(--space-3);
+
+  --control-h-sm: 26px;
+  --control-h:    32px;
+  --control-h-lg: 40px;
+  --control-h-xl: 52px;
+
+  --statusbar-h:  46px;
+  --leftpanel-w:  264px;
+  --rightpanel-w: 300px;
+  --console-h:    180px;
+
+  /* ---- Radii ------------------------------------------------------------- */
+  --radius-xs: 3px; --radius-sm: 5px; --radius-md: 7px;
+  --radius-lg: 10px; --radius-xl: 14px; --radius-pill: 999px;
+
+  /* ---- Shadows / glows --------------------------------------------------- */
+  --shadow-none: none;
+  --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6), 0 8px 20px rgba(0, 0, 0, 0.5);
+
+  --glow-accent:   0 0 0 1px var(--accent-border), 0 0 16px rgba(47, 129, 247, 0.28);
+  --glow-nominal:  0 0 0 1px var(--green-line), 0 0 16px rgba(37, 196, 109, 0.25);
+  --glow-caution:  0 0 0 1px var(--amber-line), 0 0 18px rgba(245, 166, 35, 0.30);
+  --glow-critical: 0 0 0 1px var(--red-line), 0 0 22px rgba(240, 68, 56, 0.38);
+
+  --ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--focus-ring);
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --ease-out:   cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-inout: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast:   90ms;
+  --dur-base:   150ms;
+  --dur-slow:   240ms;
+  --needle-ease: cubic-bezier(0.33, 0, 0.2, 1);
+}
+
+/* ---- Base reset --------------------------------------------------------- */
+html, body, #root {
+  margin: 0;
+  height: 100%;
+  background: var(--bg-app);
+}
+body {
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: var(--text-base);
+  line-height: var(--leading-normal);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+* { box-sizing: border-box; }
+
+/* tabular numerals helper */
+.eis-readout {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+  letter-spacing: var(--tracking-mono);
+  color: var(--text-primary);
+}
+
+/* range inputs: invisible native control sits over the custom track */
+input[type=range] { -webkit-appearance: none; appearance: none; background: transparent; }
+
+/* scrollbars */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--gray-5); border-radius: 6px; border: 2px solid var(--bg-app); }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* Leaflet container theming (map panel) */
+.leaflet-container { background: var(--bg-sunken); font-family: var(--font-sans); }
+.leaflet-control-attribution { background: rgba(8,12,16,0.6) !important; color: var(--text-tertiary) !important; }
+.leaflet-control-attribution a { color: var(--text-tertiary) !important; }
+
+/* ---- Shared keyframes (components reference by name) -------------------- */
+@keyframes eis-ping { 0% { transform: scale(1); opacity: .7 } 70%, 100% { transform: scale(2.6); opacity: 0 } }
+@keyframes eis-ping2 { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
+@keyframes eis-trackpulse { 0%, 100% { opacity: .5 } 50% { opacity: 1 } }
+@keyframes eis-batpulse { 0%, 100% { opacity: 1 } 50% { opacity: .45 } }
+@keyframes eis-spin { to { transform: rotate(360deg) } }
+@keyframes eis-toast { from { opacity: 0; transform: translateX(12px) } to { opacity: 1; transform: none } }
+@keyframes eis-fade { from { opacity: 0 } to { opacity: 1 } }
+@keyframes eis-rise { from { opacity: 0; transform: translateY(8px) scale(.99) } to { opacity: 1; transform: none } }

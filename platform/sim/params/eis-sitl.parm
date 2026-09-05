@@ -1,0 +1,108 @@
+# ============================================================================
+# Drone Safety Platform -- ArduCopter SITL parameters (eis-sitl.parm)
+# ----------------------------------------------------------------------------
+# Loaded by run_sitl.sh into ArduCopter SITL so the simulated vehicle behaves
+# like the real flashed FC (see docs/flashing.md -- these mirror those params).
+#
+# Goals:
+#   * GUIDED enabled + companion velocity setpoints accepted.
+#   * A geofence (radius + altitude) so the standoff/altitude caps are backed
+#     by the FC, not just the companion.
+#   * Battery / GCS / throttle / RC failsafes wired to safe actions (the
+#     companion ALSO enforces its own deadman; these are the FC-side backstop).
+#   * EKF3 as the active estimator.
+#
+# Load with:  sim_vehicle.py ... --add-param-file=sim/params/eis-sitl.parm
+# or in MAVProxy:  param load sim/params/eis-sitl.parm
+# Values are deliberately conservative; tune for real flight in docs/flashing.md.
+# ============================================================================
+
+# --- Frame / vehicle ---------------------------------------------------------
+FRAME_CLASS      1        # 1 = Quad
+FRAME_TYPE       1        # 1 = X
+
+# --- Flight-mode map (so RC mode switch + setMode have sane targets) ---------
+# Mode numbers: 0 STABILIZE, 2 ALT_HOLD, 5 LOITER, 4 GUIDED, 3 AUTO,
+#               6 RTL, 9 LAND, 16 POSHOLD, 17 BRAKE
+FLTMODE1         0        # STABILIZE
+FLTMODE2         2        # ALT_HOLD
+FLTMODE3         5        # LOITER
+FLTMODE4         4        # GUIDED
+FLTMODE5         6        # RTL
+FLTMODE6         9        # LAND
+FLTMODE_CH       5
+# Default boot mode is STABILIZE (safe); the companion commands GUIDED.
+
+# --- GUIDED behaviour --------------------------------------------------------
+# Allow GUIDED to accept velocity setpoints and arm/takeoff via MAVLink.
+GUID_OPTIONS     0        # default: accept all guided sub-commands
+# Takeoff/position controller responsiveness (gentle defaults):
+WPNAV_SPEED      400      # cm/s horizontal nav speed cap (4 m/s) -- companion clamps lower
+WPNAV_SPEED_UP   150      # cm/s climb (1.5 m/s) -- matches max_climb_rate
+WPNAV_SPEED_DN   100      # cm/s descend (1.0 m/s)
+PILOT_SPEED_UP   150      # cm/s manual/pilot climb
+PILOT_ACCEL_Z    250      # cm/s/s vertical accel
+
+# --- Geofence (FC-side backstop for standoff + altitude caps) ---------------
+FENCE_ENABLE     1        # enable fence
+FENCE_TYPE       3        # 1=alt, 2=circle, 3=alt+circle
+FENCE_ALT_MAX    30       # m  -- matches Limits.max_altitude / DEFAULTS.maxAltitude
+FENCE_RADIUS     60       # m  -- matches DEFAULTS.geofenceRadius
+FENCE_MARGIN     2        # m  -- breach margin
+FENCE_ACTION     1        # 1 = RTL or LAND on breach (safe)
+
+# --- Arming checks (keep real checks; SITL still needs a GPS lock) -----------
+ARMING_CHECK     1        # 1 = all checks enabled (safe default)
+# If SITL refuses to arm during bring-up, set ARMING_CHECK 0 TEMPORARILY only.
+
+# --- Battery failsafe --------------------------------------------------------
+BATT_MONITOR     4        # analog voltage+current
+BATT_LOW_VOLT    14.0     # V  (4S low warning)
+BATT_CRT_VOLT    13.2     # V  (4S critical)
+BATT_LOW_MAH     0
+BATT_CRT_MAH     0
+BATT_FS_LOW_ACT  2        # low battery -> RTL
+BATT_FS_CRT_ACT  1        # critical battery -> LAND
+
+# --- GCS / ground-link failsafe (deadman backstop) --------------------------
+# The companion holds its OWN ground-link deadman (ground_link_timeout_ms).
+# This is the FC-side failsafe if the GCS heartbeat stops entirely.
+FS_GCS_ENABLE    1        # 1 = enabled
+FS_GCS_TIMEOUT   5        # s  before GCS failsafe triggers (FC backstop)
+# Action on GCS loss: 1 = RTL (handled via FS_OPTIONS / mode-specific defaults)
+
+# --- Throttle / RC failsafe (RC override primacy + loss handling) -----------
+FS_THR_ENABLE    1        # 1 = enabled, RTL on throttle/RC loss
+FS_THR_VALUE     975      # us  threshold
+THR_DZ           100      # throttle deadzone
+# RC override always wins -- do NOT disable RC; SITL provides synthetic RC.
+
+# --- RTL behaviour -----------------------------------------------------------
+RTL_ALT          1500     # cm (15 m) RTL return altitude
+RTL_ALT_FINAL    0        # cm -- 0 = land at home after RTL
+RTL_LOIT_TIME    3000     # ms loiter at home before final descent
+
+# --- EKF / estimator ---------------------------------------------------------
+AHRS_EKF_TYPE    3        # use EKF3
+EK2_ENABLE       0
+EK3_ENABLE       1
+GPS_TYPE         1        # SITL GPS
+
+# --- Telemetry stream rates (so the companion + GCS get ~10 Hz data) --------
+SR0_EXTRA1       10       # attitude
+SR0_EXTRA2       10       # VFR_HUD (airspeed/groundspeed/alt/heading)
+SR0_EXTRA3       4
+SR0_POSITION     10       # global position
+SR0_RC_CHAN      5
+SR0_RAW_SENS     2
+SR0_EXT_STAT     5
+# Mirror onto the second serial/UDP link used by the companion:
+SR1_EXTRA1       10
+SR1_EXTRA2       10
+SR1_POSITION     10
+SR1_EXT_STAT     5
+
+# --- Misc safety -------------------------------------------------------------
+DISARM_DELAY     10       # s auto-disarm when landed+idle
+LAND_SPEED       50       # cm/s final land descent
+PILOT_THR_BHV    0

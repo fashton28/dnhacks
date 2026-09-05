@@ -1,0 +1,21 @@
+{
+  "name": "eis-planner",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Drone Safety Platform — deterministic mission planning + trust layer (site model, MissionVerifier, scripted/LLM planners, incident reports). Plain TypeScript, zero Electron/DOM deps; runs under Node.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "npm run build && npm run typecheck && vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.124.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

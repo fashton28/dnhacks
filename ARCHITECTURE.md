@@ -1,6 +1,6 @@
 # ARGUS: Layered Autonomous Site Monitoring for Critical Infrastructure
 
-**DNHacks, Defense track, 4 people, deadline noon 2026-09-06**
+**DNHacks, Defense track, 4 people, deadline at noon**
 
 Vocabulary follows `CONTEXT.md`.
 Simulator and flight-stack decisions are recorded in `docs/adr/0001-webots-over-px4-gazebo.md`.
@@ -287,7 +287,7 @@ D is the integration owner.
 
 ## 6. Timeline
 
-Hours count from the moment the team starts, ending at noon on 2026-09-06.
+Hours count from the moment the team starts, ending at the stated deadline.
 
 | Hours | What happens |
 |---|---|

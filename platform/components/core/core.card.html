@@ -1,0 +1,108 @@
+<!-- @dsCard group="Components" viewport="700x620" name="Core — buttons, status, inputs" subtitle="Buttons · status pills · badges · readouts · slider · toggle · tabs · hold-to-confirm" -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="../../styles.css" />
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+<script src="../../_ds_bundle.js"></script>
+<style>
+  html, body { margin: 0; background: var(--bg-app); }
+  body { padding: 18px 20px; font-family: var(--font-sans); }
+  .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .grp { display: flex; flex-direction: column; gap: 9px; margin-bottom: 16px; }
+  .cap { font-size: var(--text-2xs); font-weight: 600; letter-spacing: var(--tracking-label); text-transform: uppercase; color: var(--text-tertiary); }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 22px; }
+</style>
+</head>
+<body>
+<div id="root" class="eis-root"></div>
+<script type="text/babel">
+const { Button, IconButton, StatusPill, Badge, GaugeReadout, Slider, Toggle, Tabs, HoldButton } = window.dnhacksPlatformDesignSystem_c7577a;
+
+// minimal inline icons as React nodes
+const Ic = (d, sz=15) => <svg width={sz} height={sz} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{d}</svg>;
+const PlaneUp = Ic(<><path d="M12 19l0-14"/><path d="M5 12l7-7 7 7"/></>);
+const Home = Ic(<><path d="M3 11l9-8 9 8"/><path d="M5 10v10h14V10"/></>);
+const Cross = Ic(<><circle cx="12" cy="12" r="7"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></>);
+const Gear = Ic(<><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></>, 16);
+const Layers = Ic(<><path d="M12 3l9 5-9 5-9-5 9-5z"/><path d="M3 13l9 5 9-5"/></>, 16);
+
+function Demo() {
+  const [tab, setTab] = React.useState('video');
+  const [standoff, setStandoff] = React.useState(4);
+  const [sitl, setSitl] = React.useState(true);
+  return (
+    <div>
+      <div className="grp">
+        <span className="cap">Buttons — intent & size</span>
+        <div className="row">
+          <Button variant="primary" icon={PlaneUp}>Takeoff</Button>
+          <Button variant="secondary" icon={Home}>RTL</Button>
+          <Button variant="ghost">Land</Button>
+          <Button variant="danger">Disarm</Button>
+          <Button variant="danger-soft">Abort</Button>
+          <Button variant="secondary" pending>Sending</Button>
+          <Button variant="secondary" disabled>Arm</Button>
+        </div>
+        <div className="row">
+          <Button size="sm" variant="secondary">Small</Button>
+          <Button size="md" variant="secondary">Medium</Button>
+          <Button size="lg" variant="primary">Large</Button>
+          <IconButton icon={Gear} title="Settings" />
+          <IconButton icon={Layers} title="Layers" active />
+          <IconButton icon={Gear} title="Settings" variant="solid" />
+        </div>
+      </div>
+
+      <div className="grp">
+        <span className="cap">Status pills</span>
+        <div className="row">
+          <StatusPill status="nominal">Armed</StatusPill>
+          <StatusPill status="active" pulse>Tracking</StatusPill>
+          <StatusPill status="caution">GPS · 3D</StatusPill>
+          <StatusPill status="danger">Geofence</StatusPill>
+          <StatusPill status="critical" solid>Battery 12%</StatusPill>
+          <StatusPill status="info">Guided</StatusPill>
+          <StatusPill status="neutral" dot={false}>SITL</StatusPill>
+        </div>
+        <div className="row">
+          <Badge tone="accent">LIVE</Badge>
+          <Badge tone="nominal">3D FIX</Badge>
+          <Badge tone="caution">LOW BAT</Badge>
+          <Badge tone="danger">FAILSAFE</Badge>
+          <Badge tone="outline" mono>v2.4.1</Badge>
+          <Badge tone="neutral" mono>14 SAT</Badge>
+        </div>
+      </div>
+
+      <div className="split">
+        <div className="grp">
+          <span className="cap">Readouts (tabular mono)</span>
+          <div className="row" style={{gap: 22}}>
+            <GaugeReadout label="Rel Alt" value="42.7" unit="m" size="lg" />
+            <GaugeReadout label="Speed" value="3.4" unit="m/s" />
+            <GaugeReadout label="Battery" value="34" unit="%" status="caution" />
+          </div>
+          <div style={{marginTop: 6}}>
+            <Slider label="Standoff" value={standoff} min={2} max={15} unit="m" ticks={['2','15']} onChange={setStandoff} />
+          </div>
+        </div>
+        <div className="grp">
+          <span className="cap">Tabs · toggle</span>
+          <Tabs value={tab} onChange={setTab} items={[{id:'video',label:'Video'},{id:'map',label:'Map'},{id:'log',label:'Log'}]} />
+          <div style={{marginTop: 4}}><Toggle checked={sitl} onChange={setSitl} label="SITL simulator" /></div>
+          <span className="cap" style={{marginTop: 8}}>Hold to confirm</span>
+          <HoldButton variant="primary" icon={Cross} onConfirm={()=>{}}>Engage Tracking</HoldButton>
+        </div>
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById('root')).render(<Demo />);
+</script>
+</body>
+</html>

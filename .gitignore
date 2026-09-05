@@ -18,7 +18,7 @@ venv/
 *.onnx
 weights/*.pt
 # ---- ArduPilot SITL / logs ----
-sim/ardupilot/
+platform/sim/ardupilot/
 *.tlog
 *.bin
 logs/
@@ -31,7 +31,7 @@ Thumbs.db
 *.log
 .venv-test/
 dist-installer/
-# Existing Argus runtime artefacts
+# Python test artefacts
 .pytest_cache/
 # Runtime artefacts, never committed
 events.jsonl

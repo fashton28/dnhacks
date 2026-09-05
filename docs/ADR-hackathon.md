@@ -1,6 +1,8 @@
 # ADR — hackathon retrofit (power-plant security system)
 
-Decisions made while retrofitting the Eye in the Sky monorepo into the
+Runtime paths in this document are relative to [`platform/`](../platform/).
+
+Decisions made while retrofitting the Drone Safety Platform monorepo into the
 two-layer AI security demo (satellite change detection → LLM mission plan →
 deterministic trust layer → SITL flight → observation → incident report).
 Format: one numbered decision per row of work; append, don't rewrite.

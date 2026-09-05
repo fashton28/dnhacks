@@ -1,0 +1,45 @@
+/* ==========================================================================
+   Drone Safety Platform — Effects: radii, borders, shadows, motion
+   Restrained. Shadows are for elevation (modals/popovers), not decoration.
+   Panels read by surface + 1px border, not heavy drop shadow.
+   ========================================================================== */
+
+:root {
+  /* ---- Radii — tight, instrument-like ----------------------------------- */
+  --radius-xs:   3px;
+  --radius-sm:   5px;
+  --radius-md:   7px;
+  --radius-lg:   10px;
+  --radius-xl:   14px;
+  --radius-pill: 999px;
+
+  /* ---- Borders ----------------------------------------------------------- */
+  --border-hairline: 1px solid var(--border-subtle);
+  --border-line:     1px solid var(--border-default);
+  --border-emph:     1px solid var(--border-strong);
+
+  /* ---- Shadows / elevation ---------------------------------------------- */
+  --shadow-none: none;
+  --shadow-inset-top: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-popover: 0 8px 24px rgba(0, 0, 0, 0.45), 0 2px 6px rgba(0, 0, 0, 0.4);
+  --shadow-modal: 0 24px 64px rgba(0, 0, 0, 0.6), 0 8px 20px rgba(0, 0, 0, 0.5);
+
+  /* glows for active/critical states (used sparingly) */
+  --glow-accent:   0 0 0 1px var(--accent-border), 0 0 16px rgba(47, 129, 247, 0.28);
+  --glow-nominal:  0 0 0 1px var(--green-line), 0 0 16px rgba(37, 196, 109, 0.25);
+  --glow-caution:  0 0 0 1px var(--amber-line), 0 0 18px rgba(245, 166, 35, 0.30);
+  --glow-critical: 0 0 0 1px var(--red-line), 0 0 22px rgba(240, 68, 56, 0.38);
+
+  /* ---- Focus ------------------------------------------------------------- */
+  --ring: 0 0 0 2px var(--bg-app), 0 0 0 4px var(--focus-ring);
+
+  /* ---- Motion ------------------------------------------------------------ */
+  --ease-out:   cubic-bezier(0.22, 0.61, 0.36, 1); /* @kind other */
+  --ease-inout: cubic-bezier(0.4, 0, 0.2, 1); /* @kind other */
+  --dur-fast:   90ms;  /* @kind other */
+  --dur-base:   150ms; /* @kind other */
+  --dur-slow:   240ms; /* @kind other */
+  /* instrument needles glide; UI states snap quickly */
+  --needle-ease: cubic-bezier(0.33, 0, 0.2, 1); /* @kind other */
+}

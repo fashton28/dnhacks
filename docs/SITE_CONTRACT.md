@@ -1,5 +1,7 @@
 # Site contract
 
+Runtime paths in this document are relative to [`platform/`](../platform/).
+
 The topology/site simulation (plant terrain, perimeter, structures, SITL world,
 home location) is owned by another teammate. Everything else consumes it only
 through one JSON file. Nothing outside `site/` may hardcode plant geometry.
@@ -120,8 +122,8 @@ clear altitude down to an unsafe value.
 
 ## Additions log
 
-| Date | Fields | Decision |
+| Git commit | Fields | Decision |
 |---|---|---|
-| 2026-09-06 | `geofence`, `nfz_buffer_m` | Separate the physical site boundary from the operational ArduPilot fence and apply one 25 m NFZ route buffer. |
-| 2026-09-06 | `clear_altitude_m`, `clutter` | Make the LiDAR-degraded climb altitude and clutter readiness geometry site-owned. |
-| 2026-09-06 | `thermal_image`, `image_kind`, `required_sensors` | Support paired staged modalities while identifying generated demo placeholders honestly. |
+| `178bf0a` | `geofence`, `nfz_buffer_m` | Separate the physical site boundary from the operational ArduPilot fence and apply one 25 m NFZ route buffer. |
+| `178bf0a` | `clear_altitude_m`, `clutter` | Make the LiDAR-degraded climb altitude and clutter readiness geometry site-owned. |
+| `178bf0a` | `thermal_image`, `image_kind`, `required_sensors` | Support paired staged modalities while identifying generated demo placeholders honestly. |

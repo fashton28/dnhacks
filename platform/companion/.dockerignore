@@ -1,0 +1,50 @@
+# Drone Safety Platform -- companion Docker build context excludes.
+# Keep the image small + the build reproducible; never bake in caches, venvs,
+# weights, logs, or local env files.
+
+# --- Python caches / build artifacts ---------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# --- virtualenvs -----------------------------------------------------------
+.venv/
+venv/
+env/
+
+# --- local env / secrets (never in the image) ------------------------------
+.env
+*.local
+
+# --- model weights (mount these at runtime, don't bake them in) ------------
+weights/
+*.pt
+*.onnx
+*.engine
+
+# --- logs / recordings -----------------------------------------------------
+*.log
+logs/
+recordings/
+
+# --- tests + tooling not needed at runtime ---------------------------------
+tests/
+.git/
+.gitignore
+.github/
+*.md
+!README.md
+
+# --- editor / OS cruft -----------------------------------------------------
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

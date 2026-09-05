@@ -1,0 +1,21 @@
+<svg width="360" height="80" viewBox="0 0 360 80" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Drone Safety Platform">
+  <g transform="translate(8 12)">
+    <circle cx="28" cy="28" r="26" stroke="#2f81f7" stroke-width="3.4"></circle>
+    <g stroke="#5aa0ff" stroke-width="2.8" stroke-linecap="round">
+      <path d="M9 4 H3 V10"></path>
+      <path d="M47 4 H53 V10"></path>
+      <path d="M9 52 H3 V46"></path>
+      <path d="M47 52 H53 V46"></path>
+    </g>
+    <g stroke="#2f81f7" stroke-width="3.4" stroke-linecap="round">
+      <path d="M28 0 V9"></path>
+      <path d="M28 47 V56"></path>
+      <path d="M0 28 H9"></path>
+      <path d="M47 28 H56"></path>
+    </g>
+    <circle cx="28" cy="28" r="10" fill="#2f81f7"></circle>
+    <circle cx="28" cy="28" r="3.6" fill="#0b0d11"></circle>
+  </g>
+  <text x="78" y="40" font-family="Geist, system-ui, sans-serif" font-size="25" font-weight="700" letter-spacing="-0.5" fill="#e6eaf0">Drone Safety Platform</text>
+  <text x="79" y="60" font-family="&#39;JetBrains Mono&#39;, monospace" font-size="11" font-weight="500" letter-spacing="3.5" fill="#6b7686">GROUND CONTROL</text>
+</svg>

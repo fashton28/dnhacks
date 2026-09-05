@@ -1,0 +1,8 @@
+/* ==========================================================================
+   Drone Safety Platform — Webfonts
+   UI: Geist (neo-grotesque)  ·  Numeric/telemetry: JetBrains Mono (tabular)
+   NOTE: loaded from Google Fonts CDN. For an offline Electron build, download
+   the .woff2 binaries and replace the @import with local @font-face rules.
+   ========================================================================== */
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');

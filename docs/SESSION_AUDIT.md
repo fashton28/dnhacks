@@ -1,6 +1,8 @@
 # Session audit — Komati safety rails
 
-Audit date: 2026-09-06. Initial baseline: clean commit `cd7e25c`
+Runtime paths in this audit are relative to [`platform/`](../platform/).
+
+Initial baseline: clean commit `cd7e25c`
 (`chore: preserve verified ground phase 3 baseline`). The audit was read-only for
 companion and ground code. Teammate-owned topology/world content and all design
 handoff reference directories were outside scope.
