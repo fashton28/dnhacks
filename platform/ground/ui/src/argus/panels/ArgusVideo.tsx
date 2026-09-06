@@ -104,7 +104,9 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
       <div ref={boxHost} style={{ ...hud, inset: 0 }}>
         {sightings && sightings.drone_id === selected && now - sightings.ts < 6000 && boxSize.w > 0 && sightings.sightings.map((s) => {
           const sx = boxSize.w / (sightings.width || 1280), sy = boxSize.h / (sightings.height || 720);
-          const [x0, y0, x1, y1] = s.bbox; const hot = typeof s.temp_max_c === 'number' && s.temp_max_c >= 100;
+          const x0 = s.bbox[0], y0 = s.bbox[1]; let x1 = s.bbox[2], y1 = s.bbox[3];
+          if (x1 <= x0 || y1 <= y0) { x1 = x0 + Math.abs(x1); y1 = y0 + Math.abs(y1); }  // a [x, y, w, h] box
+          const hot = typeof s.temp_max_c === 'number' && s.temp_max_c >= 100;
           return (
             <div key={s.id} className="a-sight" data-hot={hot} style={{ left: x0 * sx, top: y0 * sy, width: Math.max(8, (x1 - x0) * sx), height: Math.max(8, (y1 - y0) * sy) }}>
               <span>{s.label.replace(/_/g, ' ')} {Math.round(s.confidence * 100)}%{typeof s.temp_max_c === 'number' ? ` · ${s.temp_max_c.toFixed(0)} °C` : ''}{typeof s.range_m === 'number' ? ` · ${s.range_m.toFixed(0)} m` : ''}</span>
@@ -137,12 +139,12 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
       </svg>
 
       {/* altitude tape with the Validator's ceiling */}
-      <div style={{ ...hud, right: 118, top: '50%', transform: 'translateY(-50%)', width: 120, height: TAPE_H }}>
+      <div style={{ ...hud, right: 392, top: '50%', transform: 'translateY(-50%)', width: 120, height: TAPE_H }}>
         <div style={{ position: 'absolute', right: 0, top: 0, bottom: 0, width: 1, background: 'rgba(255,255,255,0.55)' }} />
         {ticks.map((v) => <span key={v} className="a-hud-tick" data-major={v % 10 === 0} style={{ top: yOf(v) }} />)}
         {ticks.filter((v) => v % labelEvery === 0).map((v) => <span key={`l${v}`} className="a-hud" style={{ position: 'absolute', right: 22, top: yOf(v) - 5, fontSize: 10 }}>{v}</span>)}
         {ceiling !== null && (
-          <div style={{ position: 'absolute', right: -8, top: yOf(ceiling) - 6, display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ position: 'absolute', right: -8, top: yOf(ceiling) - 6 - (Math.abs(yOf(ceiling) - yOf(alt)) < 18 ? 16 : 0), display: 'flex', alignItems: 'center', gap: 6 }}>
             <span className="a-hud" style={{ color: 'var(--amber-bright)', fontSize: 10, letterSpacing: '0.08em' }}>CEILING {ceiling} m</span><span style={{ width: 26, height: 2, background: 'var(--amber-bright)' }} />
           </div>
         )}
@@ -161,7 +163,7 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
 
       {/* gimbal ladder: drag or scroll to aim the camera */}
       {selected && (
-        <div className="a-hud-gimbal" style={{ right: 24 }} title="Camera pitch: drag, or keys [ ]" onWheel={(e) => { e.preventDefault(); onGimbal(Math.max(GIMBAL_MIN, Math.min(GIMBAL_MAX, gimbal + (e.deltaY > 0 ? 5 : -5)))); }}>
+        <div className="a-hud-gimbal" style={{ right: 330 }} title="Camera pitch: drag, or keys [ ]" onWheel={(e) => { e.preventDefault(); onGimbal(Math.max(GIMBAL_MIN, Math.min(GIMBAL_MAX, gimbal + (e.deltaY > 0 ? 5 : -5)))); }}>
           <div className="track">
             {[-30, 0, 30, 60, 90].map((d) => <i key={d} style={{ top: `${((d - GIMBAL_MIN) / (GIMBAL_MAX - GIMBAL_MIN)) * 100}%` }} />)}
             <b style={{ top: `${frac * 100}%` }} />

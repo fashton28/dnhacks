@@ -5,6 +5,8 @@ import { useArgus, liveDetection, decisionFor } from '../store';
 /** What the wide-area layer saw, in words an Operator uses. */
 const CHANGE: Record<string, string> = { vehicle: 'Vehicle-sized change', intruder_vehicle: 'Unscheduled vehicle', person: 'Person-sized change', unattended_object: 'Unattended object', fence_breach: 'Fence breach', perimeter_opening: 'Perimeter opening', smoke_plume: 'Rising column of smoke', thermal_anomaly: 'Hot spot' };
 export const describeChange = (t: string): string => CHANGE[t] ?? t.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
+const SOURCE: Record<string, string> = { 'plant-signal': 'Raised by plant instrumentation', plant_signal: 'Raised by plant instrumentation', 'wide-area layer': 'Wide-area layer', widearea: 'Wide-area layer', vision: 'Drone vision' };
+const describeSource = (s: string | undefined): string => (s ? SOURCE[s] ?? s.replace(/[-_]/g, ' ').replace(/^./, (c) => c.toUpperCase()) : 'Wide-area layer');
 
 /** The newest Detection the Operator has not acted on: dispatch it to the Triage Agent, log it, or ignore it. */
 export function DetectionCard({ hubBase, onDispatch, onLog, onHold, onRelease }: { hubBase: string; onDispatch: (id: string) => void; onLog: (id: string, how: 'logged' | 'ignored') => void; onHold?: (decisionId: string) => void; onRelease?: (decisionId: string) => void }): React.ReactElement | null {
@@ -28,9 +30,9 @@ export function DetectionCard({ hubBase, onDispatch, onLog, onHold, onRelease }:
       <div style={{ display: 'flex', gap: 10 }}>
         <img src={`${hubBase}/evidence/${d.after_ref}`} alt="" style={{ width: 64, height: 64, objectFit: 'cover', borderRadius: 4, background: '#000', flex: 'none' }} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
         <div className="a-body" style={{ color: 'var(--text-primary)' }}>
-          {describeChange(d.change_type)} of <span className="a-num">{Math.round(d.area_m2 ?? 0)} m²</span>, confidence <span className="a-num">{d.confidence.toFixed(2)}</span>.
+          {describeChange(d.change_type)}{d.area_m2 ? <> over <span className="a-num">{Math.round(d.area_m2)} m²</span></> : null}, confidence <span className="a-num">{d.confidence.toFixed(2)}</span>.
           {when ? <span style={{ color: 'var(--text-secondary)' }}> Seen {when}.</span> : null}
-          <span style={{ color: 'var(--text-secondary)' }}> {d.metadata?.source ?? 'Wide-area layer'}.</span>
+          <span style={{ color: 'var(--text-secondary)' }}> {describeSource(d.metadata?.source)}.</span>
         </div>
       </div>
       {decision && decision.action === 'dispatch' && (

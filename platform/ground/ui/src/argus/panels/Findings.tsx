@@ -117,7 +117,7 @@ export function Findings({ missionId, hubBase, onClose, onResolve }: { missionId
                       <p>{o.description || 'No description.'}</p>
                       {(sightingsByFrame[o.frame_ref] ?? []).length > 0 && (
                         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
-                          {(sightingsByFrame[o.frame_ref] ?? []).map((sg) => <span key={sg.id} className="a-chip" style={{ color: typeof sg.temp_max_c === 'number' && sg.temp_max_c >= 100 ? 'var(--red-bright)' : 'var(--amber-bright)' }}>{sg.label.replace(/_/g, ' ')} {Math.round(sg.confidence * 100)}%{typeof sg.temp_max_c === 'number' ? ` · ${sg.temp_max_c.toFixed(0)} °C` : ''}</span>)}
+                          {(sightingsByFrame[o.frame_ref] ?? []).filter((sg, i, arr) => arr.findIndex((x) => x.label === sg.label && x.temp_max_c === sg.temp_max_c) === i).map((sg) => <span key={sg.id} className="a-chip" style={{ color: typeof sg.temp_max_c === 'number' && sg.temp_max_c >= 100 ? 'var(--red-bright)' : 'var(--amber-bright)' }}>{sg.label.replace(/_/g, ' ')} {Math.round(sg.confidence * 100)}%{typeof sg.temp_max_c === 'number' ? ` · ${sg.temp_max_c.toFixed(0)} °C` : ''}</span>)}
                         </div>
                       )}
                       <div className="a-num" style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 4 }}>

@@ -23,7 +23,7 @@ import { useArgus, activeMission, liveDetection, deriveDroneChoice, CAMERA_MODES
 import { FleetPanel } from './panels/FleetPanel';
 import { OpsPanel, type OpsActions } from './panels/OpsPanel';
 import { DetectionsPanel, ValidatorPanel, ReportPanel } from './panels/MissionPanel';
-import { DecisionTrail } from './panels/DecisionTrail';
+import { DecisionTrail, TrailCard } from './panels/DecisionTrail';
 import { Findings } from './panels/Findings';
 import { ReportsList } from './panels/ReportsList';
 import { PlantSignals } from './panels/PlantSignals';
@@ -159,10 +159,12 @@ export default function ArgusApp(): JSX.Element {
             if (m.phase === 'flying' && prev?.phase !== 'flying') {
               const cur = g.selected ? g.fleet[g.selected] : undefined;
               if (!cur || cur.status === 'idle' || cur.drone_id === m.drone_id) { hub.setVehicle(m.drone_id); g.select(m.drone_id); }
+              if (!replaying.current && m.plan?.pattern !== 'square') setCenter('flight');
             }
             break;
           }
           case 'detection': g.addDetection((ev.detection ?? ev) as HubDetection); break;
+          case 'detections_reset': { const removed = new Set(((ev.removed ?? []) as unknown[]).map(String)); g.setDetections(g.detections.filter((d) => !removed.has(d.id))); break; }
           case 'mission_spec': {
             const spec = ev.spec as { objective: string; rationale: string; max_altitude_m: number; standoff_m: number; attempt?: number };
             g.setMissionSpec({ ...spec, attempt: spec.attempt ?? 1, mission_id: String(ev.mission_id) });
@@ -177,12 +179,13 @@ export default function ArgusApp(): JSX.Element {
             if (ev.step) break;  // per-step checks while the agent flies are too many to narrate; refusals arrive as agent_action results
             decide(r.verdict === 'accept'
               ? { kind: 'validation', tone: 'good', mission_id: String(ev.mission_id), text: `Safety Validator accepted ${r.attempt ? `attempt ${r.attempt}` : 'the plan'}${r.checks_passed ? `: ${r.checks_passed} checks passed` : ''}.` }
-              : { kind: 'validation', tone: r.abandoned ? 'bad' : 'warn', mission_id: String(ev.mission_id), text: r.abandoned ? `Safety Validator refused the last attempt; the agent gave up and handed the Detection to you.` : `Safety Validator refused ${r.attempt ? `attempt ${r.attempt}` : 'the plan'}: ${(r.violations ?? []).map((v) => v.rule.replace(/_/g, ' ')).join(', ') || 'rule'}. Sent back to the agent.`, detail: (r.violations ?? []).map((v) => v.detail).filter(Boolean).join(' ') });
+              : { kind: 'validation', tone: r.abandoned ? 'bad' : 'warn', mission_id: String(ev.mission_id), text: r.abandoned ? `Safety Validator refused the last attempt; the agent gave up and handed the Detection to you.` : `Safety Validator refused ${r.attempt ? `attempt ${r.attempt}` : 'the plan'}: ${[...new Set((r.violations ?? []).map((v) => v.rule.replace(/_/g, ' ')))].join(', ') || 'rule'}${(r.violations ?? []).length > 1 ? ` (${(r.violations ?? []).length} waypoints)` : ''}. Sent back to the agent.`, detail: (r.violations ?? []).map((v) => v.detail).filter(Boolean).join(' ') });
             break;
           }
           case 'pretriage': {
             const action = String(ev.action) as 'dispatch' | 'log_only' | 'ignore';
             g.setPretriage({ detection_id: String(ev.detection_id), zone: (ev.zone as string | null) ?? null, action, rationale: String(ev.rationale ?? '') });
+            g.markHandled(String(ev.detection_id));
             {
               const d = g.detections.find((x) => x.id === String(ev.detection_id));
               if (d) decide({ kind: 'detection', tone: 'warn', mission_id: null, text: `Wide-area layer flagged ${d.id}: ${d.change_type.replace(/_/g, ' ')}, ${Math.round(d.area_m2 ?? 0)} m², confidence ${d.confidence.toFixed(2)}${ev.zone ? `, in the ${String(ev.zone).replace(/_/g, ' ')}` : ''}.` });
@@ -206,7 +209,7 @@ export default function ArgusApp(): JSX.Element {
             {
               const tool = String(ev.tool ?? ev.action ?? ''); const a = (ev.args ?? {}) as Record<string, unknown>; const why = a.why ? String(a.why) : '';
               const said = tool === 'look_at' ? `Tilted the camera to ${String(a.pitch_deg)}°` : tool === 'set_camera' ? `Switched to ${String(a.mode).toUpperCase()} at ${Number(a.zoom ?? 1).toFixed(1)}x` : tool === 'capture' ? `Captured a frame looking for ${String(a.looking_for ?? 'anything unusual')}` : tool === 'fly_to' ? `Flew to ${Number(a.east_m) >= 0 ? '+' : ''}${Number(a.east_m).toFixed(0)} m east, ${Number(a.north_m) >= 0 ? '+' : ''}${Number(a.north_m).toFixed(0)} m north at ${Number(a.alt_m).toFixed(0)} m` : tool === 'hold' ? `Held position for ${Number(a.seconds).toFixed(0)} s` : tool === 'reposition' ? `Repositioned by ${String(a.dx ?? a.direction ?? '')}, ${String(a.dy ?? a.distance_m ?? '')}, ${String(a.dz ?? '')} m` : tool === 'return_home' ? 'Sent the Drone home' : tool === 'done' ? `Closed the inspection: ${String(a.threat_assessment ?? '').toUpperCase()}` : tool === 'status' ? '' : tool ? `${tool.replace(/_/g, ' ')}` : '';
-              if (said) decide({ kind: 'action', tone: ok ? 'info' : 'bad', mission_id: (ev.mission_id as string | null) ?? null, text: ok ? `${said}${why ? ` because ${why.replace(/\.$/, '')}` : ''}.` : `${said}: ${result}.`, detail: ok && tool === 'capture' ? firstSentences(result, 220) : undefined });
+              if (said) decide({ kind: 'action', tone: ok ? 'info' : 'bad', mission_id: (ev.mission_id as string | null) ?? null, text: ok ? `${said}${why ? ` because ${why.replace(/\.$/, '')}` : ''}.` : `Refused: ${said.charAt(0).toLowerCase()}${said.slice(1)}. ${result.replace(/^(refused|error)[:\s]*/i, '').replace(/^\w/, (c) => c.toUpperCase())}${/[.!?]$/.test(result) ? '' : '.'}`, detail: ok && tool === 'capture' ? firstSentences(result, 220) : undefined });
             }
             break;
           }
@@ -251,7 +254,7 @@ export default function ArgusApp(): JSX.Element {
             g.setSightings({ ts: replaying.current ? 0 : at, drone_id: String(ev.drone_id ?? ''), mission_id: (ev.mission_id as string | null) ?? null, frame_ref: (ev.frame_ref as string | null) ?? null, width: Number(ev.width ?? 1280), height: Number(ev.height ?? 720), sightings: list });
             if (list.length) {
               const hot = list.filter((s) => typeof s.temp_max_c === 'number');
-              decide({ kind: 'inspection', tone: hot.some((s) => (s.temp_max_c ?? 0) >= 100) ? 'bad' : 'warn', mission_id: (ev.mission_id as string | null) ?? null, text: `Vision: ${list.map((s) => `${s.label.replace(/_/g, ' ')} ${Math.round(s.confidence * 100)}%${typeof s.temp_max_c === 'number' ? ` at ${s.temp_max_c.toFixed(0)} °C` : ''}`).join(', ')}.` });
+              decide({ kind: 'inspection', tone: hot.some((s) => (s.temp_max_c ?? 0) >= 100) ? 'bad' : 'warn', mission_id: (ev.mission_id as string | null) ?? null, text: `Vision: ${[...new Set(list.map((s) => `${s.label.replace(/_/g, ' ')} ${Math.round(s.confidence * 100)}%${typeof s.temp_max_c === 'number' ? ` at ${s.temp_max_c.toFixed(0)} °C` : ''}`))].join(', ')}.` });
             }
             break;
           }
@@ -274,6 +277,7 @@ export default function ArgusApp(): JSX.Element {
             const action: 'dispatch' | 'held' | 'released' = rawAction === 'held' || status === 'held' ? 'held' : rawAction === 'dispatch' && (status === '' || status === 'pending') ? 'dispatch' : 'released';
             const dl = ev.deadline_ts; const deadline = typeof dl === 'number' ? (dl > 1e12 ? dl : dl * 1000) : typeof dl === 'string' && !Number.isNaN(Date.parse(dl)) ? Date.parse(dl) : null;
             const prev = g.pendingDecisions[String(ev.id ?? ev.detection_id)];
+            if (['dispatching', 'dispatched', 'no_dispatch', 'refused'].includes(status) || ['no_dispatch', 'refused'].includes(rawAction)) g.markHandled(String(ev.detection_id ?? ''));
             g.setDecision({ id: String(ev.id ?? ev.detection_id), detection_id: String(ev.detection_id ?? ''), action, rationale: String(ev.rationale ?? ''), deadline_ts: deadline, mode: String(ev.mode ?? ''), ts: prev?.ts ?? at });
             const det = String(ev.detection_id ?? ''); const asset = ev.asset ? ` at ${String(ev.asset)}` : '';
             const line = rawAction === 'held' || status === 'held' ? `Operator held the dispatch of ${det}${asset}.`
@@ -292,16 +296,22 @@ export default function ArgusApp(): JSX.Element {
           case 'manual': if (String(ev.drone_id) === g.selected) g.setManualActive(Boolean(ev.active)); break;
           case 'dispatch_outcome': {
             g.setDispatching(null);
+            g.markHandled(String(ev.detection_id ?? ''));
             const key = `${String(ev.detection_id)}:${String(ev.mission_id)}`;
             if (lastOutcome.current === key) break;  // StrictMode/dev double-subscription guard
             lastOutcome.current = key;
-            if (!replaying.current) toast({ severity: ev.flown ? 'success' : 'warning', title: ev.flown ? `Flown by ${String(ev.drone_id)}` : 'Not flown', message: `${String(ev.detection_id)} · ${String(ev.attempts)} attempt(s)` });
+            if (!replaying.current && !ev.flown) toast({ severity: 'warning', title: 'Not flown', message: `${String(ev.detection_id)} · ${String(ev.attempts)} attempt(s)` });
             decide({ kind: 'outcome', tone: ev.flown ? 'good' : 'warn', mission_id: (ev.mission_id as string | null) ?? null, text: ev.flown ? `Dispatch complete: flown by ${String(ev.drone_id)} in ${String(ev.attempts)} attempt${Number(ev.attempts) === 1 ? '' : 's'}. Findings are ready.` : `Dispatch closed without a flight after ${String(ev.attempts)} attempt${Number(ev.attempts) === 1 ? '' : 's'}.` });
             // the payoff of the flight: the findings document opens itself once the report exists
             if (!replaying.current && ev.flown && ev.mission_id && (g.reports[String(ev.mission_id)] || g.incident?.mission_id === String(ev.mission_id))) g.openFindings(String(ev.mission_id));
             break;
           }
-          case 'scene': { const sc = ev.state as { open_fences?: string[]; props?: SceneProp[] } | undefined; g.setOpenFences(sc?.open_fences ?? []); g.setSceneProps(sc?.props ?? []); break; }
+          case 'scene': {
+            const sc = ev.state as { open_fences?: string[]; props?: SceneProp[]; scenario_ids?: string[] } | undefined;
+            g.setOpenFences(sc?.open_fences ?? []); g.setSceneProps(sc?.props ?? []);
+            if (sc && (sc.props ?? []).length === 0 && (sc.scenario_ids ?? []).length === 0) g.clearSignals();   // Site reset: the plant is quiet again
+            break;
+          }
           case 'camera': g.setCamera(String(ev.drone_id), { mode: ev.mode as CameraMode, fov_deg: Number(ev.fov_deg) }); break;
           case 'frame': if (String(ev.drone_id) === (g.selected ?? '')) lastFrame.current = Date.now(); break;
           default: break;
@@ -311,7 +321,22 @@ export default function ArgusApp(): JSX.Element {
     void s.setConn('connecting');
     void refreshDetections();
     hub.getJson('/missions').then((r) => { if (r.ok && Array.isArray(r.json)) for (const m of r.json as HubMission[]) st.getState().setMission(m); });
-    hub.getJson('/incidents').then((r) => { if (r.ok && Array.isArray(r.json)) st.getState().setReports(r.json as HubIncidentReport[]); });
+    hub.getJson('/incidents').then((r) => {
+      if (!r.ok || !Array.isArray(r.json)) return;
+      const reports = r.json as HubIncidentReport[]; st.getState().setReports(reports);
+      for (const rep of reports) if (rep.detection_id) st.getState().markHandled(rep.detection_id);   // reported means handled, whatever the page saw
+    });
+    hub.getJson('/autonomy').then((r) => {
+      // every Detection the autonomy layer has already concluded on, whether or not this page saw it happen
+      const o = (r.ok && r.json ? (r.json as { outcomes?: unknown[] }).outcomes : null) ?? [];
+      for (const x of o) { const id = typeof x === 'string' ? x : (x as { anomaly_id?: string; detection_id?: string })?.detection_id ?? (x as { anomaly_id?: string })?.anomaly_id; if (id) st.getState().markHandled(String(id)); }
+    });
+    hub.getJson('/decisions').then((r) => {
+      if (!r.ok || !Array.isArray(r.json)) return;
+      for (const d of r.json as { id?: string; detection_id?: string; status?: string; action?: string }[]) {
+        if (d.detection_id && d.status && d.status !== 'pending' && d.status !== 'held') st.getState().markHandled(d.detection_id);
+      }
+    });
     hub.getJson('/scene').then((r) => { if (r.ok && r.json) { const sc = r.json as { open_fences?: string[]; props?: SceneProp[] }; st.getState().setOpenFences(sc.open_fences ?? []); st.getState().setSceneProps(sc.props ?? []); } });
     const sampler = setInterval(() => st.getState().sampleHistory(), 1000);
     return () => { offs.forEach((f) => f()); clearInterval(sampler); hub.disconnect(); };
@@ -545,6 +570,7 @@ export default function ArgusApp(): JSX.Element {
 
       {/* the newest Detection floats over the camera; on the Mission view it is anchored on its polygon */}
       {center !== 'mission' && detCard && <div style={{ position: 'absolute', left: 124, top: 84, zIndex: 12 }}>{detCard}</div>}
+      {center === 'flight' && <TrailCard />}
       <PlantSignals />
 
       {/* the trust story, in order: agent, then validator, then the report */}

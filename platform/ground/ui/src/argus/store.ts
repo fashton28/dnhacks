@@ -82,6 +82,8 @@ export interface ArgusState {
   gimbalPending: number | null;
   /** Detections the Operator chose not to fly: logged for the record, or ignored. */
   dismissed: Record<string, 'logged' | 'ignored'>;
+  /** Detections the system has already taken up: triaged, being dispatched, or reported. */
+  handled: Record<string, true>;
   /** The current dispatch, narrated: every decision the autonomy stack made, in order. Reset by a new pretriage. */
   decisions: DecisionEntry[];
   /** Every Safety Validator verdict of the current dispatch, oldest first (the latest is `validation`). */
@@ -136,6 +138,7 @@ export interface ArgusState {
   setCamera(droneId: string, c: CameraView): void;
   setGimbalPending(v: number | null): void;
   dismissDetection(id: string, how: 'logged' | 'ignored'): void;
+  markHandled(id: string): void;
   addDecision(d: Omit<DecisionEntry, 'ts'> & { ts?: number }): void;
   setDroneChoice(c: DroneChoiceView | null): void;
   setReport(r: HubIncidentReport): void;
@@ -144,6 +147,8 @@ export interface ArgusState {
   setManualPhase(p: string | null): void;
   setSightings(v: SightingsView | null): void;
   addPlantSignal(p: PlantSignal): void;
+  /** A Site reset: instrumentation returns to normal and pending automatic decisions are void. */
+  clearSignals(): void;
   setDecision(d: DecisionView): void;
   setAutonomy(mode: AutonomyMode | null, policy: string | null): void;
 }
@@ -179,6 +184,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   camera: {},
   gimbalPending: null,
   dismissed: {},
+  handled: {},
   decisions: [],
   validations: [],
   droneChoice: null,
@@ -240,6 +246,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   setCamera: (droneId, c) => set((st) => ({ camera: { ...st.camera, [droneId]: c } })),
   setGimbalPending: (gimbalPending) => set({ gimbalPending }),
   dismissDetection: (id, how) => set((st) => ({ dismissed: { ...st.dismissed, [id]: how } })),
+  markHandled: (id) => set((st) => (st.handled[id] ? {} : { handled: { ...st.handled, [id]: true } })),
   addDecision: (d) => set((st) => ({ decisions: [...st.decisions.slice(-199), { ts: d.ts ?? Date.now(), ...d }] })),
   setDroneChoice: (droneChoice) => set({ droneChoice }),
   setReport: (r) => set((st) => ({ reports: { ...st.reports, [r.mission_id]: r } })),
@@ -248,6 +255,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   setManualPhase: (manualPhase) => set({ manualPhase }),
   setSightings: (v) => set((st) => ({ sightings: v, sightingsByFrame: v && v.frame_ref ? { ...st.sightingsByFrame, [v.frame_ref]: v.sightings } : st.sightingsByFrame })),
   addPlantSignal: (p) => set((st) => ({ plantSignals: [p, ...st.plantSignals.filter((x) => x.sensor_id !== p.sensor_id)].slice(0, 20) })),
+  clearSignals: () => set({ plantSignals: [], pendingDecisions: {}, sightings: null }),
   setDecision: (d) => set((st) => ({ pendingDecisions: { ...st.pendingDecisions, [d.id]: d } })),
   setAutonomy: (autonomyMode, autonomyPolicy) => set({ autonomyMode, autonomyPolicy }),
 }));
@@ -285,7 +293,7 @@ export function decisionFor(st: ArgusState, detectionId: string): DecisionView |
 export function liveDetection(st: ArgusState): HubDetection | null {
   for (let i = st.detections.length - 1; i >= 0; i--) {
     const d = st.detections[i];
-    if (st.dismissed[d.id]) continue;
+    if (st.dismissed[d.id] || st.handled[d.id]) continue;
     if (st.pretriage?.detection_id === d.id) continue;
     if (st.dispatching && st.dispatching !== d.id) continue;
     return d;

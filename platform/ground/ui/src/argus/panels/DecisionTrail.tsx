@@ -28,6 +28,18 @@ export function TrailList({ entries, compact = false }: { entries: DecisionEntry
   );
 }
 
+/** The last few decisions as a glass card over the camera, so the narration continues while the flight is on screen. */
+export function TrailCard(): React.ReactElement | null {
+  const decisions = useArgus((s) => s.decisions);
+  if (decisions.length === 0) return null;
+  return (
+    <div className="a-glass a-trailcard a-in" aria-label="Decision trail">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}><Route size={12} style={{ color: 'var(--text-tertiary)' }} /><span className="a-label">Decision trail</span><span style={{ flex: 1 }} /><span className="a-num" style={{ fontSize: 10, color: 'var(--text-tertiary)' }}>{decisions.length}</span></div>
+      <TrailList entries={decisions.slice(-5)} compact />
+    </div>
+  );
+}
+
 /** The agent explained: one sentence per decision, in order, for the Operator to follow along and to defend later. */
 export function DecisionTrail(): React.ReactElement {
   const decisions = useArgus((s) => s.decisions);
