@@ -453,7 +453,10 @@ const easeInOut = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x 
 function tweenCamera(toPos: THREE.Vector3, toTgt: THREE.Vector3, dur = 0.8): void {
   camTween = { t0: performance.now(), dur: dur * 1000, fromPos: worldCam.position.clone(), toPos: toPos.clone(), fromTgt: controls.target.clone(), toTgt: toTgt.clone() };
 }
-function focusOn(id: string, dur = 0.8): void {
+/** Chase distance for Focus: ?dist=<metres> (default 45). Close values (4 to 8) give a cinematic follow of the airframe. */
+const focusDistance = Math.max(2, Math.min(300, Number(params.get("dist")) || 45));
+(window as any).__argusFocus = (id: string, dist?: number) => focusOn(id, 0.6, dist);
+function focusOn(id: string, dur = 0.8, dist = focusDistance): void {
   const g = world.drones.get(id);
   if (!g) return;
   const tgt = g.position.clone();
@@ -461,8 +464,8 @@ function focusOn(id: string, dur = 0.8): void {
   const dir = worldCam.position.clone().sub(controls.target).normalize();
   if (dir.lengthSq() < 1e-6) dir.set(-0.6, 0.5, 0.6).normalize();
   dir.y = Math.max(dir.y, 0.35);
-  const pos = tgt.clone().add(dir.normalize().multiplyScalar(45));
-  pos.y = Math.max(pos.y, tgt.y + 12);
+  const pos = tgt.clone().add(dir.normalize().multiplyScalar(dist));
+  pos.y = Math.max(pos.y, tgt.y + Math.min(12, dist * 0.35));
   tweenCamera(pos, tgt, dur);
   focusFollow = true;
   log(`World view: focus on ${id}`);
