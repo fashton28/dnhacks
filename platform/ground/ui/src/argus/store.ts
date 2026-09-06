@@ -68,6 +68,8 @@ export interface ArgusState {
   camera: Record<string, CameraView>;
   /** Optimistic gimbal pitch while a command is in flight; null when telemetry is authoritative. */
   gimbalPending: number | null;
+  /** Detections the Operator chose not to fly: logged for the record, or ignored. */
+  dismissed: Record<string, 'logged' | 'ignored'>;
 
   setConn(c: ConnectionState): void;
   setFleet(states: HubDroneState[]): void;
@@ -100,6 +102,7 @@ export interface ArgusState {
   setSceneProps(props: SceneProp[]): void;
   setCamera(droneId: string, c: CameraView): void;
   setGimbalPending(v: number | null): void;
+  dismissDetection(id: string, how: 'logged' | 'ignored'): void;
 }
 
 export const useArgus = create<ArgusState>((set, get) => ({
@@ -132,6 +135,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   sceneProps: [],
   camera: {},
   gimbalPending: null,
+  dismissed: {},
 
   setConn: (conn) => set({ conn }),
   setFleet: (states) => {
@@ -180,6 +184,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   setSceneProps: (sceneProps) => set({ sceneProps }),
   setCamera: (droneId, c) => set((st) => ({ camera: { ...st.camera, [droneId]: c } })),
   setGimbalPending: (gimbalPending) => set({ gimbalPending }),
+  dismissDetection: (id, how) => set((st) => ({ dismissed: { ...st.dismissed, [id]: how } })),
 }));
 
 /** The Drone the console follows, or the first known one. */
@@ -205,3 +210,15 @@ export const STATUS_COLOR: Record<HubDroneState['status'], string> = {
 export const STATUS_LABEL: Record<HubDroneState['status'], string> = {
   idle: 'IDLE', on_mission: 'ON MISSION', manual_control: 'MANUAL', returning: 'RETURNING', offline: 'OFFLINE',
 };
+
+/** The newest Detection the Operator has not acted on yet: not dismissed, not being dispatched, not already triaged. */
+export function liveDetection(st: ArgusState): HubDetection | null {
+  for (let i = st.detections.length - 1; i >= 0; i--) {
+    const d = st.detections[i];
+    if (st.dismissed[d.id]) continue;
+    if (st.pretriage?.detection_id === d.id) continue;
+    if (st.dispatching && st.dispatching !== d.id) continue;
+    return d;
+  }
+  return null;
+}

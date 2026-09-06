@@ -83,6 +83,10 @@ export interface HubMission {
   phase: string;
   next_waypoint: number;
   error: string | null;
+  /** The accepted FlightPlan, as the Hub publishes it (absent on older Hubs). */
+  plan?: { waypoints: { lat: number; lon: number; alt: number }[]; pattern: string; est_duration_s: number; est_battery_pct: number };
+  /** Evidence frame refs captured so far. */
+  evidence?: string[];
 }
 export interface AgentWaypoint { lat: number; lon: number; alt_m: number; action: string; duration_s?: number; purpose?: string }
 export interface AgentPlan { anomaly_id: string; priority: string; reasoning: string; waypoints: AgentWaypoint[] }

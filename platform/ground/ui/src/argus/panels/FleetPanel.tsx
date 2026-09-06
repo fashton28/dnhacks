@@ -5,7 +5,7 @@ import { useArgus, STATUS_COLOR, STATUS_LABEL } from '../store';
 import { ArgusMark } from '../Brand';
 import type { HubDroneState } from '@/dataSource/HubDataProvider';
 
-const DroneCard = React.memo(function DroneCard({ s, index, selected, onSelect }: { s: HubDroneState; index: number; selected: boolean; onSelect: (id: string) => void }) {
+export const DroneCard = React.memo(function DroneCard({ s, index, selected, onSelect }: { s: HubDroneState; index: number; selected: boolean; onSelect: (id: string) => void }) {
   const col = STATUS_COLOR[s.status];
   const bat = Math.max(0, Math.min(100, s.battery_pct));
   const batCol = bat <= 15 ? 'var(--a-offline)' : bat <= 30 ? 'var(--a-manual)' : 'var(--a-mission)';
