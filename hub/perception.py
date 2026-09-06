@@ -22,7 +22,7 @@ from contracts.site import enu_to_latlon, latlon_to_enu
 
 TEMP_MIN_C = -10.0
 TEMP_MAX_C = 700.0
-HOT_SPOT_C = 80.0          # a blob is a hot spot when its (lightly smoothed) temperature exceeds this
+HOT_SPOT_C = 120.0          # a blob is a hot spot when its (lightly smoothed) temperature exceeds this
 MIN_BLOB_PX = 12           # smaller blobs are texture speckle, not a source
 MAX_SIGHTINGS_PER_FRAME = 8
 DEFAULT_FOV_DEG = 70.0
