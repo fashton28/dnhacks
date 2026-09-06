@@ -342,7 +342,14 @@ class AgentFlight(Inspector):
     def fly(self, mission_id: str, detection_id: str, anomaly: dict[str, Any], center: tuple[float, float], site_prose: str, red_team: str | None = None) -> AgentFlightResult:
         res = AgentFlightResult(mission_id=mission_id)
         self.res, self.steps, self.returned, self.current_why, self._shot = res, 0, False, "", 0
-        env = self._clamp(self._live_envelope(center, anomaly, site_prose, red_team) if self.live else self._mock_envelope(center, red_team))
+        try:
+            env = self._live_envelope(center, anomaly, site_prose, red_team) if self.live else self._mock_envelope(center, red_team)
+        except Exception as e:  # noqa: BLE001
+            # the model is unavailable (credit, network, outage): fly the fixed mock envelope and say so, never fail the dispatch
+            self.app.state.audit.append("llm_fallback", stage="envelope", mission_id=mission_id, error=str(e)[:200])
+            self.emit("agent_note", mission_id, text=f"Model unavailable for the envelope ({str(e)[:80]}); using the standard envelope.")
+            env = self._mock_envelope(center, red_team)
+        env = self._clamp(env)
         if not self._approve_envelope(res, env, detection_id):
             res.error = "Safety Validator refused the envelope after repairs: " + ", ".join(v["rule"] for v in (res.envelope_validation or {}).get("violations", []))
             return res
@@ -362,7 +369,17 @@ class AgentFlight(Inspector):
         res.flown = True
         try:
             if self.live:
-                self._fly_live(anomaly, site_prose)
+                try:
+                    self._fly_live(anomaly, site_prose)
+                except FlightEnded:
+                    raise
+                except Exception as e:  # noqa: BLE001
+                    # the model dropped out mid-flight: finish with the fixed sweep so the Drone still comes home with evidence
+                    self.app.state.audit.append("llm_fallback", stage="flight", mission_id=mission_id, error=str(e)[:200])
+                    self.emit("agent_note", mission_id, text=f"Model unavailable mid-flight ({str(e)[:80]}); completing a standard sweep.")
+                    res.assessed_by = f"{MODEL} then mock"
+                    if not self.returned:
+                        self._fly_mock()
             else:
                 self._fly_mock()
         except FlightEnded as stop:

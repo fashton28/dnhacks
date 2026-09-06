@@ -212,6 +212,16 @@ def describe_from_scene(frame: Path | None, wp: dict[str, Any], scene, index: in
 
 
 def describe_with_claude(frame: Path | None, wp: dict[str, Any], scene, index: int) -> dict[str, Any]:
+    """Vision model observation; falls back to the scene stub when the model is unavailable, and says so."""
+    try:
+        return _describe_with_claude(frame, wp, scene, index)
+    except Exception as e:  # noqa: BLE001
+        obs = describe_from_scene(frame, wp, scene, index)
+        obs["assessed_by"] = f"scene-truth stub (vision model unavailable: {str(e)[:60]})"
+        return obs
+
+
+def _describe_with_claude(frame: Path | None, wp: dict[str, Any], scene, index: int) -> dict[str, Any]:
     """Vision model observation of the evidence frame (Anthropic)."""
     if frame is None:
         return describe_from_scene(frame, wp, scene, index)
@@ -363,7 +373,14 @@ class Autonomy:
                       "telemetry": {"drone_id": res.drone_id, "battery_end_pct": st.battery_pct if st else None, "steps": len(res.actions), "error": res.error, "hard_stop": res.hard_stop}}
             self.events.emit("mission_completed", mission_id, status=res.status, observation_count=len(res.observations), telemetry=result["telemetry"])
             self.events.emit("inspection", mission_id, waypoint_index=0, summary=res.summary, threat_assessment=res.threat_assessment, actions=len(res.actions))
-            triage = triage_mod.assess(self.llm, anomaly, plan, result)
+            try:
+                triage = triage_mod.assess(self.llm, anomaly, plan, result)
+            except Exception as e:  # noqa: BLE001
+                # the model is unavailable: the rule-based triage still produces a report, marked as such
+                self.app.state.audit.append("llm_fallback", stage="triage", mission_id=mission_id, error=str(e)[:200])
+                self.events.emit("agent_note", mission_id, text=f"Model unavailable for triage ({str(e)[:80]}); rule-based triage used.")
+                triage = triage_mod._mock_assess(anomaly, result)  # noqa: SLF001
+                triage["assessed_by"] = "rule-based fallback (model unavailable)"
             self.events.emit("triage_decision", mission_id, decision=triage["decision"], confidence=triage["confidence"], rationale=triage["rationale"],
                              event_type=triage.get("event_type"), assessed_by=triage.get("assessed_by"))
             self.orchestrator._publish(mission_id, triage)
