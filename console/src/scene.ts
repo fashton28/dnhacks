@@ -627,16 +627,16 @@ export class SiteScene {
       // camera keeps the flame shape (classify.ts reads "flame" as saturated). They flicker in update().
       const tex = flameTexture();
       for (let i = 0; i < 9; i++) {
-        const w = 1.3 + Math.random() * 1.2, h = 2.2 + Math.random() * 2.0;
+        const w = 2.4 + Math.random() * 2.0, h = 4.0 + Math.random() * 3.5;
         const m = new THREE.MeshBasicMaterial({ map: tex, alphaMap: tex, color: i % 3 === 0 ? 0xfff0b0 : i % 3 === 1 ? 0xffa030 : 0xff5a12, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide });
         const f = new THREE.Mesh(new THREE.PlaneGeometry(w, h), m);
-        f.position.set((Math.random() - 0.5) * 3.4, h / 2 + 0.15, (Math.random() - 0.5) * 2.4); f.name = "flame"; f.userData.h = h; f.userData.w = w; f.userData.seed = Math.random() * 6.28; f.renderOrder = 2;
+        f.position.set((Math.random() - 0.5) * 4.2, h / 2 + 0.15, (Math.random() - 0.5) * 3.0); f.name = "flame"; f.userData.h = h; f.userData.w = w; f.userData.seed = Math.random() * 6.28; f.renderOrder = 2;
         g.add(f);
       }
-      const ember = new THREE.Mesh(new THREE.CircleGeometry(1.6, 24), new THREE.MeshBasicMaterial({ color: 0xff6a1c, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+      const ember = new THREE.Mesh(new THREE.CircleGeometry(2.6, 24), new THREE.MeshBasicMaterial({ color: 0xff6a1c, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
       ember.rotation.x = -Math.PI / 2; ember.position.y = 0.06; ember.name = "ember"; g.add(ember);
       const glow = new THREE.PointLight(0xff8c2a, 40, 30, 1.6); glow.position.set(0, 2.2, 0); glow.name = "fireglow"; g.add(glow);
-      const smoke = new Plume(0, 0, 2.6, 2.8, this.quality === "high" ? 340 : 120, { color: 0x26272a, heat: 1.0, vigour: 1.3, opacity: 0.72, minPx: 9 });
+      const smoke = new Plume(0, 0, 2.4, 3.2, this.quality === "high" ? 700 : 240, { color: 0x2b2c2f, heat: 1.0, vigour: 1.3, opacity: 0.8, minPx: 10, size: 2200 });
       smoke.points.name = "smoke"; g.add(smoke.points); this.animated.push(smoke);
       g.userData.fire = true;
       o = g;
@@ -645,7 +645,7 @@ export class SiteScene {
       const g = new THREE.Group(); g.name = "steam";
       const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.6, 14), new THREE.MeshStandardMaterial({ color: 0x9aa4ad, metalness: 0.6, roughness: 0.5 }));
       pipe.position.y = 0.8; g.add(pipe);
-      const steam = new Plume(0, 0, 1.6, 1.4, this.quality === "high" ? 160 : 60, { color: 0xf4f8fb, heat: 0.35, vigour: 0.9, opacity: 0.75, minPx: 9 });
+      const steam = new Plume(0, 0, 1.6, 1.8, this.quality === "high" ? 320 : 120, { color: 0xf4f8fb, heat: 0.35, vigour: 0.9, opacity: 0.8, minPx: 9, size: 1500 });
       steam.points.name = "steam"; g.add(steam.points); this.animated.push(steam);
       o = g;
     } else if (p.kind === "person") {

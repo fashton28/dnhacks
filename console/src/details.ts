@@ -205,6 +205,7 @@ export interface PlumeOptions {
   /** rise and drift multiplier: a fire column climbs faster than a vent */ vigour?: number;
   /** puff opacity */ opacity?: number;
   /** smallest puff in pixels, so an overhead pass hundreds of metres up still sees the column */ minPx?: number;
+  /** puff size scale (default 900): a fire column needs bigger, denser puffs than a cooling tower */ size?: number;
 }
 
 export class Plume {
@@ -224,7 +225,7 @@ export class Plume {
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setAttribute("aAge", new THREE.BufferAttribute(this.ages, 1));
     const mat = new THREE.ShaderMaterial({
-      uniforms: { map: { value: puffTexture() }, size: { value: 900.0 }, color: { value: col }, opacity: { value: opacity }, minPx: { value: opts.minPx ?? 0.0 } },
+      uniforms: { map: { value: puffTexture() }, size: { value: opts.size ?? 900.0 }, color: { value: col }, opacity: { value: opacity }, minPx: { value: opts.minPx ?? 0.0 } },
       transparent: true, depthWrite: false,
       vertexShader: `attribute float aAge; varying float vAge; uniform float size; uniform float minPx;
         void main(){ vAge = aAge; vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
