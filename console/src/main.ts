@@ -415,8 +415,7 @@ window.addEventListener("keydown", (e) => {
   if (k === "h") manualEnd("resume");
   if (k === "x") manualEnd("abort");
   if (k === "r" && selected) returnHome(selected);
-  if (k === "arrowup" || k === "arrowdown") { e.preventDefault(); nudgeGimbal(k === "arrowup" ? -5 : 5); return; }  // camera tilt
-  if (k === "arrowleft" || k === "arrowright") { e.preventDefault(); nudgeZoom(k === "arrowright" ? 0.5 : -0.5); return; }  // camera zoom
+  if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(k)) { e.preventDefault(); return; }  // camera: swept continuously while held (see the manual tick)
   if (["w", "a", "s", "d", "q", "e"].includes(k)) {
     e.preventDefault();
     if (!manual && selected) manualStart(selected).catch((err) => log(String(err), "bad"));
@@ -426,9 +425,14 @@ window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 // ---- Manual Control loop: keyboard only. W/S fly along the nose, A/D turn the nose, Q/E descend and climb. The arrow keys
 // drive the camera (up/down tilt, left/right zoom) and never move the aircraft. Velocities are recomputed from the current
 // heading every tick, so W plus A or D flies a curve and the airframe banks into it.
-const KEY_SPEED = 3.0, KEY_CLIMB = 1.5, KEY_YAW_RATE = 60;
+const KEY_SPEED = 5.0, KEY_CLIMB = 2.5, KEY_YAW_RATE = 90;  // same feel as the dashboard; the autopilot ramps to it in about two seconds
 let manualPhase = "live";
+let camAccum = 0;
 setInterval(() => {
+  // camera arrows sweep while held: 40 deg/s of tilt, 3x zoom per second, sent in 5-degree / half-stop steps
+  const tilt = (keys.has("arrowdown") ? 1 : 0) - (keys.has("arrowup") ? 1 : 0);
+  const zoomDir = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
+  if (tilt || zoomDir) { camAccum += 0.05; if (camAccum >= 0.125) { camAccum = 0; if (tilt) nudgeGimbal(tilt * 5); if (zoomDir) nudgeZoom(zoomDir * 0.375); } } else camAccum = 0;
   if (!manual || !manualDrone) return;
   const s = drones.get(manualDrone); if (!s) return;
   const fwd = ((keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0)) * KEY_SPEED;

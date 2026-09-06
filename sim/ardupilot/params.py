@@ -18,9 +18,10 @@ def write_params(out: Path, sysid: int, fence_alt_max: float, fence_radius: floa
         "FENCE_ACTION 1",          # RTL on breach
         "FENCE_MARGIN 2",
         "RTL_ALT 2500",            # cm
-        "WPNAV_SPEED 500",         # cm/s cruise
-        "WPNAV_SPEED_UP 250",
-        "WPNAV_SPEED_DN 150",
+        "WPNAV_SPEED 800",         # cm/s cruise: snappy Manual Control, still a small multirotor
+        "WPNAV_SPEED_UP 350",
+        "WPNAV_ACCEL 400",         # cm/s^2: full speed in about two seconds
+        "WPNAV_SPEED_DN 250",
         "LAND_SPEED 50",
         "BATT_CAPACITY 15000",     # mAh: about 45 minutes of hover in the SITL battery model, so a demo does not run a Drone into its reserve
         "SIM_BATT_VOLTAGE 12.6",
