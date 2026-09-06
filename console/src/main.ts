@@ -261,14 +261,14 @@ function onDrone(s: DroneState): void {
   const prev = drones.get(s.drone_id);
   drones.set(s.drone_id, s);
   world.updateDrone(s);
-  overview.updateDrone(s);
+  if (!isEmbed) overview.updateDrone(s);  // the Overview map is hidden in embeds; its marker and track updates would only burn CPU
   if (prev && prev.status !== s.status) log(`${s.drone_id}: ${prev.status.replace("_", " ")} → ${s.status.replace("_", " ")}${s.mode ? ` (${s.mode})` : ""}`, s.status === "offline" ? "bad" : "info");
   if (s.message?.startsWith("REFUSED") && lastRefused.get(s.drone_id) !== s.message) { lastRefused.set(s.drone_id, s.message); log(`${s.drone_id}: onboard fence ${s.message}`, "bad"); }
   // ?drone=<id> names the initial selection only; once it (or any later select) has taken effect, telemetry never overrides the Operator's choice
   if (pendingDroneParam) { if (s.drone_id === pendingDroneParam) select(s.drone_id, { quiet: true }); }
   else if (selected === null && s.status !== "offline" && (storedSelection === null || storedSelection === s.drone_id)) select(s.drone_id, { quiet: true });
   if (selected === null && !selectFallback) selectFallback = window.setTimeout(() => { if (selected === null && drones.size) select(sortedDrones()[0].drone_id, { quiet: true }); }, 2500);
-  if (performance.now() - lastFleetRefresh > 200 || (prev && prev.status !== s.status)) { lastFleetRefresh = performance.now(); refreshFleet(); }
+  if (!isEmbed && (performance.now() - lastFleetRefresh > 200 || (prev && prev.status !== s.status))) { lastFleetRefresh = performance.now(); refreshFleet(); }
   if (s.drone_id === selected && performance.now() - lastSelectedRefresh > 100) { lastSelectedRefresh = performance.now(); refreshSelected(); syncGimbal(s); }
 }
 let lastSelectedRefresh = 0;
