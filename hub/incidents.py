@@ -58,6 +58,12 @@ def _observations(mission_id: str, drone_id: str, raw: list[dict[str, Any]]) -> 
                 captured_at=datetime.now(UTC),
                 description=o.get("caption") or o.get("description") or "",
                 salient=bool(detections),
+                camera_mode=o.get("camera_mode"),
+                zoom=o.get("zoom"),
+                lat=o.get("lat"),
+                lon=o.get("lon"),
+                alt_m=o.get("alt_m"),
+                looking_for=o.get("looking_for"),
             )
         )
     return out
@@ -90,6 +96,15 @@ def from_agent_outcome(outcome: dict[str, Any]) -> IncidentReport:
         evidence_refs=evidence,
         observations=observations,
         created_at=datetime.now(UTC),
+        detection_id=outcome.get("anomaly_id") or outcome.get("detection_id"),
+        drone_id=drone_id or None,
+        title=triage.get("title"),
+        severity=triage.get("severity"),
+        recommended_action=triage.get("recommended_action"),
+        threat_assessment=result.get("threat_assessment"),
+        summary=result.get("agent_summary"),
+        flown=bool(outcome.get("flown", bool(result))),
+        attempts=outcome.get("attempts"),
     )
 
 

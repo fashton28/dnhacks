@@ -25,6 +25,7 @@ from typing import Any
 from contracts.models import FlightPlan, LatLon, MissionSpec, Objective, Waypoint
 from contracts.protocol import Goto, ReturnHome
 from contracts.site import distance_m, enu_to_latlon, latlon_to_enu
+from hub.drone_select import select_drone
 from hub.inspection import Inspector
 from hub.missions import Mission, MissionPhase
 from hub.safety import BATTERY_RESERVE_PCT, validate
@@ -127,6 +128,10 @@ class AgentFlightResult:
     threat_assessment: str = "none"
     assessed_by: str = "mock"
     hard_stop: str | None = None
+
+
+async def _select(app, mission_id: str, detection_id: str, center: tuple[float, float]):
+    return select_drone(app, mission_id, detection_id, center)  # runs on the Hub loop: it publishes to the live feed
 
 
 class FlightEnded(Exception):
@@ -340,12 +345,11 @@ class AgentFlight(Inspector):
             res.error = "Safety Validator refused the envelope after repairs: " + ", ".join(v["rule"] for v in (res.envelope_validation or {}).get("violations", []))
             return res
         self.env = env
-        reg = self.app.state.registry
-        idle = [s for s in reg.states() if s.status.value == "idle" and reg.drones[s.drone_id].ws is not None]
-        if not idle:
+        chosen, _ = self._run(_select(self.app, mission_id, detection_id, center))
+        if chosen is None:
             res.error = "no idle Drone available"
             return res
-        self.drone_id = res.drone_id = max(idle, key=lambda s: s.battery_pct).drone_id
+        self.drone_id = res.drone_id = chosen
         plan = FlightPlan(mission_id=mission_id, drone_id=self.drone_id, waypoints=[Waypoint(lat=env.center_lat, lon=env.center_lon, alt=env.ceiling_m)],
                           pattern="agent", est_duration_s=env.time_budget_s, est_battery_pct=min(100.0, env.time_budget_s / 12.0))
         self.mission = Mission(mission_id=mission_id, drone_id=self.drone_id, plan=plan, phase=MissionPhase.flying)

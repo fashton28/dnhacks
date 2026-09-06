@@ -72,8 +72,16 @@ async def test_agent_flies_inside_a_validated_envelope(hub: HubHandle, live):
     # the Mission record the dashboard follows went flying -> returning -> complete
     m = (await httpx.AsyncClient(base_url=hub.http).get(f"/missions/{out['mission_id']}")).json()
     assert m["phase"] == "complete" and m["next_waypoint"] == 2 and m["plan"]["pattern"] == "agent"
-    kinds = {e["type"] for e in await drain(live)}
-    assert {"pretriage", "mission_spec", "validation", "envelope", "agent_action", "inspection", "triage", "incident", "dispatch_outcome"} <= kinds, kinds
+    events = await drain(live)
+    kinds = {e["type"] for e in events}
+    assert {"pretriage", "drone_selected", "mission_spec", "validation", "envelope", "agent_action", "inspection", "triage", "incident", "dispatch_outcome"} <= kinds, kinds
+    sel = next(e for e in events if e["type"] == "drone_selected")
+    assert sel["drone_id"] == "drone-1" and sel["candidates"][0]["eligible"] is True and "battery" in sel["reason"]
+    # the stored report is self-contained
+    rep = (await httpx.AsyncClient(base_url=hub.http).get(f"/incidents/{out['mission_id']}")).json()
+    assert rep["detection_id"] == d.id and rep["drone_id"] == "drone-1" and rep["flown"] is True and rep["title"] and rep["severity"]
+    assert rep["threat_assessment"] in ("none", "benign", "suspicious", "hostile") and rep["summary"]
+    assert all(o["camera_mode"] in ("rgb", "thermal", "lidar") and o["alt_m"] is not None for o in rep["observations"] if o["frame_ref"])
     # the live feed showed the validator accepting the envelope before any agent action
     lines = [json.loads(l) for l in (hub.tmp / "events.jsonl").read_text().splitlines()]
     kinds_in_order = [l["kind"] for l in lines]

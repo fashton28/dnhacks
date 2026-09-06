@@ -22,7 +22,6 @@ from typing import Any
 
 from contracts.models import (
     Detection,
-    DroneStatus,
     FlightPlan,
     TriageAction,
     TriageDecision,
@@ -31,6 +30,7 @@ from contracts.models import (
 )
 from contracts.site import latlon_to_enu
 from hub.agent_flight import AgentFlight
+from hub.drone_select import select_drone
 from hub.incidents import from_agent_outcome
 from hub.inspection import Inspector
 from hub.safety import validate
@@ -118,10 +118,10 @@ class HubExecutor:
         hook_box: dict[str, Any] = {}
 
         async def start():
-            idle = [s for s in reg.states() if s.status == DroneStatus.idle and reg.drones[s.drone_id].ws is not None]
-            if not idle:
+            target = (wps[-1].lat, wps[-1].lon) if wps else None
+            drone_id, _ = select_drone(self.app, fp.mission_id, self.current_anomaly.get("anomaly_id"), target)
+            if drone_id is None:
                 raise RuntimeError("no idle Drone available")
-            drone_id = max(idle, key=lambda s: s.battery_pct).drone_id
             fp.drone_id = drone_id
 
             # The Hub's Safety Validator gates the agent's plans too. The agent's own

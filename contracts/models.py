@@ -188,6 +188,13 @@ class Observation(Strict):
     captured_at: datetime
     description: str
     salient: bool = Field(default=False, description="true if this frame drove the verdict")
+    # capture context, when known (agent-flown and inspection captures record it)
+    camera_mode: str | None = None
+    zoom: float | None = None
+    lat: float | None = None
+    lon: float | None = None
+    alt_m: float | None = None
+    looking_for: str | None = None
 
 
 class IncidentReport(Strict):
@@ -199,6 +206,16 @@ class IncidentReport(Strict):
     evidence_refs: list[str] = Field(default_factory=list)
     observations: list[Observation] = Field(default_factory=list)
     created_at: datetime | None = None
+    # self-contained context so a report opened after a reload reads like the live one
+    detection_id: str | None = None
+    drone_id: str | None = None
+    title: str | None = None
+    severity: str | None = None
+    recommended_action: str | None = None
+    threat_assessment: str | None = Field(default=None, description="the agent's on-station assessment: none | benign | suspicious | hostile")
+    summary: str | None = Field(default=None, description="the agent's on-station summary")
+    flown: bool = True
+    attempts: int | None = None
 
 
 class DroneStatus(StrEnum):
