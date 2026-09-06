@@ -415,6 +415,12 @@ class Autonomy:
         self.app.state.registry.publish({"type": "incident_report", "detection_id": detection_id, "report": report.model_dump(mode="json")})
 
     # ---- automatic decisions: supervised and autonomous modes ------------------------------------
+    def reset_budgets(self, reason: str = "scene reset") -> None:
+        """A new story starts: forget asset cooldowns so a rehearsal of the same Scenario behaves like the first run."""
+        if self._asset_dispatched_at:
+            self.app.state.audit.append("autonomy_budgets_reset", reason=reason, assets=list(self._asset_dispatched_at))
+        self._asset_dispatched_at.clear()
+
     def _publish_decision(self, rec: dict[str, Any], action: str, status: str, **extra: Any) -> None:
         """One `decision` event per state change, always with the same decision id.
         `action` is what was decided (dispatch | held | released | refused | no_dispatch); `status` is where it stands
@@ -437,7 +443,8 @@ class Autonomy:
         if last is not None:
             since = self.loop.time() - last
             if since < self.policy.asset_cooldown_s:
-                return f"budget: {asset} was dispatched to {since:.0f} s ago; cooldown is {self.policy.asset_cooldown_s:.0f} s"
+                left = self.policy.asset_cooldown_s - since
+                return f"{asset} was inspected {since / 60:.0f} min ago; cooldown of {self.policy.asset_cooldown_s / 60:.0f} min has {max(1, round(left / 60)):.0f} min remaining"
         return None
 
     async def consider(self, d: Detection) -> dict[str, Any] | None:

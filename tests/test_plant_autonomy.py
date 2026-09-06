@@ -120,7 +120,12 @@ async def test_asset_cooldown_refuses_a_second_automatic_dispatch(hub: HubHandle
     events = await collect(live, lambda e: e["type"] == "decision" and e.get("status") == "dispatched", timeout=240)
     first = decisions(events, status="dispatched")
     assert len(first) == 1 and first[0]["mode"] == "autonomous" and first[0]["veto_window_s"] == 0
-    await run_fire(hub, "scn-fire-2")
+    # the same sensor alarms again while the asset is on cooldown (a new Scenario would reset budgets by design, so post the signal itself)
+    async with httpx.AsyncClient(base_url=hub.http) as c:
+        first_signal = (await c.get("/plant/signals")).json()[0]
+        again = {**first_signal, "id": "sig-repeat-TE-T2-W1", "value": 150.0, "note": "still rising"}
+        r = await c.post("/plant/signals", json=again)
+        assert r.status_code == 201, r.text
     events = await collect(live, lambda e: e["type"] == "decision", timeout=20)
     refused = decisions(events, action="refused")
     assert len(refused) == 1 and refused[0]["asset"] == "transformer T2" and "cooldown" in refused[0]["rationale"], refused

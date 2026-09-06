@@ -547,6 +547,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         scene = reg().scene
         if sc.kind in ("transformer_fire", "steam_release"):
             await clear_operational_props(scene)
+            app.state.autonomy.reset_budgets(f"scenario {sc.kind} starts")
         p = sc.params
         signal: PlantSignal | None = None  # the plant's own instrumentation reacting to the Scenario, ingested after the scene is placed
         if sc.kind == "intruder_vehicle":
@@ -587,6 +588,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
     @app.post("/scenarios/reset", response_model=SceneState)
     async def reset_scene() -> SceneState:
         await clear_operational_props(reg().scene)
+        app.state.autonomy.reset_budgets("scene reset")
         reg().scene = SceneState()
         app.state.audit.append("scene_reset")
         await reg().broadcast_scene()
