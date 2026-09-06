@@ -376,7 +376,13 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             raise HTTPException(409, "no idle drone available")
         if conn is None or conn.ws is None or conn.state is None:
             raise HTTPException(404, f"unknown or offline drone {drone_id}")
-        if runner().active_for(drone_id) is not None:
+        stale = runner().active_for(drone_id)
+        if stale is not None and stale.phase == MissionPhase.paused and conn.state.status == DroneStatus.idle and conn.state.alt < 0.5:
+            # a Mission paused by Manual Control whose Drone has since landed (or the fleet restarted) is history, not a lock
+            app.state.audit.append("stale_mission_cleared", mission_id=stale.mission_id, drone_id=drone_id)
+            await runner().abort(stale.mission_id)
+            stale = None
+        if stale is not None:
             raise HTTPException(409, f"{drone_id} already has an active mission")
         if body.plan.mission_id in runner().missions:
             raise HTTPException(409, f"mission {body.plan.mission_id} already exists")
