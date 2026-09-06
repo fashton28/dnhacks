@@ -539,14 +539,15 @@ export class SiteScene {
     const ud = g.userData as any;
     ud.state = s;
     // ENU velocity from the NED vector: east = vy, north = vx, up = -vz. Used to predict between samples.
-    const track: PoseTrack = ud.track ?? (ud.track = { x, y, alt, hdg: s.heading_deg, gimbal: s.gimbal_pitch_deg, sx: x, sy: y, salt: alt, shdg: s.heading_deg, sgimbal: s.gimbal_pitch_deg, vx: 0, vy: 0, vz: 0, t: performance.now() });
-    track.sx = x; track.sy = y; track.salt = alt; track.shdg = s.heading_deg; track.sgimbal = s.gimbal_pitch_deg;
+    const roll = s.roll_deg ?? 0, pitch = s.pitch_deg ?? 0;
+    const track: PoseTrack = ud.track ?? (ud.track = { x, y, alt, hdg: s.heading_deg, gimbal: s.gimbal_pitch_deg, roll, pitch, sx: x, sy: y, salt: alt, shdg: s.heading_deg, sgimbal: s.gimbal_pitch_deg, sroll: roll, spitch: pitch, vx: 0, vy: 0, vz: 0, t: performance.now() });
+    track.sx = x; track.sy = y; track.salt = alt; track.shdg = s.heading_deg; track.sgimbal = s.gimbal_pitch_deg; track.sroll = roll; track.spitch = pitch;
     const airborne = s.armed || alt > 0.3;
     track.vx = airborne ? s.velocity_ned.vy : 0; track.vy = airborne ? s.velocity_ned.vx : 0; track.vz = airborne ? -s.velocity_ned.vz : 0;
     track.t = performance.now();
     if (!this.smoothing || Math.hypot(track.sx - track.x, track.sy - track.y) > 25) {
       // snap: smoothing disabled, first sample, or a teleport (reset, reconnect)
-      track.x = x; track.y = y; track.alt = alt; track.hdg = s.heading_deg; track.gimbal = s.gimbal_pitch_deg;
+      track.x = x; track.y = y; track.alt = alt; track.hdg = s.heading_deg; track.gimbal = s.gimbal_pitch_deg; track.roll = roll; track.pitch = pitch;
       this.placeDrone(g, track);
     }
   }
@@ -556,14 +557,16 @@ export class SiteScene {
 
   private placeDrone(g: THREE.Group, p: PoseTrack): void {
     g.position.copy(enuToThree(p.x, p.y, Math.max(0.21, p.alt + 0.21)));  // skids rest on the pad
-    g.rotation.y = headingToYaw(p.hdg);
+    // yaw, then pitch, then roll (intrinsic): nose is -Z, so nose-up is +X rotation and right-wing-down is -Z rotation.
+    // The airframe banks into turns and pitches to accelerate exactly as the autopilot reports; the camera stays stabilized.
+    g.rotation.set(THREE.MathUtils.degToRad(p.pitch), headingToYaw(p.hdg), -THREE.MathUtils.degToRad(p.roll), "YXZ");
   }
 
   private smoothPoses(nowMs: number): void {
     const dt = this.lastAnimMs ? Math.min(0.1, (nowMs - this.lastAnimMs) / 1000) : 0;
     this.lastAnimMs = nowMs;
     if (!this.smoothing || dt <= 0) return;
-    const kPos = 1 - Math.exp(-dt / 0.12), kHdg = 1 - Math.exp(-dt / 0.15), kGim = 1 - Math.exp(-dt / 0.2);
+    const kPos = 1 - Math.exp(-dt / 0.12), kHdg = 1 - Math.exp(-dt / 0.15), kGim = 1 - Math.exp(-dt / 0.2), kAtt = 1 - Math.exp(-dt / 0.1);
     for (const g of this.drones.values()) {
       const p = (g.userData as any).track as PoseTrack | undefined;
       if (!p) continue;
@@ -574,6 +577,7 @@ export class SiteScene {
       let dh = ((p.shdg - p.hdg + 540) % 360) - 180;  // shortest arc
       p.hdg = (p.hdg + dh * kHdg + 360) % 360;
       p.gimbal += (p.sgimbal - p.gimbal) * kGim;
+      p.roll += (p.sroll - p.roll) * kAtt; p.pitch += (p.spitch - p.pitch) * kAtt;
       this.placeDrone(g, p);
     }
   }
@@ -636,7 +640,7 @@ export class SiteScene {
 }
 
 /** Last telemetry sample (s*) plus the smoothed, predicted pose actually drawn. ENU metres, altitude metres, degrees. */
-export interface PoseTrack { x: number; y: number; alt: number; hdg: number; gimbal: number; sx: number; sy: number; salt: number; shdg: number; sgimbal: number; vx: number; vy: number; vz: number; t: number }
+export interface PoseTrack { x: number; y: number; alt: number; hdg: number; gimbal: number; roll: number; pitch: number; sx: number; sy: number; salt: number; shdg: number; sgimbal: number; sroll: number; spitch: number; vx: number; vy: number; vz: number; t: number }
 
 function textLabel(text: string): THREE.CanvasTexture {
   const c = document.createElement("canvas"); c.width = 512; c.height = 128;

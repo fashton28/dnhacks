@@ -48,6 +48,8 @@ class FakeDrone:
         self.heading = 0.0
         self.gimbal_pitch = 45.0
         self.vel_ned = VelocityNED(vx=0, vy=0, vz=0)
+        self.roll = 0.0   # degrees, right wing down positive: synthesized from acceleration like a real multirotor
+        self.pitch = 0.0  # degrees, nose up positive
         self.speed_factor = speed_factor
         self.battery = Battery()
         self.status = DroneStatus.idle
@@ -98,6 +100,19 @@ class FakeDrone:
                 self.mode = "idle"
                 self.status = DroneStatus.idle
                 self.mission_id = None
+        # Attitude: a multirotor tilts its thrust vector to accelerate, so bank follows lateral acceleration and pitch
+        # follows forward acceleration plus a steady nose-down lean against drag at cruise. Smoothed like a real controller.
+        if dt > 0:
+            ax, ay = (vx - self.vel_ned.vy) / dt, (vy - self.vel_ned.vx) / dt  # ENU acceleration (vel_ned stores east in vy, north in vx)
+            h = math.radians(self.heading)
+            fwd = ax * math.sin(h) + ay * math.cos(h)
+            right = ax * math.cos(h) - ay * math.sin(h)
+            speed = math.hypot(vx, vy)
+            pitch_t = max(-25.0, min(25.0, -math.degrees(math.atan2(fwd, 9.81)) - min(12.0, 0.9 * speed)))
+            roll_t = max(-30.0, min(30.0, math.degrees(math.atan2(right, 9.81))))
+            k = min(1.0, dt / 0.25)
+            self.pitch += (pitch_t - self.pitch) * k
+            self.roll += (roll_t - self.roll) * k
         self.x += vx * dt
         self.y += vy * dt
         self.z = max(0.0, self.z + vz * dt)
@@ -108,7 +123,8 @@ class FakeDrone:
     def state(self) -> DroneState:
         lat, lon = enu_to_latlon(self.x, self.y)
         return DroneState(drone_id=self.id, lat=lat, lon=lon, alt=self.z, heading_deg=self.heading, velocity_ned=self.vel_ned,
-                          battery_pct=self.battery.pct, status=self.status, mission_id=self.mission_id, gimbal_pitch_deg=self.gimbal_pitch, armed=self.z > LAND_ALT, mode="FAKE", ts=datetime.now(UTC))
+                          battery_pct=self.battery.pct, status=self.status, mission_id=self.mission_id, gimbal_pitch_deg=self.gimbal_pitch,
+                          roll_deg=round(self.roll, 2), pitch_deg=round(self.pitch, 2), armed=self.z > LAND_ALT, mode="FAKE", ts=datetime.now(UTC))
 
     def handle(self, cmd) -> Ack:
         if isinstance(cmd, Goto):

@@ -239,6 +239,8 @@ class DroneState(Strict):
     status: DroneStatus
     mission_id: str | None = None
     gimbal_pitch_deg: Annotated[float, Field(ge=-30, le=90)] = Field(default=45.0, description="camera pitch: -30 looks up, 0 level, 90 straight down; drawn by the Renderer")
+    roll_deg: Annotated[float, Field(ge=-180, le=180)] = Field(default=0.0, description="airframe roll, right wing down positive (autopilot attitude)")
+    pitch_deg: Annotated[float, Field(ge=-180, le=180)] = Field(default=0.0, description="airframe pitch, nose up positive (autopilot attitude)")
     armed: bool = False
     mode: str = Field(default="", description="autopilot flight mode, free text (GUIDED, RTL, ...)")
     message: str = Field(default="", description="last autopilot status text, e.g. a fence refusal")

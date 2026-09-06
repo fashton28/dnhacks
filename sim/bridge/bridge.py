@@ -35,6 +35,8 @@ class Bridge:
         self.lat = self.lon = 0.0
         self.alt = 0.0
         self.hdg = 0.0
+        self.roll = 0.0   # degrees, right wing down positive
+        self.pitch = 0.0  # degrees, nose up positive
         self.vned = (0.0, 0.0, 0.0)
         self.battery = 100.0
         self.armed = False
@@ -127,6 +129,8 @@ class Bridge:
                 self.lat, self.lon = msg.lat / 1e7, msg.lon / 1e7
                 self.alt = msg.relative_alt / 1000.0
                 self.hdg = msg.hdg / 100.0 if msg.hdg != 65535 else self.hdg
+            elif t == "ATTITUDE":
+                self.roll, self.pitch = math.degrees(msg.roll), math.degrees(msg.pitch)
                 self.vned = (msg.vx / 100.0, msg.vy / 100.0, msg.vz / 100.0)
             elif t == "HEARTBEAT" and msg.get_srcComponent() == 1:
                 self.armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
@@ -241,7 +245,8 @@ class Bridge:
     def state(self) -> DroneState:
         return DroneState(drone_id=self.id, lat=self.lat, lon=self.lon, alt=max(0.0, self.alt), heading_deg=self.hdg % 360.0,
                           velocity_ned=VelocityNED(vx=self.vned[0], vy=self.vned[1], vz=self.vned[2]), battery_pct=max(0.0, min(100.0, self.battery)),
-                          status=self.status, mission_id=None, gimbal_pitch_deg=self.gimbal, armed=self.armed, mode=self.mode, message=self.last_message, ts=datetime.now(UTC))
+                          status=self.status, mission_id=None, gimbal_pitch_deg=self.gimbal, roll_deg=max(-180.0, min(180.0, self.roll)), pitch_deg=max(-180.0, min(180.0, self.pitch)),
+                          armed=self.armed, mode=self.mode, message=self.last_message, ts=datetime.now(UTC))
 
     # ---- main loop -------------------------------------------------------------------------------
     async def run(self, hub_url: str) -> None:

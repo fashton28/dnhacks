@@ -57,6 +57,7 @@ class Registry:
                    "hard_stop", "inspection", "triage", "incident", "dispatch_outcome")
 
     def publish(self, event: dict[str, Any]) -> None:
+        event.setdefault("ts", datetime.now(UTC).isoformat())  # when it happened, so a replayed trail keeps its real times
         t = event.get("type")
         if t in self.TRUST_TYPES:
             if t == "pretriage":

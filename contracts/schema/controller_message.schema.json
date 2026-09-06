@@ -89,6 +89,22 @@
           "title": "Gimbal Pitch Deg",
           "type": "number"
         },
+        "roll_deg": {
+          "default": 0.0,
+          "description": "airframe roll, right wing down positive (autopilot attitude)",
+          "maximum": 180,
+          "minimum": -180,
+          "title": "Roll Deg",
+          "type": "number"
+        },
+        "pitch_deg": {
+          "default": 0.0,
+          "description": "airframe pitch, nose up positive (autopilot attitude)",
+          "maximum": 180,
+          "minimum": -180,
+          "title": "Pitch Deg",
+          "type": "number"
+        },
         "armed": {
           "default": false,
           "title": "Armed",

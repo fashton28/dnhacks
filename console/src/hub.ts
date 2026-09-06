@@ -2,7 +2,10 @@
 export type DroneState = {
   drone_id: string; lat: number; lon: number; alt: number; heading_deg: number;
   velocity_ned: { vx: number; vy: number; vz: number }; battery_pct: number; status: string;
-  mission_id: string | null; gimbal_pitch_deg: number; armed: boolean; mode: string; message: string; ts: string;
+  mission_id: string | null; gimbal_pitch_deg: number;
+  /** airframe attitude from the autopilot, degrees: roll right-wing-down positive, pitch nose-up positive (absent on older Hubs) */
+  roll_deg?: number;
+  pitch_deg?: number; armed: boolean; mode: string; message: string; ts: string;
 };
 export type SceneProp = { id: string; kind: string; x: number; y: number; yaw_deg: number };
 export type SceneState = { props: SceneProp[]; open_fences: string[]; scenario_ids: string[] };
