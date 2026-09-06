@@ -422,11 +422,14 @@ window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 setInterval(() => {
   if (!manual || !manualDrone) return;
   const s = drones.get(manualDrone); if (!s) return;
-  const spd = 3.0, climb = 1.5, yawRate = 45;
+  // Like a real drone: W/S fly forward and back along the nose, A/D turn the nose, the arrows slide sideways, Q/E climb
+  // and descend. Velocities are recomputed from the current heading every tick, so holding W while turning flies a curve
+  // and the airframe banks into it (the autopilot's real attitude is what the World view draws).
+  const spd = 3.0, climb = 1.5, yawRate = 60;
   const fwd = (keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0);
-  const right = (keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0);
+  const right = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
   const up = (keys.has("e") ? 1 : 0) - (keys.has("q") ? 1 : 0);
-  const yaw = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
+  const yaw = (keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0);
   const h = s.heading_deg * Math.PI / 180;
   const vn = spd * (fwd * Math.cos(h) - right * Math.sin(h));
   const ve = spd * (fwd * Math.sin(h) + right * Math.cos(h));
