@@ -71,6 +71,13 @@ class HubHandle:
         raise TimeoutError(f"mission {mission_id} not in {phases}")
 
 
+@pytest.fixture(autouse=True)
+def manual_autonomy(monkeypatch):
+    """The test Hub starts in manual mode: a posted Detection flies only when the test dispatches it.
+    Tests of the hands-off modes switch through POST /autonomy/mode."""
+    monkeypatch.setenv("ARGUS_AUTONOMY_MODE", "manual")
+
+
 @pytest.fixture
 async def hub(tmp_path: Path):
     port = _free_port()

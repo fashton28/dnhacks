@@ -64,6 +64,7 @@ from hub.incidents import IncidentStore
 from hub.manual import ManualControl
 from hub.missions import MissionPhase, MissionRunner
 from hub.plant import PlantSignals, signal_to_detection
+from hub.policy import AutonomyMode
 from hub.registry import Registry
 from hub.safety import validate
 from sim.common.site_limits import SiteLimits
@@ -126,6 +127,13 @@ class ManualBody(BaseModel):
 
 class ManualEndBody(BaseModel):
     action: str = "resume"  # resume | abort | hover
+
+
+class AutonomyModeBody(BaseModel):
+    mode: str  # manual | supervised | autonomous
+    veto_window_s: float | None = None
+    max_concurrent_flights: int | None = None
+    asset_cooldown_s: float | None = None
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -595,6 +603,8 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             source=det.metadata.get("source", "unknown"),
         )
         reg().publish({"type": "detection", **det.model_dump(mode="json")})
+        # the autonomy policy decides whether this Detection flies itself (nothing happens under manual)
+        await app.state.autonomy.consider(det)
         return det
 
     @app.get("/detections", response_model=list[Detection])
@@ -762,7 +772,44 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
     @app.get("/autonomy")
     async def autonomy_status() -> dict[str, Any]:
         a = app.state.autonomy
-        return {"llm_mode": a.mode, "flight_mode": a.flight_mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes)}
+        return {"llm_mode": a.mode, "flight_mode": a.flight_mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes),
+                "mode": a.policy.mode.value, "policy": a.policy.as_dict(), "decisions": a.public_decisions()}
+
+    @app.post("/autonomy/mode")
+    async def set_autonomy_mode(body: AutonomyModeBody) -> dict[str, Any]:
+        a = app.state.autonomy
+        try:
+            a.policy.mode = AutonomyMode(body.mode)
+        except ValueError as e:
+            raise HTTPException(422, "mode must be manual, supervised or autonomous") from e
+        for name in ("veto_window_s", "max_concurrent_flights", "asset_cooldown_s"):
+            if getattr(body, name) is not None:
+                setattr(a.policy, name, getattr(body, name))
+        app.state.audit.append("autonomy_mode", **a.policy.as_dict())
+        reg().publish({"type": "autonomy_mode", "mode": a.policy.mode.value, "policy": a.policy.as_dict()})
+        return {"mode": a.policy.mode.value, "policy": a.policy.as_dict()}
+
+    @app.get("/decisions")
+    async def list_decisions() -> list[dict[str, Any]]:
+        return app.state.autonomy.public_decisions()
+
+    @app.post("/decisions/{decision_id}/hold")
+    async def hold_decision(decision_id: str) -> dict[str, Any]:
+        try:
+            return app.state.autonomy.hold(decision_id)
+        except KeyError as e:
+            raise HTTPException(404, "unknown decision") from e
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
+
+    @app.post("/decisions/{decision_id}/release")
+    async def release_decision(decision_id: str) -> dict[str, Any]:
+        try:
+            return app.state.autonomy.release(decision_id)
+        except KeyError as e:
+            raise HTTPException(404, "unknown decision") from e
+        except ValueError as e:
+            raise HTTPException(409, str(e)) from e
 
     @app.get("/drones/{drone_id}/mjpeg")
     async def drone_mjpeg(drone_id: str, fps: float = 12.0) -> StreamingResponse:

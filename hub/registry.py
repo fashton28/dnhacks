@@ -54,7 +54,7 @@ class Registry:
     # Events a freshly opened Console needs to rebuild the trust column for a dispatch already under way.
     # A new pretriage starts a new story; everything after it is kept (capped) and replayed in the snapshot.
     TRUST_TYPES = ("pretriage", "drone_selected", "mission_spec", "validation", "envelope", "envelope_repaired", "agent_action", "agent_note",
-                   "hard_stop", "inspection", "triage", "incident", "dispatch_outcome", "plant_signal", "decision")
+                   "hard_stop", "inspection", "triage", "incident", "dispatch_outcome", "plant_signal", "decision", "autonomy_mode")
 
     def publish(self, event: dict[str, Any]) -> None:
         event.setdefault("ts", datetime.now(UTC).isoformat())  # when it happened, so a replayed trail keeps its real times

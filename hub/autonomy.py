@@ -33,6 +33,7 @@ from hub.agent_flight import AgentFlight
 from hub.drone_select import select_drone
 from hub.incidents import from_agent_outcome
 from hub.inspection import Inspector
+from hub.policy import AutonomyMode, AutonomyPolicy
 from hub.safety import validate
 from hub.site_context import SiteKnowledge
 
@@ -285,6 +286,14 @@ class Autonomy:
         self.orchestrator = Orchestrator(self.facility, self.llm, self.executor, self.events, report_dir=runs_dir / "reports")
         self._seed_mission_counter(runs_dir)
         self._lock = threading.Lock()
+        # autonomy policy: who decides to fly, and the budgets an automatic decision cannot exceed
+        self.policy = AutonomyPolicy.from_env()
+        self.decisions: dict[str, dict[str, Any]] = {}
+        self._decision_seq = 0
+        self._decision_tasks: dict[str, asyncio.Task] = {}
+        self._decision_gates: dict[str, asyncio.Event] = {}
+        self._dispatching: set[str] = set()  # detection ids with a dispatch under way, automatic or by an Operator
+        self._asset_dispatched_at: dict[str, float] = {}  # asset name -> loop time of its last automatic dispatch
 
     def _seed_mission_counter(self, runs_dir: Path) -> None:
         """Mission ids are m-<date>-<n>. The agent counts from zero on every start, so after a Hub restart new
@@ -404,10 +413,111 @@ class Autonomy:
                                     verdict=report.verdict.value, evidence=len(report.evidence_refs))
         self.app.state.registry.publish({"type": "incident_report", "detection_id": detection_id, "report": report.model_dump(mode="json")})
 
+    # ---- automatic decisions: supervised and autonomous modes ------------------------------------
+    def _publish_decision(self, rec: dict[str, Any], action: str, status: str, **extra: Any) -> None:
+        """One `decision` event per state change, always with the same decision id.
+        `action` is what was decided (dispatch | held | released | refused | no_dispatch); `status` is where it stands
+        (pending | held | released | dispatching | dispatched | failed | refused | no_dispatch)."""
+        rec["action"] = action
+        rec["status"] = status
+        rec.update(extra)
+        event = {"type": "decision", **{k: v for k, v in rec.items() if k != "task"}}
+        self.app.state.registry.publish(event)
+        self.app.state.audit.append("decision", **{k: v for k, v in event.items() if k not in ("type", "ts")})
+
+    def _budget_refusal(self, rec: dict[str, Any], asset: str) -> str | None:
+        """Why the budgets forbid an automatic dispatch right now, or None if they allow it."""
+        runner = self.app.state.missions
+        active = [m for m in runner.missions.values() if m.phase in ("pending", "flying", "paused", "returning")]
+        pending = [r for r in self.decisions.values() if r is not rec and r["status"] in ("pending", "released", "dispatching")]
+        if len(active) + len(self._dispatching) + len(pending) >= self.policy.max_concurrent_flights:
+            return f"budget: {self.policy.max_concurrent_flights} concurrent flight(s) allowed and one is already under way"
+        last = self._asset_dispatched_at.get(asset)
+        if last is not None:
+            since = self.loop.time() - last
+            if since < self.policy.asset_cooldown_s:
+                return f"budget: {asset} was dispatched to {since:.0f} s ago; cooldown is {self.policy.asset_cooldown_s:.0f} s"
+        return None
+
+    async def consider(self, d: Detection) -> dict[str, Any] | None:
+        """A Detection has arrived. Under manual policy nothing happens; otherwise pretriage decides, the budgets
+        gate, and a decision to dispatch executes itself after the veto window unless held."""
+        if self.policy.mode == AutonomyMode.manual:
+            return None
+        brief = self.knowledge.brief_for(d)
+        triage = await asyncio.to_thread(self.pretriage, d, brief)
+        asset = d.metadata.get("asset") or d.id
+        self._decision_seq += 1
+        rec: dict[str, Any] = {"id": f"dec-{self._decision_seq}", "detection_id": d.id, "asset": asset, "mode": self.policy.mode.value,
+                               "rationale": triage.rationale, "deadline_ts": None, "mission_id": None, "action": "pending", "status": "pending", "created_ts": datetime.now(UTC).isoformat()}
+        self.decisions[rec["id"]] = rec
+        if triage.action != TriageAction.dispatch:
+            self._publish_decision(rec, "no_dispatch", "no_dispatch")
+            return rec
+        refusal = self._budget_refusal(rec, asset)
+        if refusal is not None:
+            self._publish_decision(rec, "refused", "refused", rationale=f"{triage.rationale} Not dispatched: {refusal}.")
+            return rec
+        window = self.policy.window_s
+        rec["deadline_ts"] = datetime.fromtimestamp(time.time() + window, UTC).isoformat()
+        self._asset_dispatched_at[asset] = self.loop.time()  # the cooldown starts at the decision, so a repeat during the flight is refused too
+        self._decision_gates[rec["id"]] = asyncio.Event()
+        self._publish_decision(rec, "dispatch", "pending", veto_window_s=window)
+        self._decision_tasks[rec["id"]] = asyncio.create_task(self._execute_decision(rec, window))
+        return rec
+
+    async def _execute_decision(self, rec: dict[str, Any], window: float) -> None:
+        gate = self._decision_gates[rec["id"]]
+        try:
+            await asyncio.wait_for(gate.wait(), timeout=window)
+        except TimeoutError:
+            pass  # the window closed with no hold: proceed
+        if rec["status"] not in ("pending", "released"):
+            return  # held
+        self._publish_decision(rec, "dispatch", "dispatching")  # it fires
+        try:
+            outcome = await self.dispatch(rec["detection_id"])
+        except Exception as e:  # noqa: BLE001
+            self._publish_decision(rec, "dispatch", "failed", error=repr(e)[:200])
+            return
+        self._publish_decision(rec, "dispatch", "dispatched", mission_id=outcome.get("mission_id"), flown=outcome.get("flown"), triage=(outcome.get("triage") or {}).get("decision"))
+
+    def hold(self, decision_id: str) -> dict[str, Any]:
+        rec = self.decisions.get(decision_id)
+        if rec is None:
+            raise KeyError(decision_id)
+        if rec["status"] != "pending":
+            raise ValueError(f"decision {decision_id} is {rec['status']}; only a pending dispatch can be held")
+        self._publish_decision(rec, "held", "held")
+        self._asset_dispatched_at.pop(rec["asset"], None)  # nothing flew, so the asset is not on cooldown
+        self._decision_gates[decision_id].set()
+        return rec
+
+    def release(self, decision_id: str) -> dict[str, Any]:
+        rec = self.decisions.get(decision_id)
+        if rec is None:
+            raise KeyError(decision_id)
+        if rec["status"] != "pending":
+            raise ValueError(f"decision {decision_id} is {rec['status']}; only a pending dispatch can be released")
+        self._publish_decision(rec, "released", "released")
+        self._decision_gates[decision_id].set()
+        return rec
+
+    def public_decisions(self) -> list[dict[str, Any]]:
+        return [{k: v for k, v in r.items() if k != "task"} for r in self.decisions.values()]
+
     async def dispatch(self, detection_id: str, *, red_team: str | None = None) -> dict[str, Any]:
         d = self.app.state.detections.get(detection_id)
         if d is None:
             raise KeyError(detection_id)
+        self._dispatching.add(detection_id)
+        try:
+            return await self._dispatch(d, red_team=red_team)
+        finally:
+            self._dispatching.discard(detection_id)
+
+    async def _dispatch(self, d: Detection, *, red_team: str | None = None) -> dict[str, Any]:
+        detection_id = d.id
         brief = self.knowledge.brief_for(d)
         site_prose = self.knowledge.prose(brief)
         decision = await asyncio.to_thread(self.pretriage, d, brief)

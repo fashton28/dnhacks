@@ -46,13 +46,18 @@ class PlantSignals:
         return len(self._items)
 
 
+def _fmt(v: str | float) -> str:
+    """142.0 reads as 142; a valve position stays as written."""
+    return f"{v:g}" if isinstance(v, (int, float)) else str(v)
+
+
 def signal_to_detection(signal: PlantSignal) -> Detection:
     """A signal becomes a Detection: a small square around the asset, the reading quoted in metadata."""
     x, y = latlon_to_enu(signal.asset.lat, signal.asset.lon)
     h = HALF_SIDE_M
     ring = [LatLon(lat=lat, lon=lon) for lat, lon in (enu_to_latlon(x - h, y - h), enu_to_latlon(x + h, y - h), enu_to_latlon(x + h, y + h), enu_to_latlon(x - h, y + h))]
-    reading = f"{signal.value} {signal.unit}".strip()
-    threshold = "" if signal.threshold is None else f", threshold {signal.threshold} {signal.unit}".strip()
+    reading = f"{_fmt(signal.value)} {signal.unit}".strip()
+    threshold = "" if signal.threshold is None else f", threshold {_fmt(signal.threshold)} {signal.unit}".strip()
     note = f"Plant signal {signal.sensor_id} on {signal.asset.name}: {signal.kind.value.replace('_', ' ')} {reading}{threshold} ({signal.severity.value})."
     if signal.note:
         note += f" {signal.note}"
@@ -71,9 +76,9 @@ def signal_to_detection(signal: PlantSignal) -> Detection:
             "sensor_id": signal.sensor_id,
             "asset": signal.asset.name,
             "kind": signal.kind.value,
-            "value": str(signal.value),
+            "value": _fmt(signal.value),
             "unit": signal.unit,
-            "threshold": "" if signal.threshold is None else str(signal.threshold),
+            "threshold": "" if signal.threshold is None else _fmt(signal.threshold),
             "severity": signal.severity.value,
             "note": note,
         },
