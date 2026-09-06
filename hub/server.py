@@ -146,7 +146,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.audit = AuditLog(settings.audit_path)
         app.state.missions = MissionRunner(app.state.registry, app.state.audit, settings.evidence_dir, settings.speed_factor)
         app.state.manual = ManualControl()
-        app.state.detections = DetectionStore()
+        app.state.detections = DetectionStore(path=settings.evidence_dir / "detections.jsonl" if settings.evidence_dir else None)
         app.state.incidents = IncidentStore()
         app.state.limits = SiteLimits.load()
         app.state.settings = settings

@@ -10,22 +10,44 @@ instructions, and nothing in the Hub acts on it.
 """
 from __future__ import annotations
 
+from pathlib import Path
+
 from contracts.models import Detection
 
 
 class DetectionStore:
-    """In-memory and insertion-ordered, newest last. Lives as long as the Hub process."""
+    """Insertion-ordered, newest last.
 
-    def __init__(self, limit: int = 200) -> None:
+    With a `path` every Detection is appended to a JSON-lines file and reloaded on start, so a Hub
+    restart does not orphan the Detections a Console is still showing (a dispatch of an id the Hub
+    has forgotten is refused as "unknown detection"). Without a path it lives as long as the process."""
+
+    def __init__(self, limit: int = 200, path: Path | None = None) -> None:
         self._items: dict[str, Detection] = {}
         self._limit = limit
+        self._path = path
+        if path is not None and path.exists():
+            for line in path.read_text().splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        self._insert(Detection.model_validate_json(line))
+                    except ValueError:
+                        continue  # a Detection written under an older contract; skip it rather than refuse to start
 
-    def add(self, detection: Detection) -> Detection:
-        """Store one Detection. Re-posting an id replaces it and moves it to newest."""
+    def _insert(self, detection: Detection) -> None:
         self._items.pop(detection.id, None)
         self._items[detection.id] = detection
         while len(self._items) > self._limit:
             self._items.pop(next(iter(self._items)))
+
+    def add(self, detection: Detection) -> Detection:
+        """Store one Detection. Re-posting an id replaces it and moves it to newest."""
+        self._insert(detection)
+        if self._path is not None:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a") as f:
+                f.write(detection.model_dump_json() + "\n")
         return detection
 
     def get(self, detection_id: str) -> Detection | None:

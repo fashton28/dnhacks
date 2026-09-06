@@ -70,6 +70,8 @@ export interface ArgusState {
   sampleHistory(): void;
   addLog(s: StatusText): void;
   addDetection(d: HubDetection): void;
+  /** Replace the list with what the Hub currently knows (after a reconnect or a refused dispatch). */
+  setDetections(ds: HubDetection[]): void;
   setMission(m: HubMission): void;
   setMissionSpec(v: MissionSpecView): void;
   setValidation(v: ValidationView): void;
@@ -142,6 +144,7 @@ export const useArgus = create<ArgusState>((set, get) => ({
   },
   addLog: (s) => set((st) => ({ logs: [...st.logs.slice(-299), s] })),
   addDetection: (d) => set((st) => ({ detections: [...st.detections.filter((x) => x.id !== d.id), d] })),
+  setDetections: (detections) => set({ detections }),
   setMission: (m) => set((st) => ({ missions: { ...st.missions, [m.mission_id]: m } })),
   setMissionSpec: (missionSpec) => set({ missionSpec }),
   setValidation: (validation) => set({ validation }),

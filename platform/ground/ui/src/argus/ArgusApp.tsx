@@ -83,12 +83,21 @@ export default function ArgusApp(): JSX.Element {
   /* ---- site model ---- */
   useEffect(() => { getSiteModel().then(setSite).catch((e: Error) => toast({ severity: 'error', title: 'Site model failed', message: e.message })); }, [toast]);
 
+  const refreshDetections = useCallback(async () => {
+    const r = await hub.getJson('/detections');
+    if (r.ok && Array.isArray(r.json)) st.getState().setDetections(r.json as HubDetection[]);
+  }, [hub, st]);
+
   /* ---- Hub streams -> store ---- */
   useEffect(() => {
     hub.connect(settings.connection).catch(() => st.getState().setConn('error'));
     const s = st.getState();
     const offs = [
-      hub.onConnectionChange((c) => st.getState().setConn(c)),
+      hub.onConnectionChange((c) => {
+        st.getState().setConn(c);
+        // a Hub that restarted has a fresh Detection list; never keep ids it no longer knows
+        if (c === 'connected') void refreshDetections();
+      }),
       hub.onTelemetry((t) => { if (t.vehicleId === (st.getState().selected ?? hub.getVehicle())) st.getState().setTel(t); }),
       hub.onStatusText((x) => st.getState().addLog(x)),
       hub.onAck((a) => { if (!a.success) toast({ severity: 'error', title: `${a.command} failed`, message: a.message }); }),
@@ -172,7 +181,7 @@ export default function ArgusApp(): JSX.Element {
       }),
     ];
     void s.setConn('connecting');
-    hub.getJson('/detections').then((r) => { if (r.ok && Array.isArray(r.json)) for (const d of r.json as HubDetection[]) st.getState().addDetection(d); });
+    void refreshDetections();
     hub.getJson('/missions').then((r) => { if (r.ok && Array.isArray(r.json)) for (const m of r.json as HubMission[]) st.getState().setMission(m); });
     hub.getJson('/scene').then((r) => { if (r.ok && r.json) { const sc = r.json as { open_fences?: string[]; props?: SceneProp[] }; st.getState().setOpenFences(sc.open_fences ?? []); st.getState().setSceneProps(sc.props ?? []); } });
     const sampler = setInterval(() => st.getState().sampleHistory(), 1000);
@@ -287,8 +296,14 @@ export default function ArgusApp(): JSX.Element {
   const dispatchId = useCallback(async (id: string) => {
     st.getState().setDispatching(id); setCenter('mission');
     log('info', `Dispatching ${id} to the Triage Agent`);
-    try { await post(`/detections/${id}/dispatch`, {}); } catch { st.getState().setDispatching(null); }
-  }, [post, log, st]);
+    try { await post(`/detections/${id}/dispatch`, {}); } catch {
+      st.getState().setDispatching(null);
+      // the Hub may have restarted since this Detection was listed; resync so the Operator sees what it knows
+      const before = st.getState().detections.length;
+      await refreshDetections();
+      if (st.getState().detections.length !== before) toast({ severity: 'warning', title: 'Detections refreshed', message: 'The Hub no longer knew that Detection. Run Detect again to create a new one.' });
+    }
+  }, [post, log, st, toast, refreshDetections]);
 
   /* ---- keyboard: 1-9 select, manual sticks, H release, R return home, ? help ---- */
   const keys = useRef(new Set<string>());
