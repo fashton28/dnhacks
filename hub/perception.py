@@ -114,7 +114,7 @@ def find_hot_spots(temp_png_bytes: bytes, frame_meta: dict[str, Any]) -> list[Si
     th, tw = temp.shape
     fw, fh = int(frame_meta["width"]), int(frame_meta["height"])
     sx, sy = fw / tw, fh / th
-    mask = _smooth3(temp) > HOT_SPOT_C
+    mask = (temp > HOT_SPOT_C) & (_smooth3(temp) > HOT_SPOT_C)   # tight boxes, and no lone warm texels near the threshold
     out: list[Sighting] = []
     ts = frame_meta.get("ts") or datetime.now(UTC).isoformat()
     for pts in connected_components(mask):
