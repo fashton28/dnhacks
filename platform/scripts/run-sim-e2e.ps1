@@ -9,7 +9,7 @@
 #   - setup-ground.ps1 already run (Node/npm ready)
 #   - ArduPilot SITL set up inside WSL2 (run setup-sim.sh in WSL2 first)
 #   - Python 3.10+ available either:
-#       * in WSL2 (preferred — same venv created by setup-sim.sh), OR
+#       * in WSL2 (preferred -- same venv created by setup-sim.sh), OR
 #       * natively on Windows (with companion/.venv-win)
 #
 # Exit codes:
@@ -26,16 +26,42 @@
 #   EIS_E2E_TIMEOUT     Seconds to wait for companion  [60]
 #   EIS_SKIP_MANUAL     "1" to skip manual_test.py
 #   EIS_USE_NATIVE_PY   "1" to force native Windows Python instead of WSL2
+#
+# PowerShell version: runs under Windows PowerShell 5.1 AND PowerShell 7+.
+#
+#   This used to be 7-only by accident (FM-142): two null-coalescing `??`
+#   operators in the param block made the file unparseable under 5.1 — which is
+#   the DEFAULT `powershell.exe` on a stock Windows box — so the documented
+#   acceptance gate could not run at all, and it failed with six parser errors
+#   rather than anything that named the cause. `#Requires -Version 7` would not
+#   have helped: a parse error happens before a requires directive is honoured.
+#   The defaults below are resolved in 5.1-compatible syntax instead, so the
+#   gate runs on whatever PowerShell the operator happens to have.
+#
+#   Keep this file free of 7-only syntax: `??`, `?.`, `?:`, `&&`/`||` chains,
+#   `ConvertFrom-Json -AsHashtable`. Verify with:
+#     $e=$null; [System.Management.Automation.Language.Parser]::ParseFile(
+#       "scripts\run-sim-e2e.ps1",[ref]$null,[ref]$e); $e
 # ============================================================================
 param(
-    [string]$WsUrl      = $env:EIS_E2E_WS_URL    ?? "ws://127.0.0.1:8765",
-    [int]   $Timeout    = [int]($env:EIS_E2E_TIMEOUT ?? "60"),
-    [switch]$SkipManual = ($env:EIS_SKIP_MANUAL -eq "1"),
-    [switch]$UseNativePy = ($env:EIS_USE_NATIVE_PY -eq "1")
+    [string]$WsUrl = "",
+    [int]   $Timeout = 0,
+    [switch]$SkipManual,
+    [switch]$UseNativePy
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+# Environment defaults, resolved without 7-only operators (see the header).
+if (-not $WsUrl) {
+    $WsUrl = if ($env:EIS_E2E_WS_URL) { $env:EIS_E2E_WS_URL } else { "ws://127.0.0.1:8765" }
+}
+if ($Timeout -le 0) {
+    $Timeout = if ($env:EIS_E2E_TIMEOUT) { [int]$env:EIS_E2E_TIMEOUT } else { 60 }
+}
+if (-not $SkipManual)  { $SkipManual  = ($env:EIS_SKIP_MANUAL -eq "1") }
+if (-not $UseNativePy) { $UseNativePy = ($env:EIS_USE_NATIVE_PY -eq "1") }
 
 $RepoRoot  = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $WslPath   = "/mnt/" + ($RepoRoot -replace '\\', '/').ToLower().Replace('c:/', 'c/')

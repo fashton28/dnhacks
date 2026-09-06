@@ -54,6 +54,8 @@ import { dataSource, isHubMode, consoleUrl, fleetCapable } from '@/dataSource';
 import type { DemoScenario, FleetRow } from '@/dataSource';
 import { getSiteModel } from '@/site';
 import type { SiteModel } from '@/site';
+import type { RailHealth } from '@/cues';
+import { windContext } from '@/lib/wind';
 
 import { Toast, Tabs, Badge, Button } from '@/components';
 import {
@@ -96,6 +98,15 @@ import bakedAnomalies from '@satdata/anomalies.json';
    the site model loads). Once the site JSON is loaded, its home is used —
    plant geometry is never hardcoded (docs/SITE_CONTRACT.md). */
 const FALLBACK_HOME = { lat: 37.7699, lon: -122.4666 };
+
+/**
+ * How long an RF report stays part of the CURRENT airspace picture, ms.
+ * Mirrors `RF_POLICY.eventWindowS` in ground/planner and the 60 s correlation
+ * window in `rf_adapter`. The panel list was bounded by COUNT alone, so one
+ * hostile-drone report early in a session stayed on screen — and in the
+ * verifier's context — for the rest of it (FM-51).
+ */
+const RF_EVENT_WINDOW_MS = 60_000;
 
 /* Center-column view: classic flight ops, the mission (security) workspace, or the ARGUS 3D World view. */
 type CenterView = 'flight' | 'mission' | 'world';
@@ -188,6 +199,8 @@ function GroundControl(): JSX.Element {
   const [health, setHealth] = useState<Partial<Record<HealthEventMessage['component'], HealthEventMessage>>>({});
   const [rfEvents, setRfEvents] = useState<RfEventMessage[]>([]);
   const [spectrum, setSpectrum] = useState<SpectrumMessage | null>(null);
+  /** Per-rail cue badges (FM-180); empty on a provider that hosts no rails. */
+  const [railHealth, setRailHealth] = useState<RailHealth[]>([]);
   const [capabilities, setCapabilities] = useState<CapabilitiesMessage | null>(null);
   const [livePlanning, setLivePlanning] = useState(false);
   const [simulationToggles, setSimulationToggles] = useState<SimulationToggles>(() => ({
@@ -215,8 +228,20 @@ function GroundControl(): JSX.Element {
   /* Mission (anomaly → plan → verification → report) state + audit trail. */
   const mission = useMission();
   const autoSwitchedRef = useRef(false);
-  const liveStartedRef = useRef(false);
   const reportingRef = useRef(new Set<string>());
+
+  /* The live-inspection gate. The ref is the re-entrancy guard (a ref is read
+     synchronously, so two fast clicks cannot both pass it); the state is what
+     the button renders from, so clearing the latch actually re-enables it.
+     Before FM-81 this was a ref alone, set BEFORE the planner call and cleared
+     only in `catch`, so a resolved-but-rejected proposal latched the button
+     off for the life of the process. */
+  const liveStartedRef = useRef(false);
+  const [inspectionPlanned, setInspectionPlanned] = useState(false);
+  const setInspectionLatch = useCallback((value: boolean) => {
+    liveStartedRef.current = value;
+    setInspectionPlanned(value);
+  }, []);
 
   /* Connection config is owned by SettingsStore. The host shown in the status
      bar mirrors it; SITL collapses the host label to 'sitl'. */
@@ -291,7 +316,8 @@ function GroundControl(): JSX.Element {
     const offAn = ds.onAnomaly(m => {
       missionStore.ingestAnomaly(m.anomaly, m.vehicleId);
       appendFrame(m);
-      pushToast({ severity: 'warning', title: 'Satellite anomaly detected', message: m.anomaly.id });
+      if (ds.railHealth) setRailHealth(ds.railHealth());
+      pushToast({ severity: 'warning', title: `${m.anomaly.source} cue detected`, message: m.anomaly.id });
       if (!autoSwitchedRef.current) {
         autoSwitchedRef.current = true;
         setCenterView('mission');
@@ -369,9 +395,16 @@ function GroundControl(): JSX.Element {
       setHealth(current => ({ ...current, [m.component]: m }));
       appendFrame(m);
       missionStore.addAudit('health', `${m.component}: ${m.state} — ${m.detail}`, m.vehicleId);
+      // A rail's health changed; re-read the bus's own per-rail view for the
+      // cue badges (a HealthComponent is coarser than a rail — FM-180).
+      if (ds.railHealth) setRailHealth(ds.railHealth());
     });
     const offRf = ds.onRfEvent(m => {
-      setRfEvents(current => [...current.slice(-19), m]);
+      // Bounded by AGE as well as count: an RF report describes a moment, and
+      // one that has aged out of the window is history, not airspace (FM-51).
+      setRfEvents(current => [...current, m]
+        .filter(e => m.ts - e.ts <= RF_EVENT_WINDOW_MS)
+        .slice(-20));
       appendFrame(m);
       missionStore.addAudit('rf', `${m.source}/${m.kind} ${m.band} (${(m.confidence * 100).toFixed(0)}%)`, m.vehicleId);
     });
@@ -432,7 +465,9 @@ function GroundControl(): JSX.Element {
         setHealth(current => ({ ...current, [event.component]: event }));
         missionStore.addAudit('health', `${event.component}: ${event.state} — ${event.detail}`, event.vehicleId);
       } else {
-        setRfEvents(current => [...current.slice(-19), event]);
+        setRfEvents(current => [...current, event]
+          .filter(e => event.ts - e.ts <= RF_EVENT_WINDOW_MS)
+          .slice(-20));
         missionStore.addAudit('rf', `${event.source}/${event.kind} ${event.band} (${(event.confidence * 100).toFixed(0)}%)`, event.vehicleId);
         ds.forwardRfEvent?.(event);
       }
@@ -509,19 +544,54 @@ function GroundControl(): JSX.Element {
   const onMaxSpeed = (v: number) => { setMaxSpeed(v); cmd('setMaxSpeed', { mps: v }); };
 
   /* ----- mission flow: approve / deny / abort / report disposition -------- */
+  /**
+   * Approve = send `executePlan` and WAIT for the vehicle's ack (FM-42).
+   *
+   * The companion refuses `executePlan` for six documented reasons. Firing and
+   * forgetting made every one of them invisible: the operator read "Mission
+   * approved", the audit trail recorded it as dispatched, the approve button
+   * latched off, and the map drew a mission that never launched. Nothing is
+   * recorded as flown until the vehicle says it accepted; a refusal is a
+   * failure toast, an audit row naming the reason, and an approve gate that
+   * re-opens so the operator can fix the cause and try again.
+   */
   const doApprovePlan = (proposal: PlanProposal) => {
     if (readiness?.ready !== true) {
       pushToast({ severity: 'error', title: 'Mission approval blocked', message: readiness?.reasons.join('; ') || 'Readiness is unavailable' });
       return;
     }
     const plan = effectivePlan(proposal);
+    const requestId = proposal.plan.requestId;
     setManualActive(false); // exactly one controlSource — planner takes over
-    missionStore.noteApproval(proposal.plan.requestId, vehicleId);
-    cmd('executePlan', { plan });
-    pushToast({ severity: 'success', title: 'Mission approved', message: plan.requestId });
+    missionStore.noteApprovalSent(requestId, vehicleId);
+    pushToast({ severity: 'info', title: 'Mission sent', message: `Awaiting the vehicle's ack for ${plan.requestId}` });
+    void ds.sendCommand({ type: 'command', vehicleId, command: 'executePlan', params: { plan } })
+      .then((ack: CommandAck) => {
+        if (ack.success) {
+          missionStore.noteApproval(requestId, vehicleId);
+          pushToast({ severity: 'success', title: 'Mission accepted', message: plan.requestId });
+          return;
+        }
+        missionStore.noteExecuteRefused(requestId, ack.message, vehicleId);
+        pushToast({
+          severity: 'error', title: 'Mission REFUSED by the vehicle',
+          message: ack.message || 'no reason given — nothing was dispatched',
+        });
+      })
+      .catch((error: unknown) => {
+        // No ack at all is not an acceptance: the same refusal path applies.
+        missionStore.noteExecuteRefused(requestId, (error as Error).message, vehicleId);
+        pushToast({
+          severity: 'error', title: 'Mission dispatch failed',
+          message: (error as Error).message,
+        });
+      });
   };
   const doDenyPlan = (proposal: PlanProposal) => {
     missionStore.noteDenial(proposal.plan.requestId);
+    // Denial frees the inspection gate: the operator asked for a plan, read it,
+    // and said no. Latching them out of asking for another was FM-81.
+    setInspectionLatch(false);
     pushToast({ severity: 'info', title: 'Plan denied', message: proposal.plan.requestId });
   };
   const doAbortPlan = () => {
@@ -661,7 +731,6 @@ function GroundControl(): JSX.Element {
       });
       return;
     }
-    liveStartedRef.current = true;
     setLivePlanning(true);
     const anomaly = liveDemoAnomaly(mission.site);
     missionStore.ingestAnomaly(anomaly, tel.vehicleId);
@@ -677,8 +746,12 @@ function GroundControl(): JSX.Element {
       currentPosition: tel.position,
       currentAltitudeM: tel.position.relAlt,
       readiness: { ready: readiness.ready, reasons: readiness.reasons },
+      // Measured when the vehicle has reported one, otherwise the documented
+      // stand-in, tagged so the verifier can tell them apart (FM-72).
+      ...windContext(health.wind),
       anomaly,
       rfEvents,
+      now: Date.now(),
       ...(spectrum ? { sdrState: spectrum.state } : {}),
       ...(allSensors ? { sensors: allSensors } : {}),
       isNight: import.meta.env.VITE_EIS_DEMO_NIGHT === 'true',
@@ -694,18 +767,34 @@ function GroundControl(): JSX.Element {
         capabilities,
         context,
       });
+      // The deterministic planner can refuse a task outright, in which case
+      // there is no plan and no verdict to ingest — only a reason.
+      if (!result.plan || !result.verification) {
+        missionStore.addAudit('plan',
+          `Ground planner refused the task: ${result.infeasibleReason ?? result.escalationReason ?? 'no reason given'}`,
+          result.vehicleId);
+        pushToast({
+          severity: 'error', title: 'Planner refused the task',
+          message: result.infeasibleReason ?? result.escalationReason ?? 'no plan was produced',
+        });
+        return;
+      }
       missionStore.ingestPlan(result.plan, result.vehicleId);
       missionStore.ingestVerification(result.verification, result.vehicleId);
       missionStore.addAudit('plan', `Ground planner ${result.source}, ${result.attempts} attempt(s)${result.fallbackReason ? `; fallback: ${result.fallbackReason}` : ''}`, result.vehicleId);
       appendFrame({ type: 'missionPlan', ts: Date.now(), vehicleId: result.vehicleId, plan: result.plan });
       appendFrame({ type: 'verification', ts: Date.now(), vehicleId: result.vehicleId, verification: result.verification });
+      // Only a plan the operator can act on closes the inspection gate. A
+      // rejected verdict, a refused task and a thrown planner all leave it
+      // open, because in every one of those cases the next thing the operator
+      // needs is another attempt (FM-81).
+      setInspectionLatch(result.verification.verdict !== 'rejected');
       pushToast({
         severity: result.verification.verdict === 'rejected' ? 'error' : 'success',
         title: `Planner result: ${result.verification.verdict}`,
         message: result.escalationReason ?? result.plan.requestId,
       });
     } catch (error) {
-      liveStartedRef.current = false;
       pushToast({ severity: 'error', title: 'Planning failed', message: (error as Error).message });
     } finally {
       setLivePlanning(false);
@@ -844,11 +933,11 @@ function GroundControl(): JSX.Element {
             {ds.kind === 'live' && (
               <Button
                 variant="primary"
-                disabled={livePlanning || liveStartedRef.current || connState !== 'connected'}
+                disabled={livePlanning || inspectionPlanned || connState !== 'connected'}
                 onClick={() => void startLiveInspection()}
                 style={{ marginLeft: 'auto' }}
               >
-                {livePlanning ? 'Planning inspection…' : liveStartedRef.current ? 'Inspection planned' : 'Start scripted inspection'}
+                {livePlanning ? 'Planning inspection…' : inspectionPlanned ? 'Inspection planned' : 'Start scripted inspection'}
               </Button>
             )}
           </div>
@@ -945,7 +1034,7 @@ function GroundControl(): JSX.Element {
                   <div style={{ flex: 1, minHeight: 0 }}>
                     {sideView === 'observation'
                       ? <ObservationPanel observation={observation} sensorHealth={sensorHealth} />
-                      : <SatellitePanel anomalies={mission.anomalies} />}
+                      : <SatellitePanel anomalies={mission.anomalies} railHealth={railHealth} />}
                   </div>
                 </div>
               </div>

@@ -73,13 +73,15 @@ import {
   UNATTENDED_ENVELOPE,
   corridorMargin,
   nearestCorridorPoint,
-  withAttendanceChecks,
   withCorridorAndTrace,
 } from './scriptedRails';
 
-import { getSiteModel } from '@/site';
+import { getSiteModel, getRawSite } from '@/site';
 import type { SiteModel, SiteStagingPoint } from '@/site';
+import { createRendererCueBus, RAIL_LABEL } from '@/cues';
+import type { CueBus, RailHealth, RailId } from '@/cues';
 import { ScriptedPlanner } from '@planner/scripted';
+import { planMission } from '@planner/deterministic';
 import { verifyMission } from '@planner/verifier';
 import type { VerificationContext } from '@planner/verifier';
 import { writeIncidentReport } from '@planner/report';
@@ -631,7 +633,15 @@ export class MockDataProvider implements MissionDataSource {
     return events;
   }
 
+  /**
+   * The runtime context BOTH the deterministic planner and the verifier judge
+   * a plan with. It carries the fleet, the attendance mode and `now`, so the
+   * real verifier produces its own `attended` and `deconfliction` checks
+   * instead of having scripted stand-ins folded in over the top (FM-181), and
+   * so RF reports age out of the airspace picture (FM-51).
+   */
   private verifierContext(anomaly: Anomaly): VerificationContext {
+    const peer = this.peerFleetVehicle();
     return {
       telemetry: {
         battery: this.batteryState(), navSource: this.simulationToggles.simulateGpsLoss ? 'optflow' : 'gps',
@@ -640,11 +650,17 @@ export class MockDataProvider implements MissionDataSource {
       battery: this.batteryState(),
       navSource: this.simulationToggles.simulateGpsLoss ? 'optflow' : 'gps',
       currentPosition: { lat: this.s.lat, lon: this.s.lon }, currentAltitudeM: this.s.relAlt,
-      readiness: this.readinessMessage(), windMps: 4.2, anomaly,
+      readiness: this.readinessMessage(),
+      windMps: SCRIPTED_WIND_MPS, windSource: 'measured', anomaly,
       rfEvents: this.currentRfEvents(),
       sdrState: this.simulationToggles.simulateRfInterference ? 'degraded' : 'nominal',
       sensors: this.sensorHealth(), isNight: this.simulationToggles.simulateNight,
       maxSortieS: 480, dispatchMinSocPct: 80,
+      mode: this.attendance,
+      vehicleId: DEFAULT_VEHICLE_ID,
+      fleet: [peer],
+      fleetTs: now(),
+      now: now(),
     };
   }
 
@@ -744,7 +760,16 @@ export class MockDataProvider implements MissionDataSource {
       : { lat: this.homeLat() + 0.0004, lon: this.homeLon() + 0.0004 };
   }
 
-  /** The peer's own cleared corridor, from the same deterministic planner. */
+  /**
+   * The peer's own cleared corridor, from the SAME deterministic planner the
+   * primary vehicle's plans come from (FM-181) — the corridor the verifier's
+   * `deconfliction` check separates against must be one the planner could
+   * actually have produced.
+   *
+   * The peer's context is deliberately peer-free: a corridor is what a vehicle
+   * was cleared for, and deriving it from a context that already contains the
+   * peer would make each vehicle's corridor depend on the other's.
+   */
   private ensurePeerPlan(): MissionPlan | null {
     if (this.peer.plan) return this.peer.plan;
     const site = this.site;
@@ -756,7 +781,30 @@ export class MockDataProvider implements MissionDataSource {
       type: 'patrol', confidence: 0.5, thumbnail: '', source: 'drone_survey',
       observedAt: now(), ttl_s: SCRIPTED_CUE_TTL_S,
     };
-    this.peer.plan = withCorridorAndTrace(this.planner.passingPlan(site, cue), site);
+    const task: Task = {
+      taskId: `task-${cue.id}`, anomalyId: cue.id, lookFor: 'unknown',
+      question: `What is at the ${cue.source} cue ${cue.id}?`,
+      urgency: 'next_sortie', priority: 0.5,
+      rationale: 'Peer patrol pass; the corridor this vehicle is cleared for.',
+      source: 'scripted', assignedTo: PEER_VEHICLE_ID,
+    };
+    // Built inline rather than from `verifierContext()`: that helper embeds the
+    // peer's own fleet row, which would recurse straight back into this method.
+    const context: VerificationContext = {
+      navSource: 'gps',
+      battery: this.peerBatteryState(),
+      readiness: { ready: true, reasons: [] },
+      currentPosition: { lat: this.peer.lat, lon: this.peer.lon },
+      currentAltitudeM: this.peer.relAlt,
+      windMps: SCRIPTED_WIND_MPS, windSource: 'measured',
+      anomaly: cue, rfEvents: [], sdrState: 'nominal',
+      sensors: { rgb: 'ok', thermal: 'ok', lidar: 'ok' }, isNight: false,
+      maxSortieS: 480, dispatchMinSocPct: 80,
+      mode: 'attended', vehicleId: PEER_VEHICLE_ID, fleet: [], now: now(),
+    };
+    const outcome = planMission({ task, anomaly: cue, site, context });
+    if (outcome.infeasible) return null;
+    this.peer.plan = withCorridorAndTrace(outcome.plan, site);
     return this.peer.plan;
   }
 
@@ -1199,6 +1247,54 @@ export class MockDataProvider implements MissionDataSource {
       this.s.lat = site.home.lat;
       this.s.lon = site.home.lon;
     }
+    this.startCueRails();
+  }
+
+  /* ---- cue rails (eis-cues CueBus) -------------------------------------- *
+   * Every rail behind ONE bus, onto the two wire messages the UI already
+   * speaks (FM-180). The bus adds no message type: `anomaly` reaches the map
+   * and the cue list exactly as the scripted scenario's own cue does, and
+   * `healthEvent` drives the rail badges.
+   *
+   * `sentinel2` is deliberately NOT wired here: the scripted mission scenario
+   * IS the optical rail's replay, re-anchored to the loaded site, and wiring
+   * the fixture as well would raise the same cue twice at two coordinates. */
+  private cueBus: CueBus | null = null;
+  private cueRailHealth = new Map<RailId, RailHealth>();
+
+  private startCueRails(): void {
+    if (this.cueBus) return;
+    const bus = createRendererCueBus({
+      vehicleId: DEFAULT_VEHICLE_ID,
+      site: getRawSite(),
+      rails: ['sar', 'sdr', 'rf_drone', 'cctv', 'fence_sensor', 'drone_survey'],
+    });
+    this.cueBus = bus;
+    bus.onAnomaly((m) => {
+      this._emit('anom', m);
+      this.log('warning',
+        `${RAIL_LABEL[m.anomaly.source as RailId] ?? m.anomaly.source} cue ${m.anomaly.id} ` +
+        `(${m.anomaly.type}, conf ${(m.anomaly.confidence * 100).toFixed(0)}%)`);
+    });
+    bus.onHealth((m) => {
+      this._emit('health', m);
+      this.refreshRailHealth();
+    });
+    bus.onRejection((reason, m) => {
+      this.log(reason === 'budget' ? 'warning' : 'info',
+        `Cue ${m.anomaly.id} from ${m.anomaly.source} refused by the bus: ${reason}`);
+    });
+    void bus.start().then(() => this.refreshRailHealth());
+  }
+
+  private refreshRailHealth(): void {
+    for (const health of this.cueBus?.health() ?? []) this.cueRailHealth.set(health.rail, health);
+  }
+
+  /** Per-rail badges: what each cue rail is doing right now. */
+  railHealth(): RailHealth[] {
+    this.refreshRailHealth();
+    return [...this.cueRailHealth.values()];
   }
 
   private scheduleScenario(): void {
@@ -1243,7 +1339,6 @@ export class MockDataProvider implements MissionDataSource {
         if (this._scnFailing) {
           const v = this.dressVerification(
             verifyMission(this._scnFailing, site, this.verifierContext(this._scnAnomaly ?? this.deriveAnomaly(site))),
-            this._scnFailing,
           );
           this._emit('verf', {
             type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification: v,
@@ -1253,29 +1348,16 @@ export class MockDataProvider implements MissionDataSource {
         }
       } else if (step === 3) {
         if (this._scnAnomaly) {
-          const bridge = window.eis?.plannerPropose;
-          if (bridge) {
-            const result = await bridge({
-              vehicleId: DEFAULT_VEHICLE_ID,
-              anomaly: this._scnAnomaly,
-              capabilities: this.capabilitiesMessage(),
-              context: this.verifierContext(this._scnAnomaly),
+          const proposal = await this.proposePlan(
+            site, this._scnAnomaly, this._scnTasks[0] ?? this.scriptedTasksFor(this._scnAnomaly)[0]);
+          if (proposal) {
+            this._scnPassing = proposal.plan;
+            this._scnPassingVerification = proposal.verification;
+            this._emit('plan', {
+              type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan: proposal.plan,
             });
-            this._scnPassing = this.dressPlan(result.plan, site);
-            this._scnPassingVerification = this.dressVerification(result.verification, this._scnPassing);
-            if (result.fallbackReason) this.log('warning', `Live planner fallback: ${result.fallbackReason}`);
-            if (result.escalationReason) this.log('error', result.escalationReason);
-          } else {
-            this._scnPassing = this.dressPlan(this.planner.passingPlan(site, this._scnAnomaly), site);
-            this._scnPassingVerification = this.dressVerification(
-              verifyMission(this._scnPassing, site, this.verifierContext(this._scnAnomaly)),
-              this._scnPassing,
-            );
+            this.log('info', `Planner proposed mission ${proposal.plan.requestId}`);
           }
-          this._emit('plan', {
-            type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan: this._scnPassing,
-          });
-          this.log('info', `Planner proposed mission ${this._scnPassing.requestId}`);
         }
       } else if (step === 4) {
         if (this._scnPassing && this._scnPassingVerification) {
@@ -1329,40 +1411,75 @@ export class MockDataProvider implements MissionDataSource {
    * real MissionVerifier; these methods only decide WHEN a beat happens and
    * under WHAT conditions, never what geometry is flown. */
 
-  /** Attach the corridor + rule trace the deterministic planner does not emit
-   *  yet (see scriptedRails.ts). The plan's geometry is never changed. */
+  /**
+   * The plan the operator is shown, from the DETERMINISTIC planner and the
+   * REAL verifier (FM-181).
+   *
+   * Inside the Electron shell the host's `planner:propose` runs exactly this
+   * pipeline in the main process, so it is preferred; in the browser dev
+   * server the same `planMission` + `verifyMission` run in-process. Either way
+   * `ScriptedPlanner` is not involved: its only remaining job is the
+   * deliberately-invalid plan the verifier must refuse (DEMO_RUNBOOK R1).
+   *
+   * Returns null when the rule table refuses the task — an infeasible task has
+   * no plan to show, and inventing one to display would be the whole point of
+   * having a deterministic planner thrown away.
+   */
+  private async proposePlan(site: SiteModel, anomaly: Anomaly, task: Task, requestId?: string):
+  Promise<{ plan: MissionPlan; verification: Verification } | null> {
+    const context = this.verifierContext(anomaly);
+    const bridge = window.eis?.plannerPropose;
+    if (bridge) {
+      const result = await bridge({
+        vehicleId: DEFAULT_VEHICLE_ID, anomaly,
+        capabilities: this.capabilitiesMessage(), context,
+      });
+      if (result.escalationReason) this.log('error', result.escalationReason);
+      if (!result.plan || !result.verification) {
+        this.log('error',
+          `Planner refused the task: ${result.infeasibleReason ?? 'no plan was produced'}`);
+        return null;
+      }
+      const plan = requestId ? { ...result.plan, requestId } : result.plan;
+      return {
+        plan: this.dressPlan(plan, site),
+        verification: this.dressVerification({ ...result.verification, requestId: plan.requestId }),
+      };
+    }
+    const outcome = planMission({ task, anomaly, site, context, ...(requestId ? { requestId } : {}) });
+    if (outcome.infeasible) {
+      this.log('error', `Planner refused the task: ${outcome.reason}`);
+      return null;
+    }
+    const plan = this.dressPlan(outcome.plan, site);
+    return { plan, verification: this.dressVerification(verifyMission(plan, site, context)) };
+  }
+
+  /** Attach the corridor + rule trace, for a plan that does not carry its own.
+   *  The deterministic planner emits both, so this is a no-op for its output
+   *  and only dresses the scripted bad-plan demo rail. Geometry is untouched. */
   private dressPlan(plan: MissionPlan, site: SiteModel): MissionPlan {
     return withCorridorAndTrace(plan, site, this._scnTasks[0] ?? null);
   }
 
-  /** Fold in the `attended` + `deconfliction` checks the verifier does not
-   *  produce yet. They can only ever make a verdict stricter. */
-  private dressVerification(v: Verification, plan: MissionPlan): Verification {
-    const site = this.site;
-    if (!site) return v;
-    const sensors = this.sensorHealth();
-    const toggles = this.simulationToggles;
-    const peerCorridor = this.peer.flying ? this.ensurePeerPlan()?.corridor : undefined;
-    return withAttendanceChecks(
-      v,
-      {
-        mode: this.attendance,
-        operatorPresent: this.operatorPresent,
-        plan,
-        site,
-        navSourceIsGps: !toggles.simulateGpsLoss,
-        rfInterference: toggles.simulateRfInterference,
-        hostileDrone: toggles.simulateHostileDrone && !this.hostileOverride,
-        nightWithoutThermal: toggles.simulateNight && sensors.thermal !== 'ok',
-        windMps: SCRIPTED_WIND_MPS,
-      },
-      {
-        corridor: plan.corridor,
-        peerCorridor,
-        peerDataTs: peerCorridor ? now() : undefined,
-        now: now(),
-      },
-    );
+  /**
+   * The verifier now produces `attended` and `deconfliction` itself, from the
+   * fleet and attendance mode in `verifierContext` (FM-181), so its verdict is
+   * passed through unchanged. The one thing it cannot know is whether a HUMAN
+   * is at the console: attendance mode is the vehicle's, operator presence is
+   * the ground station's, and an attended mission whose operator has walked
+   * away has an approval that has expired. That single rule is overlaid here,
+   * and it can only ever make a verdict stricter.
+   */
+  private dressVerification(v: Verification): Verification {
+    if (this.attendance !== 'attended' || this.operatorPresent) return v;
+    const checks = v.checks.map((check) => check.name === 'attended'
+      ? {
+          name: 'attended', ok: false,
+          reason: 'operator is not present and the mission is attended — approval has expired',
+        }
+      : check);
+    return { ...v, checks, verdict: 'rejected', correctedPlan: undefined, holdUntil: undefined };
   }
 
   /** Re-run triage. The operator's note is carried into the task rationale —
@@ -1400,31 +1517,32 @@ export class MockDataProvider implements MissionDataSource {
       `Operator moved cue ${moved.id}${zone ? ` into no-fly zone "${zone.name}"` : ''} — re-planning`);
 
     this.replans += 1;
-    const planned = this.planner.passingPlan(site, moved);
+    const task = this._scnTasks[0] ?? this.scriptedTasksFor(moved)[0];
     // requestId is ground-side correlation ONLY (ADR D7): suffixing it keeps
     // each re-plan a distinct proposal in the verifier panel's history.
-    const plan = this.dressPlan(
-      { ...planned, requestId: `${planned.requestId}-replan-${this.replans}` },
-      site,
-    );
-    this._emit('plan', { type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan });
-    const verification = this.dressVerification(
-      verifyMission(plan, site, this.verifierContext(moved)), plan,
-    );
-    this._emit('verf', {
-      type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification,
-    });
-    this.log(verification.verdict === 'rejected' ? 'error' : 'info',
-      `MissionVerifier: ${plan.requestId} → ${verification.verdict.toUpperCase()}` +
-      (verification.verdict === 'rejected'
-        ? ` (${verification.checks.filter((c) => !c.ok).map((c) => c.name).join(', ')})`
-        : ''));
-    if (verification.verdict === 'rejected') {
-      this.raiseEscalation(plan.requestId, 'plan_refused_after_operator_move', {
-        anomalyId: moved.id,
-        failedChecks: verification.checks.filter((c) => !c.ok).map((c) => c.name),
+    const requestId = `plan-${task.taskId}-replan-${this.replans}`;
+    void this.proposePlan(site, moved, task, requestId).then((proposal) => {
+      if (!proposal) {
+        this.raiseEscalation(requestId, 'plan_refused_after_operator_move', { anomalyId: moved.id });
+        return;
+      }
+      const { plan, verification } = proposal;
+      this._emit('plan', { type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan });
+      this._emit('verf', {
+        type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification,
       });
-    }
+      this.log(verification.verdict === 'rejected' ? 'error' : 'info',
+        `MissionVerifier: ${plan.requestId} → ${verification.verdict.toUpperCase()}` +
+        (verification.verdict === 'rejected'
+          ? ` (${verification.checks.filter((c) => !c.ok).map((c) => c.name).join(', ')})`
+          : ''));
+      if (verification.verdict === 'rejected') {
+        this.raiseEscalation(plan.requestId, 'plan_refused_after_operator_move', {
+          anomalyId: moved.id,
+          failedChecks: verification.checks.filter((c) => !c.ok).map((c) => c.name),
+        });
+      }
+    });
   }
 
   /** One scripted beat. Each is a real condition, never a doctored readout. */
@@ -1545,35 +1663,39 @@ export class MockDataProvider implements MissionDataSource {
     };
     this.emitTasks([task]);
 
-    const planned = this.planner.passingPlan(site, anomaly);
-    const plan = this.dressPlan(
-      { ...planned, requestId: `${planned.requestId}-unattended-${this.replans}` }, site,
-    );
-    this._emit('plan', { type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan });
-    const verification = this.dressVerification(
-      verifyMission(plan, site, this.verifierContext(anomaly)), plan,
-    );
-    this._emit('verf', {
-      type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification,
-    });
-
-    if (verification.verdict === 'rejected') {
-      const attended = verification.checks.find((c) => c.name === 'attended');
-      this.log('error', `Unattended dispatch REFUSED — ${attended?.reason ?? 'outside the envelope'}`);
-      this.raiseEscalation(plan.requestId, 'unattended_dispatch_refused', {
-        taskId: task.taskId,
-        failedChecks: verification.checks.filter((c) => !c.ok).map((c) => c.name),
+    const requestId = `plan-${task.taskId}`;
+    void this.proposePlan(site, anomaly, task, requestId).then((proposal) => {
+      if (!proposal) {
+        // The rule table refused before a plan existed — an unattended refusal
+        // is exactly what a human needs to see, so it still escalates.
+        this.raiseEscalation(requestId, 'unattended_dispatch_refused', { taskId: task.taskId });
+        return;
+      }
+      const { plan, verification } = proposal;
+      this._emit('plan', { type: 'missionPlan', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, plan });
+      this._emit('verf', {
+        type: 'verification', ts: now(), vehicleId: DEFAULT_VEHICLE_ID, verification,
       });
-      return;
-    }
-    if (verification.holdUntil && verification.holdUntil > now()) {
-      this.log('warning',
-        `Unattended dispatch held until ${new Date(verification.holdUntil).toLocaleTimeString()} — deconfliction`);
-      return;
-    }
-    this.log('warning', `Unattended auto-dispatch of ${plan.requestId} (no operator gate)`);
-    void this.sendCommand({
-      type: 'command', vehicleId: DEFAULT_VEHICLE_ID, command: 'executePlan', params: { plan },
+
+      if (verification.verdict === 'rejected') {
+        const attended = verification.checks.find((c) => c.name === 'attended');
+        this.log('error', `Unattended dispatch REFUSED — ${attended?.reason ?? 'outside the envelope'}`);
+        this.raiseEscalation(plan.requestId, 'unattended_dispatch_refused', {
+          taskId: task.taskId,
+          failedChecks: verification.checks.filter((c) => !c.ok).map((c) => c.name),
+        });
+        return;
+      }
+      if (verification.holdUntil && verification.holdUntil > now()) {
+        this.log('warning',
+          `Unattended dispatch held until ${new Date(verification.holdUntil).toLocaleTimeString()} — deconfliction`);
+        return;
+      }
+      this.log('warning', `Unattended auto-dispatch of ${plan.requestId} (no operator gate)`);
+      void this.sendCommand({
+        type: 'command', vehicleId: DEFAULT_VEHICLE_ID, command: 'executePlan',
+        params: { plan: verification.correctedPlan ?? plan },
+      });
     });
   }
 
@@ -1994,6 +2116,16 @@ export class MockDataProvider implements MissionDataSource {
     this._tel = this._trk = this._amb = this._env = null;
     if (this._scnTimer) clearTimeout(this._scnTimer);
     this._scnTimer = null; // scenario PROGRESS survives reconnects
+    // Stop the rails, then take one last health snapshot so the badges show
+    // `stopped` rather than freezing on the last healthy reading.
+    const bus = this.cueBus;
+    this.cueBus = null;
+    if (bus) {
+      void bus.stop().then(() => {
+        for (const health of bus.health()) this.cueRailHealth.set(health.rail, health);
+        bus.dispose();
+      });
+    }
     this._started = false;
   }
 

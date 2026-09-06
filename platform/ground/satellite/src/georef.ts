@@ -60,6 +60,52 @@ export function distanceMeters(
   return 2 * EARTH_RADIUS_M * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
+/**
+ * Is this point inside the tile's own bounds? (FM-109)
+ *
+ * `latLonToPixel` is a linear map with no clamp, so a point outside the bounds
+ * extrapolates happily to a negative or over-width pixel coordinate. A panel
+ * that converts that straight to a CSS percentage draws a marker off the image
+ * with nothing to say it is off-frame, which reads as "the anomaly is at the
+ * edge of the tile" rather than "the anomaly is not on this tile at all". The
+ * caller asks first and labels the answer.
+ *
+ * Inclusive on every edge: a cue exactly on the north edge is on the tile.
+ */
+export function inBounds(lat: number, lon: number, g: GeoRefTiles): boolean {
+  const { north, south, east, west } = g.boundsLatLon;
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false;
+  return lat >= south && lat <= north && lon >= west && lon <= east;
+}
+
+/** Projection plus the on-tile answer, so a caller cannot use one without the other. */
+export interface TileProjection {
+  x: number;
+  y: number;
+  /** True when the source point lies inside `boundsLatLon`. */
+  onTile: boolean;
+  /** `x`/`y` clamped to the tile, so an off-tile marker still has somewhere to sit. */
+  clampedX: number;
+  clampedY: number;
+}
+
+/**
+ * Project a point onto the tile and say whether it actually belongs there.
+ * The clamped coordinates put an off-tile marker on the nearest edge — visible,
+ * and (with the `onTile` flag driving the badge) never mistaken for a hit.
+ */
+export function projectToTile(lat: number, lon: number, g: GeoRefTiles): TileProjection {
+  const { x, y } = latLonToPixel(lat, lon, g);
+  const clamp = (value: number, max: number): number =>
+    Number.isFinite(value) ? Math.min(max, Math.max(0, value)) : max / 2;
+  return {
+    x, y,
+    onTile: inBounds(lat, lon, g),
+    clampedX: clamp(x, g.widthPx),
+    clampedY: clamp(y, g.heightPx),
+  };
+}
+
 /** Basic sanity validation of a tiles.json object. Throws on bad shape. */
 export function validateGeoRef(g: GeoRefTiles): GeoRefTiles {
   const b = g?.boundsLatLon;

@@ -61,13 +61,6 @@ interface ElectronBridge {
   /** Raw JSON text of the EIS_SITE_FILE-selected site model (docs/SITE_CONTRACT.md). */
   loadSiteFile(): Promise<string>;
   resolveSiteAsset(path: string): Promise<string | null>;
-  /** Baked satellite change-detection assets; null → fall back to dev-server fetch. */
-  loadSatelliteTiles(): Promise<{
-    beforePng: string;
-    afterPng: string;
-    tilesJson: string;
-    anomaliesJson: string | null;
-  } | null>;
   plannerPropose(input: unknown): Promise<unknown>;
   plannerReport(input: unknown): Promise<unknown>;
   onPlannerEvent(callback: (event: unknown) => void): () => void;
@@ -143,19 +136,6 @@ const bridge: ElectronBridge = {
   },
   resolveSiteAsset(path: string): Promise<string | null> {
     return ipcRenderer.invoke('site:resolveAsset', path) as Promise<string | null>;
-  },
-  loadSatelliteTiles(): Promise<{
-    beforePng: string;
-    afterPng: string;
-    tilesJson: string;
-    anomaliesJson: string | null;
-  } | null> {
-    return ipcRenderer.invoke('satellite:loadTiles') as Promise<{
-      beforePng: string;
-      afterPng: string;
-      tilesJson: string;
-      anomaliesJson: string | null;
-    } | null>;
   },
   plannerPropose(input: unknown): Promise<unknown> {
     return ipcRenderer.invoke('planner:propose', input) as Promise<unknown>;

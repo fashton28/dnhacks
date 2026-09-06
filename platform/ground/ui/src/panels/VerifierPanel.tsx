@@ -9,7 +9,7 @@ import { Check, Clock, X, ShieldCheck, ShieldAlert, ShieldX } from 'lucide-react
 import { Panel, Badge, Button, HoldButton } from '@/components';
 import type { MissionPlan, PlanTool, Verification } from '@/contract';
 import type { PlanProposal } from '@/store';
-import { effectivePlan } from '@/store';
+import { approvalPending, effectivePlan } from '@/store';
 
 export interface VerifierPanelProps {
   proposals: PlanProposal[];
@@ -94,9 +94,14 @@ export function VerifierPanel({
   }, [holdUntil]);
   const holdLeftS = holdUntil && holdUntil > nowMs ? Math.ceil((holdUntil - nowMs) / 1000) : 0;
 
+  /* A dispatch the vehicle has not answered yet is neither approved nor
+     refused: the gate stays shut while the ack is outstanding, and re-opens if
+     the vehicle refuses, so the operator can fix the cause and try again
+     (FM-42). */
+  const pending = !!selected && approvalPending(selected);
   const approvable =
     !!selected && !!v && (v.verdict === 'pass' || v.verdict === 'corrected') &&
-    !selected.approvedAt && !selected.deniedAt && !executing && readinessReady &&
+    !selected.approvedAt && !selected.deniedAt && !pending && !executing && readinessReady &&
     holdLeftS === 0;
 
   return (
@@ -248,13 +253,15 @@ export function VerifierPanel({
                   holdMs={900}
                   disabled={!approvable}
                   hint={
-                    selected.approvedAt ? 'Approved' :
+                    selected.approvedAt ? 'Accepted by the vehicle' :
+                    pending ? 'Sent — awaiting the vehicle\'s ack' :
                     selected.deniedAt ? 'Denied' :
                     executing ? 'Mission in progress' :
                     !v ? 'Awaiting verification' :
                     v.verdict === 'rejected' ? 'Rejected by verifier' :
                     holdLeftS > 0 ? `Dispatch held for ${holdLeftS} s` :
                     !readinessReady ? `Readiness blocked: ${readinessReasons.join('; ')}` :
+                    selected.refusedAt ? 'Refused by the vehicle — hold to send again' :
                     'Hold to approve'
                   }
                   icon={
@@ -278,6 +285,22 @@ export function VerifierPanel({
               {v?.verdict === 'corrected' && (
                 <div style={{ fontSize: 10, color: 'var(--text-tertiary)', marginTop: 6 }}>
                   Approving sends the verifier-corrected plan ({effectivePlan(selected).requestId}).
+                </div>
+              )}
+              {pending && (
+                <div style={{ fontSize: 10, color: 'var(--caution-fg)', marginTop: 6 }}>
+                  executePlan sent — nothing has launched until the vehicle acks it.
+                </div>
+              )}
+              {selected.refusedAt !== undefined && !selected.approvedAt && (
+                <div style={{
+                  marginTop: 6, padding: '5px 8px',
+                  background: 'var(--red-tint)', border: '1px solid var(--red-line)',
+                  borderRadius: 'var(--radius-sm)',
+                  color: 'var(--danger-fg)', fontSize: 11, lineHeight: 1.5,
+                }}>
+                  Vehicle REFUSED this dispatch: {selected.refusedReason || 'no reason given'}.
+                  Nothing launched.
                 </div>
               )}
             </div>

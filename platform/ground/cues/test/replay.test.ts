@@ -166,7 +166,11 @@ describe('satellite, fence and survey replay', () => {
     scheduler.advance(2_000);
     expect(seen.anomalies).toHaveLength(1);
     expect(seen.anomalies[0].anomaly).toMatchObject({
-      id: 'sar-sar-change-1', source: 'sar', type: 'sar_log_ratio_change', ttl_s: 43_200,
+      // The cue kind names the direction of the backscatter change; the baked
+      // chips brighten. It never carries the intensity chip's JSON path as a
+      // thumbnail, which the incident report would render as image evidence.
+      id: 'sar-sar-change-1', source: 'sar', type: 'sar_backscatter_increase', ttl_s: 43_200,
+      thumbnail: '',
     });
   });
 

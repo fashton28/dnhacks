@@ -6,8 +6,10 @@
 import React from 'react';
 import { Panel, Badge, Tabs, Toggle } from '@/components';
 import type { Anomaly } from '@/contract';
-import { detectAnomalies, latLonToPixel, validateGeoRef } from '@satellite/index';
+import { detectAnomalies, projectToTile, validateGeoRef } from '@satellite/index';
 import type { DetectResult, GeoRefTiles } from '@satellite/index';
+import { RAIL_LABEL, pinColourFor } from '@/cues';
+import type { RailHealth, RailId } from '@/cues';
 import tilesMeta from '@satdata/tiles.json';
 import beforeUrl from '@satdata/before.png';
 import afterUrl from '@satdata/after.png';
@@ -40,9 +42,21 @@ async function rgbaFromUrl(url: string): Promise<DecodedTile> {
 
 export interface SatellitePanelProps {
   anomalies: Anomaly[];
+  /** Per-rail health for the badge strip; omitted when no rails are wired. */
+  railHealth?: RailHealth[];
 }
 
-export function SatellitePanel({ anomalies }: SatellitePanelProps): React.ReactElement {
+/** Badge tone for a rail's health state. */
+const RAIL_TONE: Record<string, 'nominal' | 'caution' | 'danger' | 'outline'> = {
+  healthy: 'nominal',
+  degraded: 'caution',
+  warning: 'caution',
+  failed: 'danger',
+  stopped: 'outline',
+  starting: 'outline',
+};
+
+export function SatellitePanel({ anomalies, railHealth = [] }: SatellitePanelProps): React.ReactElement {
   const [view, setView] = React.useState<TileView>('after');
   const [showDiff, setShowDiff] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
@@ -115,18 +129,27 @@ export function SatellitePanel({ anomalies }: SatellitePanelProps): React.ReactE
     ctx.putImageData(img, 0, 0);
   }, [detect, tiles]);
 
+  /* Cue markers. A cue outside the tile's bounds extrapolates to a pixel
+     coordinate off the image, which a percentage-based marker draws somewhere
+     it cannot be seen with nothing to say it is off-frame (FM-109). Off-tile
+     cues are CLAMPED to the nearest edge and labelled, so the operator sees
+     "this cue is not on this tile" rather than an edge hit. */
   const markers = React.useMemo(() => {
     if (!georef) return [];
     return anomalies.map((a) => {
-      const p = latLonToPixel(a.lat, a.lon, georef);
+      const p = projectToTile(a.lat, a.lon, georef);
       return {
         id: a.id,
-        left: (p.x / georef.widthPx) * 100,
-        top: (p.y / georef.heightPx) * 100,
+        left: (p.clampedX / georef.widthPx) * 100,
+        top: (p.clampedY / georef.heightPx) * 100,
         conf: a.confidence,
+        source: a.source,
+        colour: pinColourFor(a.source),
+        onTile: p.onTile,
       };
     });
   }, [anomalies, georef]);
+  const offTile = markers.filter((m) => !m.onTile).length;
 
   return (
     <Panel
@@ -134,11 +157,18 @@ export function SatellitePanel({ anomalies }: SatellitePanelProps): React.ReactE
       variant="sunken"
       pad={false}
       status={
-        detect
-          ? <Badge tone={detect.anomalies.length > 0 ? 'caution' : 'nominal'} mono>
-              {detect.anomalies.length} CHANGE{detect.anomalies.length === 1 ? '' : 'S'}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          {offTile > 0 && (
+            <Badge tone="caution" mono>
+              {offTile} OFF-TILE
             </Badge>
-          : <Badge tone="outline" mono>…</Badge>
+          )}
+          {detect
+            ? <Badge tone={detect.anomalies.length > 0 ? 'caution' : 'nominal'} mono>
+                {detect.anomalies.length} CHANGE{detect.anomalies.length === 1 ? '' : 'S'}
+              </Badge>
+            : <Badge tone="outline" mono>…</Badge>}
+        </div>
       }
       actions={
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
@@ -189,16 +219,20 @@ export function SatellitePanel({ anomalies }: SatellitePanelProps): React.ReactE
             {markers.map((m) => (
               <div
                 key={m.id}
-                title={`${m.id} · conf ${(m.conf * 100).toFixed(0)}%`}
+                title={
+                  `${m.id} · ${RAIL_LABEL[m.source as RailId] ?? m.source} · conf ${(m.conf * 100).toFixed(0)}%` +
+                  (m.onTile ? '' : ' · OFF-TILE: this cue lies outside these tile bounds')
+                }
                 style={{
                   position: 'absolute',
                   left: `${m.left}%`,
                   top: `${m.top}%`,
                   transform: 'translate(-50%, -50%)',
                   width: 26, height: 26,
-                  border: '1.5px solid var(--amber-bright)',
+                  border: `1.5px ${m.onTile ? 'solid' : 'dashed'} ${m.colour}`,
                   borderRadius: '50%',
-                  boxShadow: '0 0 10px rgba(245,166,35,0.5)',
+                  boxShadow: m.onTile ? `0 0 10px ${m.colour}80` : 'none',
+                  opacity: m.onTile ? 1 : 0.55,
                   pointerEvents: 'none',
                 }}
               >
@@ -206,17 +240,55 @@ export function SatellitePanel({ anomalies }: SatellitePanelProps): React.ReactE
                   style={{
                     position: 'absolute', left: '50%', top: -16, transform: 'translateX(-50%)',
                     fontFamily: 'var(--font-mono)', fontSize: 9, whiteSpace: 'nowrap',
-                    color: 'var(--amber-bright)', background: 'rgba(8,12,16,0.75)',
+                    color: m.colour, background: 'rgba(8,12,16,0.75)',
                     padding: '1px 4px', borderRadius: 3,
                   }}
                 >
-                  {m.id}
+                  {m.onTile ? m.id : `${m.id} · off-tile`}
                 </span>
               </div>
             ))}
           </div>
         )}
       </div>
+
+      {/* Cue-rail badges. Every rail behind the one bus, each in its own pin
+          colour so the badge and the map marker read as the same rail. */}
+      {railHealth.length > 0 && (
+        <div style={{
+          position: 'absolute', left: 0, right: 0, bottom: 0,
+          display: 'flex', flexWrap: 'wrap', gap: 4,
+          padding: '5px 8px',
+          background: 'linear-gradient(to top, rgba(8,12,16,0.92), rgba(8,12,16,0))',
+        }}>
+          {railHealth.map((rail) => (
+            <span
+              key={rail.rail}
+              title={rail.detail}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: 4,
+                padding: '1px 6px', borderRadius: 'var(--radius-pill)',
+                border: `1px solid ${pinColourFor(rail.rail)}`,
+                color: pinColourFor(rail.rail),
+                fontFamily: 'var(--font-mono)', fontSize: 9,
+                opacity: rail.state === 'healthy' ? 1 : 0.6,
+              }}
+            >
+              <span style={{
+                width: 5, height: 5, borderRadius: '50%',
+                background: rail.state === 'healthy' ? pinColourFor(rail.rail)
+                  : rail.state === 'failed' ? 'var(--danger-fg)' : 'var(--caution-fg)',
+              }} />
+              {RAIL_LABEL[rail.rail]}
+              {rail.counts.emitted > 0 ? ` ${rail.counts.emitted}` : ''}
+            </span>
+          ))}
+        </div>
+      )}
     </Panel>
   );
 }
+
+/* `RAIL_TONE` is exported for panels that render a rail badge with the shared
+   Badge component rather than the inline pill above. */
+export { RAIL_TONE };

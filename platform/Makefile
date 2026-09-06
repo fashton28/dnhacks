@@ -33,6 +33,7 @@ SHELL := /bin/bash
 # Paths
 REPO_ROOT := $(shell pwd)
 COMPANION_DIR := $(REPO_ROOT)/companion
+PLANNER_DIR   := $(REPO_ROOT)/ground/planner
 UI_DIR        := $(REPO_ROOT)/ground/ui
 APP_WIN_DIR   := $(REPO_ROOT)/ground/app/windows
 APP_LINUX_DIR := $(REPO_ROOT)/ground/app/linux
@@ -44,7 +45,8 @@ CYAN  := \033[36m
 RESET := \033[0m
 
 .PHONY: help setup setup-ground setup-ground-linux setup-sim setup-jetson sim e2e \
-        build-ground build-ground-linux build-companion lint test clean
+        build-ground build-ground-linux check-ground-artefacts build-companion \
+        lint test clean
 
 # ---------------------------------------------------------------------------
 help:
@@ -109,17 +111,36 @@ e2e:
 	bash $(REPO_ROOT)/scripts/run-sim-e2e.sh
 
 # ---------------------------------------------------------------------------
+# The shell loads ground/planner/dist and dist-electron/main.js at RUNTIME and
+# both are gitignored, so building only ground/ui leaves a tree that starts and
+# then fails (FM-83 / FM-132). Build them in the order they are loaded, then
+# assert the artefacts exist.
 build-ground:
+	@echo "==> Building ground/planner..."
+	cd $(PLANNER_DIR) && npm run build
 	@echo "==> Building ground/ui..."
 	cd $(UI_DIR) && npm run build
-	@echo "==> TypeScript check on ground/app/windows..."
-	cd $(APP_WIN_DIR) && npm run typecheck
+	@echo "==> Building ground/app/windows Electron main/preload..."
+	cd $(APP_WIN_DIR) && npm run build:electron
+	@$(MAKE) --no-print-directory check-ground-artefacts APP_DIR=$(APP_WIN_DIR)
 
 build-ground-linux:
+	@echo "==> Building ground/planner..."
+	cd $(PLANNER_DIR) && npm run build
 	@echo "==> Building ground/ui..."
 	cd $(UI_DIR) && npm run build
-	@echo "==> TypeScript check on ground/app/linux..."
-	cd $(APP_LINUX_DIR) && npm run typecheck
+	@echo "==> Building ground/app/linux Electron main/preload..."
+	cd $(APP_LINUX_DIR) && npm run build:electron
+	@$(MAKE) --no-print-directory check-ground-artefacts APP_DIR=$(APP_LINUX_DIR)
+
+# Every path below is loaded at runtime by something. APP_DIR is passed in.
+check-ground-artefacts:
+	@echo "==> Verifying built ground artefacts..."
+	@for f in "$(PLANNER_DIR)/dist/index.js" "$(UI_DIR)/dist/index.html" \
+	          "$(APP_DIR)/dist-electron/main.js" "$(APP_DIR)/dist-electron/preload.js"; do \
+	    if [ ! -f "$$f" ]; then echo "    [FAIL] MISSING $$f"; exit 1; fi; \
+	    echo "    [OK] $$f"; \
+	done
 
 build-companion:
 	@echo "==> Validating companion package (pip install -e)..."
@@ -136,8 +157,14 @@ lint:
 test:
 	@echo "==> Running companion unit tests (pytest)..."
 	$(VENV_PYTHON) -m pytest $(COMPANION_DIR)/tests -v
-	@echo "==> TypeScript typecheck ground/ui..."
-	cd $(UI_DIR) && npm run typecheck
+	@echo "==> ground/planner tests (build + typecheck + vitest)..."
+	cd $(PLANNER_DIR) && npm test
+	@echo "==> ground/satellite tests..."
+	cd $(REPO_ROOT)/ground/satellite && npm test
+	@echo "==> ground/cues tests..."
+	cd $(REPO_ROOT)/ground/cues && npm test
+	@echo "==> ground/ui typecheck + tests..."
+	cd $(UI_DIR) && npm run typecheck && npm test
 
 # ---------------------------------------------------------------------------
 clean:

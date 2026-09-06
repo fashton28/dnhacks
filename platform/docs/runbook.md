@@ -42,6 +42,90 @@ Before attempting any of the stages below, verify:
 
 ---
 
+## Stage 0.5: Bring-up caveats (read before an offline or unfamiliar venue)
+
+These are the things that have actually stopped a bring-up. Each names the
+failure mode it comes from in [FAILURE_MODES.md](FAILURE_MODES.md).
+
+### Build the artefacts the ground station loads at RUNTIME (FM-83, FM-132)
+
+`ground/planner/dist/` and `ground/app/<os>/dist-electron/` are **gitignored**.
+A fresh clone has neither, and the Electron shell loads both by path:
+`package.json`'s `main` is `dist-electron/main.js`, and the main process
+`require`s `ground/planner/dist/index.js` on the first plan.
+
+`scripts/setup-ground.ps1` (Windows) and `scripts/setup-ground-linux.sh` build
+them, in load order, and then assert that all four artefacts exist. `make
+build-ground` / `make build-ground-linux` do the same. **Re-run one of them
+after any edit to `ground/planner` or the shell's TypeScript** — the shell
+loads the built copy, so an unbuilt edit silently runs the previous build.
+
+Symptoms if you skip it:
+- `Cannot find module .../dist-electron/main.js`, Electron exits immediately.
+- A "Planning failed" toast the moment the inspection button is pressed. (The
+  main process now names the missing artefact and the command that builds it.)
+
+### Free the UI port, or move it (FM-131)
+
+`ground/ui` binds port **5173 strictly**: if the port is taken, Vite refuses to
+start rather than sliding to 5174 and leaving the Electron shell rendering
+whatever else answered 5173 (a teammate's Console dev server pins the same
+port). Two stacks on one machine: set `EIS_UI_PORT` — the UI and the shell read
+the same variable — e.g. `EIS_UI_PORT=5273 npm run dev`.
+
+### The acceptance gate runs on Windows PowerShell 5.1 (FM-142)
+
+`scripts/run-sim-e2e.ps1` is 5.1-compatible; it does not need PowerShell 7. If
+you edit it, keep it free of 7-only syntax (`??`, `?.`, `?:`, `&&`/`||`
+chains) — a parse error there means the acceptance gate cannot run at all, and
+it happens before any `#Requires` directive would be honoured.
+
+### The acceptance gate and the demo path are not the same run (FM-157)
+
+`scripts/run-sim-e2e.sh` starts SITL natively via `sim/run_sitl.sh` over
+`udp:14550` with `sim/eis-sitl.parm`. A Docker-backed demo launcher takes
+`tcp:5760` with its own bootstrap parameters and a vicon serial. Transport,
+EKF source configuration and parameter provenance all differ, so **a green e2e
+gate is not evidence that the demo path works, and vice versa.** Run whichever
+one you are about to show, and run it on the machine you are about to show it
+on.
+
+### Verify the SITL parameter bootstrap on the backend you are actually using (FM-135)
+
+The battery, GPS-failover and external-navigation demos need
+`BATT_MONITOR`, `SIM_BATT_*`, `VISO_TYPE`/`SERIAL5_PROTOCOL`, `EK3_SRC2/3_*`,
+`SIM_VICON_*` and `SIM_GPS1_ENABLE`. A launcher that sets these only on its
+Docker branch leaves the WSL/native branch with **no simulated backing** for
+those demos while still printing "preflight OK". Before demonstrating any of
+them, read the parameters back from the running SITL (MAVProxy `param show
+BATT_MONITOR`, `param show SIM_GPS1_ENABLE`) rather than trusting the
+launcher's own message.
+
+### Console 3D assets are fetched from the internet (FM-171)
+
+**This is the teammates' `console/` stack, not `platform/ground/`, and nothing
+in this repository's ground station depends on it.** It is recorded here
+because it fires at exactly the venue where nobody can fix it.
+
+`console/public/assets/` is gitignored and populated at setup time by
+`scripts/fetch_assets.py` from a remote CDN. On a fresh clone at an **offline
+venue** the Three.js console renders with no ground texture, no sky and no
+models — bare, or throwing. There is no offline bundle and no fallback
+material, and no preflight check verifies the assets are present.
+
+Mitigation, in order of preference:
+1. **Fetch the assets before you lose connectivity** (`python
+   scripts/fetch_assets.py`), and verify `console/public/assets/` is non-empty
+   on the machine you will present from — not on the machine you built on.
+2. Copy a populated `console/public/assets/` directory onto the demo machine by
+   hand (USB stick); the path is all that matters.
+3. **Present the 2D mission map instead.** The ground station's own map,
+   satellite panel and cue rails are fully offline: the tiles are baked into
+   the renderer bundle and the cue rails replay bundled fixtures. The ARGUS
+   World view is an `<iframe>` onto the console and is the only view affected.
+
+---
+
 ## Stage 1: SITL Validation (Required Before Any Hardware Flight)
 
 **Goal:** Prove the entire software stack works end-to-end with zero hardware.
@@ -80,6 +164,8 @@ Expected output:
 make e2e
 # or:
 bash scripts/run-sim-e2e.sh
+# Windows (Windows PowerShell 5.1 or PowerShell 7; needs WSL2 for SITL):
+#   .\scripts\run-sim-e2e.ps1
 ```
 
 This test:

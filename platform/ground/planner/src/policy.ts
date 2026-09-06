@@ -32,6 +32,50 @@ export const PROFILE_POLICY: Record<MissionProfile, {
   fast: { maxSpeedMps: 6, maxAltitudeM: 60, standoffM: 8, maxSortieS: 480 },
 };
 
+/**
+ * RF freshness. An RF report is a statement about the airspace AT A MOMENT;
+ * `rf_adapter.CORRELATION_WINDOW_MS` already treats 60 s as the window inside
+ * which an RF hit and a GPS loss are the same event, and `docs/FAILURE_MODES.md`
+ * §2 states the interference response against that same live window. The
+ * verifier uses it too, so one hostile-drone report at the top of the session
+ * cannot refuse every mission for the rest of it (FM-51).
+ *
+ * Absent a `now`, the verifier reads events as current: a caller that cannot
+ * say what time it is gets the pessimistic (all events live) reading, exactly
+ * as `fleetTs` gets the optimistic one for separation.
+ */
+export const RF_POLICY = {
+  /** Seconds an RF event stays part of the current airspace picture. */
+  eventWindowS: 60,
+  /**
+   * SDR front-end states that can support the assertion "no blocking RF
+   * interference". A saturated or degraded receiver cannot see interference it
+   * is blind to, so it is reported as UNKNOWN, never as clear (FM-50).
+   */
+  trustedSdrStates: ['nominal'] as const,
+  /** States that mean "the receiver is there but cannot be believed". */
+  impairedSdrStates: ['warming', 'degraded', 'saturated'] as const,
+} as const;
+
+/**
+ * Observation accuracy (FM-73). `VERIFIER_POLICY.anomalyProximityM` is the
+ * OUTER bound: some target in the mission has to be near the cue at all. It is
+ * far too loose for an observation point, because an orbit centre 150 m from
+ * the cue produces a mission that flies, orbits, sees nothing relevant, and
+ * reports the result as the cue's location.
+ *
+ * `orbitCentreToleranceM` is what an observation-class tool must hold. The
+ * deterministic planner puts an orbit centre EXACTLY on the cue (rounded to
+ * 6 dp ≈ 0.11 m), and the only legal displacement is a verifier correction
+ * pushing the centre clear of a buffered NFZ or the geofence — bounded by the
+ * fixture site's 25 m NFZ buffer plus the 5 m correction margin, doubled for
+ * a corner case where both corrections apply. Anything further away is not an
+ * observation of this cue and is refused rather than quietly corrected.
+ */
+export const OBSERVATION_POLICY = {
+  orbitCentreToleranceM: 60,
+} as const;
+
 /** Compatibility profile names resolve to the canonical three (ADR D13). */
 export const PROFILE_ALIASES: Record<MissionProfile, 'follow' | 'inspect' | 'survey'> = {
   follow: 'follow', inspect: 'inspect', survey: 'survey',

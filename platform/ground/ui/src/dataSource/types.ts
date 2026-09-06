@@ -28,6 +28,7 @@ import type {
   Unsubscribe,
   VerificationMessage,
 } from '@/contract';
+import type { RailHealth } from '@/cues';
 
 export interface MissionDataSource extends DataSource {
   readonly kind: 'mock' | 'live' | 'hub';
@@ -46,6 +47,15 @@ export interface MissionDataSource extends DataSource {
   getSimulationToggles?(): Readonly<SimulationToggles>;
   /** Passive receive-only RF events may be forwarded to the companion. */
   forwardRfEvent?(event: RfEventMessage): void;
+
+  /**
+   * Per-rail health for the cue badges (FM-180). The rails also publish health
+   * on the ordinary `healthEvent` channel — that is the WIRE surface and it is
+   * unchanged — but a `HealthComponent` is coarser than a rail (`sar` and
+   * `sentinel2` share `site_model`), so the badge strip reads the bus's own
+   * per-rail view. Absent on providers that host no cue rails.
+   */
+  railHealth?(): RailHealth[];
 
   /** Tasking: what to look for and why (never where/how high — see Task). */
   onTask(cb: (m: TaskMessage) => void): Unsubscribe;
