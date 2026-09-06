@@ -32,6 +32,7 @@ from contracts.models import (
     Scenario,
     SceneProp,
     SceneState,
+    Sighting,
     ValidationResult,
     Verdict,
     Waypoint,
@@ -693,6 +694,16 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         if report is None:
             raise HTTPException(404, f"no Incident Report for mission {mission_id}")
         return report
+
+    @app.get("/sightings", response_model=list[Sighting])
+    async def list_sightings(drone_id: str | None = None, mission_id: str | None = None, limit: int = 200) -> list[Sighting]:
+        """Sightings from the on-board perception pass (hot spots measured on the thermal map), newest last, capped at 500.
+
+        Also broadcast live as a `sightings` event per frame; this is what lets a front end rebuild the list after a reload.
+        """
+        from hub.perception import store
+        rows = [r for r in store(app) if (drone_id is None or r["drone_id"] == drone_id) and (mission_id is None or r["mission_id"] == mission_id)]
+        return [Sighting.model_validate(r) for r in rows[-max(1, min(limit, 500)):]]
 
     @app.post("/detections/{detection_id}/dispatch")
     async def dispatch_detection(detection_id: str) -> dict[str, Any]:

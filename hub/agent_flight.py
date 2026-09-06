@@ -322,7 +322,8 @@ class AgentFlight(Inspector):
                 obs = self._capture(self.drone_id, self.mission.mission_id, max(0, self.mission.next_waypoint - 1), str(args.get("looking_for", "")))
                 obs["slant_range_m"] = obs.get("slant_range_m", obs.get("alt_m", 0.0))
                 self.res.observations.append(obs)
-                out = obs.get("caption", "") + " Detections: " + (", ".join(f"{d['label']} {d['confidence']:.2f}" for d in obs.get("detections", [])) or "none")
+                from hub.perception import sightings_text
+                out = obs.get("caption", "") + " Detections: " + (", ".join(f"{d['label']} {d['confidence']:.2f}" for d in obs.get("detections", [])) or "none") + sightings_text(obs.get("sightings", []))
             elif name == "status":
                 out = self._status_line()
             elif name == "return_home":

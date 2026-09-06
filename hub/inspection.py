@@ -131,7 +131,28 @@ class Inspector:
         else:
             obs = self.describe(path, wp, reg.scene, index)
         obs.update({"waypoint_index": index, "frame_ref": f"evidence/{mission_id}/inspect{index}-{self._shot}.jpg" if path else None, "looking_for": looking_for, **wp})
+        obs["sightings"] = self._perceive(frame, drone_id, mission_id, obs.get("frame_ref"), cam)
         return obs
+
+    def _perceive(self, frame, drone_id: str, mission_id: str, frame_ref: str | None, cam: dict[str, Any]) -> list[dict[str, Any]]:
+        """Thermal frames carry a radiometric map: threshold it into Sightings, keep them on the Hub and publish them live."""
+        if frame is None or not getattr(frame, "temp_png_b64", None):
+            return []
+        from hub import perception
+        meta = {"drone_id": drone_id, "mission_id": mission_id, "ts": frame.ts, "width": frame.width, "height": frame.height, "lat": frame.lat, "lon": frame.lon,
+                "alt": frame.alt, "heading_deg": frame.heading_deg, "gimbal_pitch_deg": frame.gimbal_pitch_deg, "fov_deg": cam.get("fov_deg", 70.0),
+                "camera_mode": cam.get("mode", "thermal"), "frame_ref": frame_ref}
+        try:
+            found = perception.find_hot_spots(base64.b64decode(frame.temp_png_b64), meta)
+        except Exception as e:  # noqa: BLE001
+            self.app.state.audit.append("perception_failed", mission_id=mission_id, drone_id=drone_id, error=repr(e)[:200])
+            return []
+        dicts = perception.remember(self.app, found)
+        self.app.state.audit.append("sightings", mission_id=mission_id, drone_id=drone_id, frame_ref=frame_ref, count=len(dicts),
+                                    peak_c=max((d["temp_max_c"] or 0.0 for d in dicts), default=None))
+        self.app.state.registry.publish({"type": "sightings", "drone_id": drone_id, "mission_id": mission_id, "frame_ref": frame_ref,
+                                         "width": frame.width, "height": frame.height, "sightings": dicts})
+        return dicts
 
     def _reposition(self, drone_id: str, anchor: Waypoint, dx: float, dy: float, dz: float) -> str:
         st = self._state(drone_id)
@@ -183,7 +204,8 @@ class Inspector:
             elif tool == "capture":
                 obs = self._capture(drone_id, mission_id, index, str(step.get("looking_for", "")))
                 res.observations.append(obs)
-                out = obs.get("caption", "") + " Detections: " + ", ".join(f"{d['label']} {d['confidence']:.2f}" for d in obs.get("detections", []))
+                from hub.perception import sightings_text
+                out = obs.get("caption", "") + " Detections: " + ", ".join(f"{d['label']} {d['confidence']:.2f}" for d in obs.get("detections", [])) + sightings_text(obs.get("sightings", []))
             elif tool == "reposition":
                 out = self._reposition(drone_id, anchor, float(step["dx"]), float(step["dy"]), float(step["dz"]))
             else:
