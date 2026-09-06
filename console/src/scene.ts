@@ -499,6 +499,7 @@ export class SiteScene {
 
   /** Spin rotors of airborne Drones, pulse strobes, and tilt each gimbal to its reported pitch. */
   animateDrones(t: number, cameraPosition?: THREE.Vector3): void {
+    this.smoothPoses(performance.now());
     for (const g of this.drones.values()) {
       const label = g.userData.label as THREE.Sprite | undefined;
       if (label && cameraPosition) { const d = cameraPosition.distanceTo(g.position); label.visible = d > 12; (label.material as THREE.SpriteMaterial).opacity = Math.min(0.9, (d - 12) / 20); }
@@ -510,18 +511,61 @@ export class SiteScene {
       const strobe = g.userData.strobe as THREE.Mesh;
       (strobe.material as THREE.MeshStandardMaterial).emissiveIntensity = flying ? (Math.sin(t * 6) > 0.85 ? 6 : 0.2) : 0;
       const pitch = g.userData.gimbalPitch as THREE.Group;
-      const target = -(s?.gimbal_pitch_deg ?? 45) * Math.PI / 180;
-      pitch.rotation.x += (target - pitch.rotation.x) * 0.2;
+      const track = (g.userData as any).track as PoseTrack | undefined;
+      pitch.rotation.x = -(track?.gimbal ?? s?.gimbal_pitch_deg ?? 45) * Math.PI / 180;
     }
   }
+
+  /** Per-frame pose smoothing on (`?smooth=0` disables it for comparison). Telemetry arrives at 10 to 20 Hz; without this the
+   *  aircraft and its camera jump once per sample, which reads as lag however fast the page renders. */
+  smoothing = true;
+  private lastAnimMs = 0;
 
   updateDrone(s: DroneState): void {
     let g = this.drones.get(s.drone_id);
     if (!g) { g = this.droneModel(s.drone_id); this.drones.set(s.drone_id, g); this.scene.add(g); }
     const [x, y] = latlonToEnu(this.anchor, s.lat, s.lon);
-    g.position.copy(enuToThree(x, y, Math.max(0.21, s.alt + 0.21)));  // skids rest on the pad
-    g.rotation.y = headingToYaw(s.heading_deg);
-    (g.userData as any).state = s;
+    const alt = Math.max(0, s.alt);
+    const ud = g.userData as any;
+    ud.state = s;
+    // ENU velocity from the NED vector: east = vy, north = vx, up = -vz. Used to predict between samples.
+    const track: PoseTrack = ud.track ?? (ud.track = { x, y, alt, hdg: s.heading_deg, gimbal: s.gimbal_pitch_deg, sx: x, sy: y, salt: alt, shdg: s.heading_deg, sgimbal: s.gimbal_pitch_deg, vx: 0, vy: 0, vz: 0, t: performance.now() });
+    track.sx = x; track.sy = y; track.salt = alt; track.shdg = s.heading_deg; track.sgimbal = s.gimbal_pitch_deg;
+    const airborne = s.armed || alt > 0.3;
+    track.vx = airborne ? s.velocity_ned.vy : 0; track.vy = airborne ? s.velocity_ned.vx : 0; track.vz = airborne ? -s.velocity_ned.vz : 0;
+    track.t = performance.now();
+    if (!this.smoothing || Math.hypot(track.sx - track.x, track.sy - track.y) > 25) {
+      // snap: smoothing disabled, first sample, or a teleport (reset, reconnect)
+      track.x = x; track.y = y; track.alt = alt; track.hdg = s.heading_deg; track.gimbal = s.gimbal_pitch_deg;
+      this.placeDrone(g, track);
+    }
+  }
+
+  /** The pose the World and the Drone camera use: smoothed and predicted, or the raw sample when smoothing is off. */
+  poseOf(droneId: string): PoseTrack | undefined { return (this.drones.get(droneId)?.userData as any)?.track; }
+
+  private placeDrone(g: THREE.Group, p: PoseTrack): void {
+    g.position.copy(enuToThree(p.x, p.y, Math.max(0.21, p.alt + 0.21)));  // skids rest on the pad
+    g.rotation.y = headingToYaw(p.hdg);
+  }
+
+  private smoothPoses(nowMs: number): void {
+    const dt = this.lastAnimMs ? Math.min(0.1, (nowMs - this.lastAnimMs) / 1000) : 0;
+    this.lastAnimMs = nowMs;
+    if (!this.smoothing || dt <= 0) return;
+    const kPos = 1 - Math.exp(-dt / 0.12), kHdg = 1 - Math.exp(-dt / 0.15), kGim = 1 - Math.exp(-dt / 0.2);
+    for (const g of this.drones.values()) {
+      const p = (g.userData as any).track as PoseTrack | undefined;
+      if (!p) continue;
+      // dead reckoning from the last sample, capped so a stalled link does not fly the model away
+      const age = Math.min(0.3, (nowMs - p.t) / 1000);
+      const tx = p.sx + p.vx * age, ty = p.sy + p.vy * age, talt = Math.max(0, p.salt + p.vz * age);
+      p.x += (tx - p.x) * kPos; p.y += (ty - p.y) * kPos; p.alt += (talt - p.alt) * kPos;
+      let dh = ((p.shdg - p.hdg + 540) % 360) - 180;  // shortest arc
+      p.hdg = (p.hdg + dh * kHdg + 360) % 360;
+      p.gimbal += (p.sgimbal - p.gimbal) * kGim;
+      this.placeDrone(g, p);
+    }
   }
 
   setScene(state: SceneState): void {
@@ -568,15 +612,20 @@ export class SiteScene {
 
   /** Place a camera at a Drone's pose with the gimbal pitch (0 level, 90 straight down). */
   aimDroneCamera(cam: THREE.PerspectiveCamera, s: DroneState): void {
-    const [x, y] = latlonToEnu(this.anchor, s.lat, s.lon);
-    cam.position.copy(enuToThree(x, y, s.alt + 0.15));  // gimbal lens sits under the nose, ~15 cm above the skids on the pad
-    const yaw = headingToYaw(s.heading_deg);
-    const pitch = -s.gimbal_pitch_deg * Math.PI / 180;
+    // the camera rides the smoothed pose so the feed moves at frame rate, not at telemetry rate
+    const p = this.poseOf(s.drone_id);
+    const [x, y] = p ? [p.x, p.y] : latlonToEnu(this.anchor, s.lat, s.lon);
+    cam.position.copy(enuToThree(x, y, (p ? p.alt : s.alt) + 0.15));  // gimbal lens sits under the nose, ~15 cm above the skids on the pad
+    const yaw = headingToYaw(p ? p.hdg : s.heading_deg);
+    const pitch = -(p ? p.gimbal : s.gimbal_pitch_deg) * Math.PI / 180;
     cam.rotation.set(0, 0, 0);
     cam.rotateY(yaw);
     cam.rotateX(pitch);
   }
 }
+
+/** Last telemetry sample (s*) plus the smoothed, predicted pose actually drawn. ENU metres, altitude metres, degrees. */
+export interface PoseTrack { x: number; y: number; alt: number; hdg: number; gimbal: number; sx: number; sy: number; salt: number; shdg: number; sgimbal: number; vx: number; vy: number; vz: number; t: number }
 
 function textLabel(text: string): THREE.CanvasTexture {
   const c = document.createElement("canvas"); c.width = 512; c.height = 128;

@@ -536,9 +536,12 @@ function resize(): void {
   }
 }
 // ---- perf instrumentation: per-stage ms averaged over the last second, on window.__argusPerf ----
-const perf = { world: 0, drone: 0, stream: 0, ui: 0, frames: 0, lastReport: performance.now(), report: { world: 0, drone: 0, stream: 0, ui: 0, fps: 0 } };
+const perf = { world: 0, drone: 0, stream: 0, ui: 0, frames: 0, lastReport: performance.now(), steps: [] as number[], lastPose: null as THREE.Vector3 | null,
+  report: { world: 0, drone: 0, stream: 0, ui: 0, fps: 0, stepMean: 0, stepStd: 0, stepMax: 0, stillFrames: 0 } };
+world.smoothing = new URLSearchParams(location.search).get("smooth") !== "0";
 (window as any).__argusPerf = perf;
 function stage<T>(key: "world" | "drone" | "stream" | "ui", fn: () => T): T { const t = performance.now(); const r = fn(); (perf as any)[key] += performance.now() - t; return r; }
+let lastWorldRender = 0;
 function loop(now: number): void {
   requestAnimationFrame(loop);
   resize();
@@ -556,16 +559,26 @@ function loop(now: number): void {
   }
   controls.update();
   fitDroneCanvas();
-  stage("world", () => { world.update(now / 1000, worldCam.position); if (!isEmbedDrone) world.renderWorld(renderer, worldCam); });
+  // A headless Renderer only answers render requests (evidence frames, overheads), which draw on demand. Its continuous
+  // World render and MJPEG stream are idled to a few frames a second so the Operator's own tabs keep the GPU.
+  const worldDue = !isHeadless || now - lastWorldRender > 250;
+  stage("world", () => { world.update(now / 1000, worldCam.position); if (!isEmbedDrone && worldDue) { lastWorldRender = now; world.renderWorld(renderer, worldCam); } });
   if (selected && drones.has(selected)) {
     const s = drones.get(selected)!;
-    // the Drone view is a camera feed: 15 Hz is plenty and frees the GPU for the World view
-    if (isEmbedDrone || now - lastDroneRender > 33) { lastDroneRender = now; stage("drone", () => renderDroneView(s)); }
+    // the Drone view is a camera feed: 30 Hz is plenty in the full Console and frees the GPU for the World view; the embed renders every frame
+    if (isEmbedDrone || now - lastDroneRender > (isHeadless ? 200 : 33)) { lastDroneRender = now; stage("drone", () => renderDroneView(s)); }
     const streaming = s.alt > 0.3;
-    if (streaming && !isEmbedDrone && now - lastStream > 80) { lastStream = now; stage("stream", () => streamFrame(s)); }
+    if (streaming && !isEmbedDrone && now - lastStream > (isHeadless ? 200 : 80)) { lastStream = now; stage("stream", () => streamFrame(s)); }
     if (now - lastHud > 250) { lastHud = now; stage("ui", () => renderHud($("hud"), s, streaming, vision.mode)); }
   }
   frames++; perf.frames++;
+  // motion smoothness of the selected Drone: frame-to-frame step of its drawn position. Smooth motion has a low spread and
+  // no still frames while moving; snapping to 10 Hz telemetry shows as five still frames then one big step.
+  if (selected && world.drones.has(selected)) {
+    const pos = world.drones.get(selected)!.position;
+    if (perf.lastPose) perf.steps.push(pos.distanceTo(perf.lastPose)); else perf.lastPose = new THREE.Vector3();
+    perf.lastPose!.copy(pos);
+  }
   if (now - lastFps > 1000) {
     $("fps").textContent = `${frames} fps`;
     // adaptive resolution: step the pixel ratio down when we cannot hold ~50 fps, back up when there is headroom
@@ -578,8 +591,11 @@ function loop(now: number): void {
   }
   if (now - perf.lastReport > 1000) {
     const n = Math.max(1, perf.frames);
-    perf.report = { world: +(perf.world / n).toFixed(2), drone: +(perf.drone / n).toFixed(2), stream: +(perf.stream / n).toFixed(2), ui: +(perf.ui / n).toFixed(2), fps: perf.frames };
-    perf.world = perf.drone = perf.stream = perf.ui = 0; perf.frames = 0; perf.lastReport = now;
+    const st = perf.steps, m = st.length ? st.reduce((a, b) => a + b, 0) / st.length : 0;
+    const sd = st.length ? Math.sqrt(st.reduce((a, b) => a + (b - m) ** 2, 0) / st.length) : 0;
+    perf.report = { world: +(perf.world / n).toFixed(2), drone: +(perf.drone / n).toFixed(2), stream: +(perf.stream / n).toFixed(2), ui: +(perf.ui / n).toFixed(2), fps: perf.frames,
+      stepMean: +m.toFixed(3), stepStd: +sd.toFixed(3), stepMax: +(st.length ? Math.max(...st) : 0).toFixed(3), stillFrames: st.filter((x) => x < 1e-4).length };
+    perf.world = perf.drone = perf.stream = perf.ui = 0; perf.frames = 0; perf.lastReport = now; perf.steps = [];
   }
 }
 requestAnimationFrame(loop);

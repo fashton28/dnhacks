@@ -18,7 +18,7 @@ from contracts.models import DroneState, DroneStatus, VelocityNED
 from contracts.protocol import Ack, CaptureFrame, Goto, Hello, Hover, LookAt, ReturnHome, SetVelocity, Telemetry, hub_message
 from sim.common.site_limits import load_geofence_ring
 
-TELEMETRY_HZ = 10
+TELEMETRY_HZ = 20
 VEL_RESEND_HZ = 5
 TAKEOFF_ALT_DEFAULT = 3.0
 ARRIVE_M = 1.5
@@ -64,7 +64,7 @@ class Bridge:
             self.upload_fence(load_geofence_ring())
         except Exception as e:  # noqa: BLE001
             print(f"[{self.id}] fence upload failed: {e}", flush=True)
-        for msg_id, hz in ((33, 10), (30, 10), (147, 2), (1, 2), (162, 2), (24, 2), (193, 2)):  # GLOBAL_POSITION_INT, ATTITUDE, BATTERY_STATUS, SYS_STATUS, FENCE_STATUS, GPS_RAW_INT, EKF_STATUS_REPORT
+        for msg_id, hz in ((33, 20), (30, 20), (147, 2), (1, 2), (162, 2), (24, 2), (193, 2)):  # GLOBAL_POSITION_INT, ATTITUDE, BATTERY_STATUS, SYS_STATUS, FENCE_STATUS, GPS_RAW_INT, EKF_STATUS_REPORT
             self.mav.mav.command_long_send(self.mav.target_system, self.mav.target_component, mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0, msg_id, int(1e6 / hz), 0, 0, 0, 0, 0)
 
     def upload_fence(self, ring: list[tuple[float, float]], timeout: float = 10.0) -> None:
