@@ -2,7 +2,7 @@
   "schema_version": 1,
   "rail": "cctv",
   "timebase": "relative",
-  "provenance": "Scripted VMS event fixture for the Komati stub site. No video management system is connected, no camera was watched, and no image was captured; camera and zone ids resolve against site/site.stub.json. The offline/online and failed beats script the 'camera offline' and 'VMS down' failure modes.",
+  "provenance": "Scripted VMS event fixture for the Meridian Station stub site. No video management system is connected, no camera was watched, and no image was captured; camera and zone ids resolve against site/site.stub.json. The offline/online and failed beats script the 'camera offline' and 'VMS down' failure modes.",
   "events": [
     {
       "atMs": 0,

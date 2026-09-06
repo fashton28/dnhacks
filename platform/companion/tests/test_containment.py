@@ -30,10 +30,10 @@ from eis_companion.types import Limits
 mav = mavutil.mavlink
 
 STUB_SITE = "site/site.stub.json"
-HOME_LAT, HOME_LON = -26.0900, 29.4719
-FAR_LAT, FAR_LON = -26.09065, 29.46925
-# Dead centre of the stub site's "chimney" NFZ (ceiling 80 m).
-NFZ_LAT, NFZ_LON = -26.0885, 29.4701
+HOME_LAT, HOME_LON = 41.1992364, -98.3995821
+FAR_LAT, FAR_LON = 41.198383, -98.4
+# Dead centre of the stub site's "reactor-exclusion" NFZ (ceiling 60 m).
+NFZ_LAT, NFZ_LON = 41.2004941, -98.4
 
 PERIMETER = [
     (-35.360761, 149.16223),
@@ -305,7 +305,7 @@ def test_the_orchestrator_uploads_the_site_nfzs_as_exclusion_zones():
     c = make_companion()
     run(c._upload_site_fence())
     assert c.vehicle.uploaded_exclusions is not None
-    # the stub site declares two NFZs (chimney, switchyard)
+    # the stub site declares two NFZs (reactor-exclusion, switchyard)
     assert len(c.vehicle.uploaded_exclusions) == 2
     assert c._fence_enforced is True
 
@@ -323,9 +323,9 @@ def test_a_plan_targeting_an_nfz_is_refused_by_the_companion():
 
 def test_a_plan_near_an_nfz_is_refused_on_the_buffer():
     c = make_companion()
-    # ~40 m north of the chimney polygon edge: outside it, inside the 25 m
-    # buffer's reach once the config floor is applied.
-    near_lat = -26.08805
+    # ~11 m north of the reactor-exclusion polygon edge: outside it, inside the
+    # 25 m buffer's reach once the config floor is applied.
+    near_lat = 41.2009971
     ok, message = run(c._execute_plan({"plan": plan_to(near_lat, NFZ_LON, alt=40.0)}))
     assert ok is False
     assert "no-fly zone" in message
@@ -369,7 +369,7 @@ def test_the_failsafe_params_are_pushed_on_connect():
 
 
 def test_the_fc_circle_fence_is_sized_to_the_site_not_the_launch_pad():
-    """A 60 m circle around home fences a ~720 x 880 m plant into its own pad:
+    """A 60 m circle around home fences a ~600 x 600 m site into its own pad:
     the first outbound leg breaches and the firmware RTLs mid-demo (FM-155)."""
     c = make_companion()
     radius = c._site_containment_radius_m()

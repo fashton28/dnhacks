@@ -9,8 +9,8 @@
       "payload": {
         "missionId": "survey-0007",
         "ts": 2200,
-        "lat": -26.0929,
-        "lon": 29.4699,
+        "lat": 41.199461,
+        "lon": -98.4016715,
         "finding": "fence_gap",
         "confidence": 0.58,
         "thumbnail": ""

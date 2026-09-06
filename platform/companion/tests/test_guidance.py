@@ -1,32 +1,38 @@
 """
-Guidance tests -- the safety-critical visual-servoing core.
+Guidance behaviour -- the safety-critical visual-servoing core (PRD 11).
 
-Proves (PRD 11):
-  * standoff is NEVER breached as distance converges (the headline gate),
-  * the drone approaches when far and holds at the standoff,
-  * unknown distance never commands forward motion,
-  * 'lost'/no-lock returns a hold (zero, valid=False),
-  * every output stays inside the configured Limits,
-  * yaw / climb signs servo the target back toward frame centre.
+Pinned here:
+  * the standoff is never breached while the range converges onto it, from
+    any starting distance (the headline acceptance gate),
+  * approach when far, rest at the standoff, back off inside it, and never
+    approach on an unknown range,
+  * any non-locked state, or a lock without a box, yields a hold,
+  * every emitted axis stays inside the configured Limits,
+  * the yaw and climb channels servo the target back toward frame centre,
+  * the tuning hooks respect the Limits floors and retune live.
 
 numpy + stdlib only (no hardware, no FC).
 """
 from __future__ import annotations
 
+from typing import Iterator, Tuple
 
 import pytest
 
 from eis_companion.control.guidance import Guidance
 from eis_companion.types import Limits, TrackingState
 
-
-def _centered_bbox(h: float = 0.2) -> tuple:
-    """A bbox centred in the frame with the given (normalised) height."""
-    w = h * 0.4
-    return (0.5 - w / 2.0, 0.5 - h / 2.0, w, h)
+DT = 0.1
 
 
-def _limits() -> Limits:
+def centred_box(height: float = 0.2) -> Tuple[float, float, float, float]:
+    """A box of the given normalised height sitting on the frame centre."""
+    width = 0.4 * height
+    return (0.5 - width / 2.0, 0.5 - height / 2.0, width, height)
+
+
+@pytest.fixture
+def limits() -> Limits:
     return Limits(
         max_speed=2.0,
         min_speed=0.5,
@@ -37,94 +43,74 @@ def _limits() -> Limits:
     )
 
 
+def closed_loop(guidance: Guidance, limits: Limits, start: float, ticks: int) -> Iterator[float]:
+    """Integrate the forward command one-to-one into the range; yield it each tick."""
+    distance = start
+    for _ in range(ticks):
+        sp = guidance.update(TrackingState.LOCKED, centred_box(), distance, limits, dt=DT)
+        distance -= sp.vx * DT
+        yield distance
+
+
+def last_of(guidance: Guidance, limits: Limits, distance, ticks: int):
+    sp = None
+    for _ in range(ticks):
+        sp = guidance.update(TrackingState.LOCKED, centred_box(), distance, limits, dt=DT)
+    return sp
+
+
 # --------------------------------------------------------------------------
 # HARD STANDOFF -- the primary acceptance gate
 # --------------------------------------------------------------------------
-def test_standoff_never_breached_during_convergence():
-    """Simulate closed-loop approach; distance must converge to standoff and
-    never dip below it, no matter the starting distance."""
-    g = Guidance()
-    lim = _limits()
-    bbox = _centered_bbox()
-
-    for start in (20.0, 12.0, 8.0, 6.0, 5.5):
-        g.reset()
-        dist = start
-        min_dist = dist
-        for _ in range(600):
-            sp = g.update(TrackingState.LOCKED, bbox, dist, lim, dt=0.1)
-            # one-to-one kinematic integration of the forward command
-            dist -= sp.vx * 0.1
-            min_dist = min(min_dist, dist)
-            # HARD invariant, checked every single tick
-            assert dist >= lim.standoff - 1e-6, (
-                f"standoff breached: start={start} dist={dist}"
-            )
-        # converged to the standoff (within a few cm)
-        assert abs(dist - lim.standoff) < 0.1, f"did not hold standoff: {dist}"
-        assert min_dist >= lim.standoff - 1e-6
+@pytest.mark.parametrize("start", [20.0, 12.0, 8.0, 6.0, 5.5])
+def test_standoff_holds_from_any_start(limits, start):
+    """The range must converge onto the standoff and never dip below it."""
+    guidance = Guidance()
+    guidance.reset()
+    closest = start
+    distance = start
+    for distance in closed_loop(guidance, limits, start, ticks=600):
+        closest = min(closest, distance)
+        assert distance >= limits.standoff - 1e-6, f"standoff breached from {start}: {distance}"
+    assert abs(distance - limits.standoff) < 0.1, f"did not settle on the standoff: {distance}"
+    assert closest >= limits.standoff - 1e-6
 
 
-def test_approaches_when_far():
-    """When well beyond standoff the forward command is positive (approach)."""
-    g = Guidance()
-    lim = _limits()
-    bbox = _centered_bbox()
-    sp = None
-    for _ in range(10):
-        sp = g.update(TrackingState.LOCKED, bbox, 15.0, lim, dt=0.1)
+def test_forward_command_is_positive_when_far(limits):
+    sp = last_of(Guidance(), limits, 15.0, ticks=10)
     assert sp.vx > 0.0
     assert sp.valid is True
 
 
-def test_holds_at_standoff():
-    """At exactly the standoff the forward command settles to ~0 (no approach)."""
-    g = Guidance()
-    lim = _limits()
-    bbox = _centered_bbox()
-    sp = None
-    for _ in range(50):
-        sp = g.update(TrackingState.LOCKED, bbox, lim.standoff, lim, dt=0.1)
-    assert sp.vx <= 1e-6  # never forward at the standoff
+def test_forward_command_rests_at_the_standoff(limits):
+    sp = last_of(Guidance(), limits, limits.standoff, ticks=50)
+    assert sp.vx <= 1e-6
 
 
-def test_backs_off_when_too_close():
-    """Inside the standoff, back-off (vx<0) is allowed but never approach."""
-    g = Guidance()
-    lim = _limits()
-    bbox = _centered_bbox()
-    sp = None
-    for _ in range(20):
-        sp = g.update(TrackingState.LOCKED, bbox, 3.0, lim, dt=0.1)
+def test_backs_off_inside_the_standoff(limits):
+    sp = last_of(Guidance(), limits, 3.0, ticks=20)
     assert sp.vx <= 0.0
 
 
-def test_unknown_distance_never_approaches():
-    """est_distance=None must never produce forward motion."""
-    g = Guidance()
-    lim = _limits()
-    bbox = _centered_bbox()
+def test_unknown_range_never_approaches(limits):
+    guidance = Guidance()
     for _ in range(50):
-        sp = g.update(TrackingState.LOCKED, bbox, None, lim, dt=0.1)
+        sp = guidance.update(TrackingState.LOCKED, centred_box(), None, limits, dt=DT)
         assert sp.vx <= 0.0
 
 
 # --------------------------------------------------------------------------
-# HOLD on lost / no lock
+# HOLD without a lock
 # --------------------------------------------------------------------------
 @pytest.mark.parametrize("state", ["lost", "searching", "idle"])
-def test_non_locked_states_hold(state):
-    g = Guidance()
-    lim = _limits()
-    sp = g.update(state, None, 10.0, lim, dt=0.1)
+def test_non_locked_state_holds(limits, state):
+    sp = Guidance().update(state, None, 10.0, limits, dt=DT)
     assert sp.valid is False
     assert (sp.vx, sp.vy, sp.vz, sp.yaw_rate) == (0.0, 0.0, 0.0, 0.0)
 
 
-def test_lock_with_none_bbox_holds():
-    g = Guidance()
-    lim = _limits()
-    sp = g.update(TrackingState.LOCKED, None, 10.0, lim, dt=0.1)
+def test_locked_without_a_box_holds(limits):
+    sp = Guidance().update(TrackingState.LOCKED, None, 10.0, limits, dt=DT)
     assert sp.valid is False
     assert sp.vx == 0.0
 
@@ -132,66 +118,50 @@ def test_lock_with_none_bbox_holds():
 # --------------------------------------------------------------------------
 # Clamping to Limits
 # --------------------------------------------------------------------------
-def test_all_outputs_within_limits():
-    """Drive large errors and confirm every axis stays clamped."""
-    g = Guidance()
-    lim = _limits()
-    # target far to the side, high in frame, and very far away
-    bbox = (0.9, 0.05, 0.05, 0.05)
+def test_every_axis_stays_inside_limits(limits):
+    """Target far to the side, high in frame and far away: every axis clamps."""
+    guidance = Guidance()
+    extreme = (0.9, 0.05, 0.05, 0.05)
     for _ in range(200):
-        sp = g.update(TrackingState.LOCKED, bbox, 50.0, lim, dt=0.1)
-        assert -lim.max_speed - 1e-9 <= sp.vx <= lim.max_speed + 1e-9
-        assert -lim.max_climb_rate - 1e-9 <= sp.vz <= lim.max_climb_rate + 1e-9
-        assert -lim.max_yaw_rate - 1e-9 <= sp.yaw_rate <= lim.max_yaw_rate + 1e-9
+        sp = guidance.update(TrackingState.LOCKED, extreme, 50.0, limits, dt=DT)
+        assert -limits.max_speed - 1e-9 <= sp.vx <= limits.max_speed + 1e-9
+        assert -limits.max_climb_rate - 1e-9 <= sp.vz <= limits.max_climb_rate + 1e-9
+        assert -limits.max_yaw_rate - 1e-9 <= sp.yaw_rate <= limits.max_yaw_rate + 1e-9
 
 
 # --------------------------------------------------------------------------
 # Servo signs
 # --------------------------------------------------------------------------
-def test_yaw_sign_target_right_turns_right():
-    """Target right of centre (cx>0.5) -> yaw_rate>0 (turn clockwise/right)."""
-    g = Guidance()
-    lim = _limits()
-    bbox = (0.8, 0.45, 0.1, 0.1)  # cx=0.85
-    sp = g.update(TrackingState.LOCKED, bbox, lim.standoff, lim, dt=0.1)
+def test_target_right_of_centre_turns_right(limits):
+    right = (0.8, 0.45, 0.1, 0.1)      # cx = 0.85
+    sp = Guidance().update(TrackingState.LOCKED, right, limits.standoff, limits, dt=DT)
     assert sp.yaw_rate > 0.0
 
 
-def test_vz_sign_target_high_climbs():
-    """Target high in frame (cy<0.5) -> climb -> vz<0 (NED up)."""
-    g = Guidance()
-    lim = _limits()
-    bbox = (0.45, 0.1, 0.1, 0.1)  # cy=0.15
-    sp = g.update(TrackingState.LOCKED, bbox, lim.standoff, lim, dt=0.1)
+def test_target_above_centre_climbs(limits):
+    high = (0.45, 0.1, 0.1, 0.1)       # cy = 0.15 -> climb -> NED up -> vz < 0
+    sp = Guidance().update(TrackingState.LOCKED, high, limits.standoff, limits, dt=DT)
     assert sp.vz < 0.0
 
 
 # --------------------------------------------------------------------------
 # Tuning hooks
 # --------------------------------------------------------------------------
-def test_set_standoff_respects_floor():
-    g = Guidance()
-    lim = _limits()
-    g.set_standoff(1.0, lim)  # below min_standoff=3
-    assert lim.standoff == lim.min_standoff
+def test_set_standoff_cannot_go_below_the_floor(limits):
+    Guidance().set_standoff(1.0, limits)          # below min_standoff = 3
+    assert limits.standoff == limits.min_standoff
 
 
-def test_set_max_speed_respects_floor():
-    g = Guidance()
-    lim = _limits()
-    g.set_max_speed(0.1, lim)  # below min_speed=0.5
-    assert lim.max_speed == lim.min_speed
+def test_set_max_speed_cannot_go_below_min_speed(limits):
+    Guidance().set_max_speed(0.1, limits)         # below min_speed = 0.5
+    assert limits.max_speed == limits.min_speed
 
 
-def test_set_gains_changes_response():
-    """Higher yaw gain -> larger yaw command for the same error (first tick)."""
-    lim = _limits()
-    bbox = (0.7, 0.45, 0.1, 0.1)
-
-    g_lo = Guidance(yaw_gains=(10.0, 0.0, 0.0), smoothing=1.0)
-    g_hi = Guidance(yaw_gains=(10.0, 0.0, 0.0), smoothing=1.0)
-    g_hi.set_gains(yaw=(80.0, 0.0, 0.0))
-
-    lo = g_lo.update(TrackingState.LOCKED, bbox, lim.standoff, lim, dt=0.1)
-    hi = g_hi.update(TrackingState.LOCKED, bbox, lim.standoff, lim, dt=0.1)
+def test_higher_yaw_gain_gives_a_larger_first_response(limits):
+    box = (0.7, 0.45, 0.1, 0.1)
+    soft = Guidance(yaw_gains=(10.0, 0.0, 0.0), smoothing=1.0)
+    stiff = Guidance(yaw_gains=(10.0, 0.0, 0.0), smoothing=1.0)
+    stiff.set_gains(yaw=(80.0, 0.0, 0.0))
+    lo = soft.update(TrackingState.LOCKED, box, limits.standoff, limits, dt=DT)
+    hi = stiff.update(TrackingState.LOCKED, box, limits.standoff, limits, dt=DT)
     assert abs(hi.yaw_rate) > abs(lo.yaw_rate)

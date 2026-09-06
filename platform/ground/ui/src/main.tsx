@@ -9,10 +9,24 @@ import App from './App';
 import ArgusApp from './argus/ArgusApp';
 import { isHubMode } from './dataSource';
 
-// ARGUS Hub mode (served at /gcs/, ?hub=, or VITE_DATASOURCE=hub) gets the ARGUS operator console;
-// the original person-following ground station stays available against the offline mock.
-ReactDOM.createRoot(document.getElementById('root')!).render(
-  <React.StrictMode>
-    {isHubMode() ? <ArgusApp /> : <App />}
-  </React.StrictMode>,
-);
+/**
+ * Which console this page hosts. ARGUS Hub mode — served under /gcs/, a
+ * `?hub=` query, or VITE_DATASOURCE=hub — gets the ARGUS operator console;
+ * every other build is the person-following ground station against the
+ * offline mock (or the companion, when the build selects it).
+ */
+function selectConsole(): JSX.Element {
+  return isHubMode() ? <ArgusApp /> : <App />;
+}
+
+function mount(): void {
+  const host = document.getElementById('root');
+  if (!host) {
+    throw new Error('ground station: index.html has no #root mount point');
+  }
+  ReactDOM.createRoot(host).render(
+    <React.StrictMode>{selectConsole()}</React.StrictMode>,
+  );
+}
+
+mount();

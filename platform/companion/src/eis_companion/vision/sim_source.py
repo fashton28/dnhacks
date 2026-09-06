@@ -2,106 +2,200 @@
 ============================================================================
 Drone Safety Platform -- Simulated target source (SimTargetSource)
 ----------------------------------------------------------------------------
-Produces synthetic person detections (1–2 people moving around the frame)
-WITHOUT a physical camera.  Used by:
+Synthetic person detections (1-2 people) with no physical camera.  Two
+consumers:
 
-  * ``Capture`` when source='mock'/'sim'  (supplies rendered BGR frames)
-  * ``sim/`` end-to-end tests             (supplies raw TargetObservation lists)
+  * ``Capture`` in 'mock'/'sim' mode        -- rendered BGR frames
+  * the ``sim/`` acceptance clients          -- raw ``TargetObservation`` lists
 
-This lets the full guidance + tracking stack run against SITL with no
-hardware at all.  Motion is deterministic/seedable so tests are reproducible.
+Together they let the whole perception -> tracking -> guidance stack fly
+against SITL on a laptop.  Everything here is deterministic for a given
+``seed`` so a failing acceptance run reproduces exactly.
 
-Design notes
+Motion model
 ------------
-Each simulated person is an independent 2-D bouncing "puck" whose position is
-driven by a sine wave in x and a different-frequency sine wave in y so that
-the paths are varied but never truly random.  A seed parameter makes the
-initial phase offsets reproducible.  The "frame" is normalised 0..1 for
-TargetObservation bboxes.
+Each person walks a **closed patrol loop**: a ring of waypoints laid out
+around a per-person home position, traversed at a constant arc-length rate
+with cosine easing into and out of every waypoint (so the corners read as a
+turn rather than a teleport), plus a slow vertical sway that stands in for
+gait bob.  Nothing is sampled per frame -- position is a pure function of
+simulation time, which is what makes replay exact.
 
-Synthetic person parameters:
-  * bbox height ~0.40 of frame height  (person takes up ~40 % of frame height
-    when at standoff -- generous so guidance has a clear signal)
-  * bbox aspect ratio 0.40 (person width / height, typical portrait-view)
-  * slow oscillation: ~0.05–0.15 normalised units per second so the drone
-    has a meaningful tracking target
+Target geometry (kept fixed: the tracker's IoU association and the distance
+estimator are both calibrated against it)
+  * bbox height  0.40 of frame height  -- a person filling ~40 % of the frame
+  * bbox width   0.16 (aspect 0.40)    -- typical portrait-view person
+  * patrol speed 0.05-0.15 normalised units/s, so consecutive frames overlap
+    heavily and the tracker locks within its ``min_hits``
 
 API
 ---
 ::
 
     src = SimTargetSource(num_targets=2, seed=42)
-    # --- per-frame usage ---
-    obs: list[TargetObservation] = src.get_observations()
-    frame: np.ndarray             = src.render_frame()   # BGR HxWx3 uint8
+    obs: list[TargetObservation] = src.get_observations()   # or src.observe()
+    frame: np.ndarray             = src.render_frame()      # BGR HxWx3 uint8
 
-Both calls advance the internal time by 1/fps seconds (default 30 fps).
-Call ``advance(dt)`` to use a wall-clock time step instead.
+``get_observations()`` and ``render_frame()`` share one clock and each advance
+it by 1/fps.  Drive from a real clock with ``advance(dt)`` instead.
 ============================================================================
 """
 from __future__ import annotations
 
+import bisect
 import math
+import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from eis_companion.types import TargetObservation
 
+# --- fixed target geometry (normalised frame units) ------------------------
+BBOX_WIDTH: float = 0.16
+BBOX_HEIGHT: float = 0.40
+
+#: Keeps the whole bbox off the frame edge, so a clamped walker is still a
+#: complete box rather than a truncated one.
+_EDGE_MARGIN: float = 0.01
+
+#: Per-person body colour, BGR (the renderer's palette, not a contract).
+_PALETTE: tuple[tuple[int, int, int], ...] = (
+    (60, 140, 220),    # warm orange
+    (220, 80, 60),     # cool blue
+)
+_HEAD_COLOUR = (200, 200, 230)
+_OUTLINE_COLOUR = (255, 255, 255)
+_CLOCK_ON = (120, 220, 120)
+_CLOCK_SWEEP = (200, 200, 200)
+
 
 # ---------------------------------------------------------------------------
-# Internal simulated person state
+# One synthetic person
 # ---------------------------------------------------------------------------
 
 @dataclass
-class _SimPerson:
-    """State of one synthetic person in the simulated scene."""
-    # Centre position in normalised frame coords [0..1]
-    cx: float
-    cy: float
-    # Amplitude and frequency of the Lissajous oscillation
-    ax: float   # x amplitude  (normalised)
-    ay: float   # y amplitude  (normalised)
-    fx: float   # x frequency  (Hz)
-    fy: float   # y frequency  (Hz)
-    px: float   # x phase      (radians)
-    py: float   # y phase      (radians)
-    # Bounding-box dimensions in normalised coords (constant for simplicity)
-    bw: float = 0.16   # bbox width
-    bh: float = 0.40   # bbox height
-    # Person appearance: BGR colour for the rectangle fill
-    colour: tuple = (80, 160, 80)
+class _Walker:
+    """A person walking a closed waypoint loop at constant arc-length rate."""
 
-    def position_at(self, t: float) -> tuple[float, float]:
-        """Return (cx, cy) at time *t* (seconds since epoch of this source)."""
-        cx = self.cx + self.ax * math.sin(2 * math.pi * self.fx * t + self.px)
-        cy = self.cy + self.ay * math.sin(2 * math.pi * self.fy * t + self.py)
-        # Clamp so the person stays fully inside the frame
-        cx = max(self.bw / 2.0 + 0.01, min(1.0 - self.bw / 2.0 - 0.01, cx))
-        cy = max(self.bh / 2.0 + 0.01, min(1.0 - self.bh / 2.0 - 0.01, cy))
-        return cx, cy
+    route: tuple[tuple[float, float], ...]
+    speed: float          # normalised units per second along the loop
+    offset: float         # arc-length position at t = 0
+    sway_amp: float       # vertical gait bob (normalised)
+    sway_hz: float        # gait frequency (Hz)
+    phase: float          # per-person phase for sway + confidence ripple
+    colour: tuple[int, int, int]
+    bw: float = BBOX_WIDTH
+    bh: float = BBOX_HEIGHT
+    # Derived at construction; not constructor arguments.
+    _marks: list[float] = field(default_factory=list, init=False, repr=False)
+    perimeter: float = field(default=0.0, init=False)
+
+    def __post_init__(self) -> None:
+        marks = [0.0]
+        count = len(self.route)
+        for index in range(count):
+            ax, ay = self.route[index]
+            bx, by = self.route[(index + 1) % count]
+            marks.append(marks[-1] + math.hypot(bx - ax, by - ay))
+        self._marks = marks
+        self.perimeter = marks[-1]
+
+    # -- geometry -------------------------------------------------------
+    def centre_at(self, t: float) -> tuple[float, float]:
+        """Centre of the person, normalised, at simulation time *t*."""
+        if self.perimeter <= 0.0:
+            cx, cy = self.route[0]
+        else:
+            travelled = (self.offset + self.speed * t) % self.perimeter
+            leg = bisect.bisect_right(self._marks, travelled) - 1
+            leg = min(max(leg, 0), len(self.route) - 1)
+            span = self._marks[leg + 1] - self._marks[leg]
+            frac = 0.0 if span <= 0.0 else (travelled - self._marks[leg]) / span
+            # Cosine ease: zero rate at each waypoint, peak mid-leg.
+            eased = 0.5 - 0.5 * math.cos(math.pi * frac)
+            ax, ay = self.route[leg]
+            bx, by = self.route[(leg + 1) % len(self.route)]
+            cx = ax + (bx - ax) * eased
+            cy = ay + (by - ay) * eased
+        cy += self.sway_amp * math.sin(2.0 * math.pi * self.sway_hz * t + self.phase)
+        return _clamp_centre(cx, cy, self.bw, self.bh)
 
     def bbox_at(self, t: float) -> tuple[float, float, float, float]:
-        """Return (x, y, w, h) normalised bbox at time *t*.
+        """``(x, y, w, h)`` normalised bbox (top-left origin) at time *t*."""
+        cx, cy = self.centre_at(t)
+        return cx - self.bw / 2.0, cy - self.bh / 2.0, self.bw, self.bh
 
-        x, y is the top-left corner of the bounding box.
-        """
-        cx, cy = self.position_at(t)
-        x = cx - self.bw / 2.0
-        y = cy - self.bh / 2.0
-        return x, y, self.bw, self.bh
+    # -- detector-facing --------------------------------------------------
+    def confidence_at(self, t: float, base: float) -> float:
+        """Detector confidence with a small deterministic ripple."""
+        ripple = 0.02 * math.sin(7.3 * t + self.phase)
+        return min(1.0, max(0.5, base + ripple))
+
+
+def _clamp_centre(cx: float, cy: float, bw: float, bh: float) -> tuple[float, float]:
+    """Hold the whole bbox inside the frame."""
+    half_w = bw / 2.0 + _EDGE_MARGIN
+    half_h = bh / 2.0 + _EDGE_MARGIN
+    return (
+        min(max(cx, half_w), 1.0 - half_w),
+        min(max(cy, half_h), 1.0 - half_h),
+    )
+
+
+def _patrol_route(
+    rng: random.Random,
+    home: tuple[float, float],
+    radius: tuple[float, float],
+    vertices: int,
+) -> tuple[tuple[float, float], ...]:
+    """Lay *vertices* waypoints on a jittered ellipse around *home*."""
+    rx, ry = radius
+    route: list[tuple[float, float]] = []
+    for index in range(vertices):
+        angle = 2.0 * math.pi * index / vertices
+        wobble = rng.uniform(0.75, 1.15)
+        x = home[0] + rx * wobble * math.cos(angle)
+        y = home[1] + ry * wobble * math.sin(angle)
+        route.append(_clamp_centre(x, y, BBOX_WIDTH, BBOX_HEIGHT))
+    return tuple(route)
+
+
+def _build_walkers(num_targets: int, seed: int) -> list[_Walker]:
+    """Deterministically lay out ``num_targets`` patrol loops."""
+    rng = random.Random(seed)
+    # Per-person layout: (home box, radius box, waypoint count).
+    layouts = (
+        ((0.28, 0.40), (0.42, 0.56), (0.10, 0.18), (0.05, 0.10), 5),
+        ((0.58, 0.72), (0.38, 0.54), (0.08, 0.15), (0.06, 0.12), 7),
+    )
+    walkers: list[_Walker] = []
+    for index in range(num_targets):
+        home_x, home_y, rad_x, rad_y, vertices = layouts[index]
+        home = (rng.uniform(*home_x), rng.uniform(*home_y))
+        radius = (rng.uniform(*rad_x), rng.uniform(*rad_y))
+        route = _patrol_route(rng, home, radius, vertices)
+        walker = _Walker(
+            route=route,
+            speed=rng.uniform(0.05, 0.15),
+            offset=rng.uniform(0.0, 1.0),
+            sway_amp=rng.uniform(0.004, 0.012),
+            sway_hz=rng.uniform(0.8, 1.4),
+            phase=rng.uniform(0.0, 2.0 * math.pi),
+            colour=_PALETTE[index % len(_PALETTE)],
+        )
+        # A degenerate loop would park the person; nudge the offset onto the
+        # loop so ``offset`` is always a real arc-length position.
+        if walker.perimeter > 0.0:
+            walker.offset *= walker.perimeter
+        walkers.append(walker)
+    return walkers
 
 
 # ---------------------------------------------------------------------------
 # SimTargetSource
 # ---------------------------------------------------------------------------
-
-_PERSON_COLOURS = [
-    (60, 140, 220),   # warm orange-ish (BGR)
-    (220, 80, 60),    # blue-ish (BGR)
-]
-
 
 class SimTargetSource:
     """Synthetic person detection source -- no camera required.
@@ -111,14 +205,14 @@ class SimTargetSource:
     num_targets:
         1 or 2 synthetic persons.  Default 2.
     seed:
-        RNG seed for reproducible motion phase offsets.  Default 42.
+        Seed for the deterministic patrol layout.  Default 42.
     frame_width, frame_height:
-        Pixel dimensions of the optional rendered frame.  Default 1280×720.
+        Pixel dimensions of the rendered frame.  Default 1280x720.
     fps:
-        Frames per second used by ``get_observations()`` / ``render_frame()``
-        to advance internal time.  Default 30.
+        Rate at which ``get_observations()`` / ``render_frame()`` advance the
+        internal clock.  Default 30.
     base_confidence:
-        Simulated detector confidence (fixed per detection).  Default 0.92.
+        Centre of the simulated detector confidence.  Default 0.92.
     """
 
     def __init__(
@@ -133,126 +227,58 @@ class SimTargetSource:
         if num_targets < 1 or num_targets > 2:
             raise ValueError("SimTargetSource supports 1 or 2 targets.")
 
-        self._frame_width = frame_width
-        self._frame_height = frame_height
+        self._frame_width = int(frame_width)
+        self._frame_height = int(frame_height)
         self._fps = fps
         self._dt = 1.0 / max(fps, 1.0)
         self._base_conf = float(base_confidence)
-        self._t: float = 0.0           # internal simulation time (seconds)
-
-        # Build deterministic persons from seed
-        rng = np.random.default_rng(seed)
-
-        def _rand(lo: float, hi: float) -> float:
-            return float(rng.uniform(lo, hi))
-
-        persons_cfg = [
-            # Person 0 -- starts left-of-centre, moderate motion
-            dict(
-                cx=_rand(0.25, 0.40), cy=_rand(0.40, 0.60),
-                ax=_rand(0.10, 0.18), ay=_rand(0.05, 0.10),
-                fx=_rand(0.06, 0.12), fy=_rand(0.04, 0.09),
-                px=_rand(0.0, 2 * math.pi), py=_rand(0.0, 2 * math.pi),
-                colour=_PERSON_COLOURS[0],
-            ),
-            # Person 1 -- starts right-of-centre, slightly different cadence
-            dict(
-                cx=_rand(0.60, 0.75), cy=_rand(0.35, 0.55),
-                ax=_rand(0.08, 0.15), ay=_rand(0.06, 0.12),
-                fx=_rand(0.05, 0.10), fy=_rand(0.07, 0.13),
-                px=_rand(0.0, 2 * math.pi), py=_rand(0.0, 2 * math.pi),
-                colour=_PERSON_COLOURS[1],
-            ),
-        ]
-
-        self._persons: list[_SimPerson] = [
-            _SimPerson(**persons_cfg[i]) for i in range(num_targets)
-        ]
+        self._t: float = 0.0
+        self._walkers = _build_walkers(num_targets, seed)
+        self._backdrop: np.ndarray | None = None
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def advance(self, dt: float) -> None:
-        """Advance internal time by *dt* seconds (use for wall-clock stepping)."""
+        """Advance the internal clock by *dt* seconds (wall-clock stepping)."""
         self._t += dt
 
     def get_observations(self) -> list[TargetObservation]:
-        """Return a list of TargetObservation for the *current* simulation time.
-
-        Also advances internal time by 1/fps seconds.  Call ``advance(dt)``
-        instead if you are driving from a real clock.
-        """
+        """Detections for the current simulation time, then step the clock."""
         ts = time.time()
-        obs: list[TargetObservation] = []
-        for person in self._persons:
-            bbox = person.bbox_at(self._t)
-            # Add a tiny jitter to confidence to make it feel live
-            conf = min(1.0, max(0.5, self._base_conf + float(
-                math.sin(self._t * 7.3 + id(person) % 10) * 0.02
-            )))
-            obs.append(TargetObservation(bbox=bbox, conf=conf, ts=ts))
+        now = self._t
+        observations = [
+            TargetObservation(
+                bbox=walker.bbox_at(now),
+                conf=walker.confidence_at(now, self._base_conf),
+                ts=ts,
+            )
+            for walker in self._walkers
+        ]
         self._t += self._dt
-        return obs
+        return observations
 
     def observe(self) -> list[TargetObservation]:
-        """Perception-loop interface the orchestrator expects
-        (``source.observe() -> [TargetObservation]``). Alias of
-        :meth:`get_observations`."""
+        """Perception-loop interface (``source.observe() -> [TargetObservation]``).
+
+        Alias of :meth:`get_observations`.
+        """
         return self.get_observations()
 
     def render_frame(self) -> np.ndarray:
-        """Render a synthetic BGR frame showing the simulated persons.
+        """Render the scene as a HxWx3 uint8 BGR frame, then step the clock.
 
-        Returns a HxWx3 uint8 numpy array that Capture can forward to the
-        detector / stream / overlay pipeline.
-
-        The frame is:
-          * A dark grey background (sky / indoor wall analogue).
-          * Each simulated person drawn as a coloured filled rectangle with a
-            white border (representing a "person silhouette" placeholder).
-          * A small timestamp burn-in in the corner.
+        The scene is a dark graded backdrop with a horizon line; each person is
+        a coloured torso block under a lighter head disc, outlined in white and
+        sitting on a darkened ground shadow.  A small clock is burned into the
+        top-left corner so a recorded stream can be lined up with a log.
         """
-        frame = np.full(
-            (self._frame_height, self._frame_width, 3),
-            fill_value=40,   # dark grey
-            dtype=np.uint8,
-        )
-
-        for person in self._persons:
-            bx, by, bw, bh = person.bbox_at(self._t)
-            # Convert normalised to pixel coords
-            px1 = int(bx * self._frame_width)
-            py1 = int(by * self._frame_height)
-            px2 = int((bx + bw) * self._frame_width)
-            py2 = int((by + bh) * self._frame_height)
-            px1, py1 = max(0, px1), max(0, py1)
-            px2 = min(self._frame_width - 1, px2)
-            py2 = min(self._frame_height - 1, py2)
-
-            # Filled body rectangle
-            frame[py1:py2, px1:px2] = person.colour
-
-            # White border (1-pixel line simulation via slicing)
-            thickness = 2
-            frame[py1:py1 + thickness, px1:px2] = (255, 255, 255)
-            frame[py2 - thickness:py2, px1:px2] = (255, 255, 255)
-            frame[py1:py2, px1:px1 + thickness] = (255, 255, 255)
-            frame[py1:py2, px2 - thickness:px2] = (255, 255, 255)
-
-            # Head circle approximation (top quarter of bbox)
-            head_cx = (px1 + px2) // 2
-            head_cy = py1 + (py2 - py1) // 6
-            head_r = max(4, (px2 - px1) // 3)
-            # Draw head as a filled circle using a fast rasterisation trick
-            y_idx, x_idx = np.ogrid[0:self._frame_height, 0:self._frame_width]
-            mask = (x_idx - head_cx) ** 2 + (y_idx - head_cy) ** 2 <= head_r ** 2
-            frame[mask] = (200, 200, 230)
-
-        # Timestamp burn-in (top-left, simple pixel text via numpy -- no cv2 dep)
-        self._draw_timestamp(frame)
-
-        # Advance internal time (render_frame and get_observations share the clock)
+        frame = self._backdrop_template().copy()
+        now = self._t
+        for walker in self._walkers:
+            self._draw_walker(frame, walker, now)
+        self._burn_in_clock(frame)
         self._t += self._dt
         return frame
 
@@ -263,22 +289,98 @@ class SimTargetSource:
 
     @property
     def num_persons(self) -> int:
-        return len(self._persons)
+        return len(self._walkers)
+
+    @property
+    def frame_size(self) -> tuple[int, int]:
+        """``(width, height)`` of the rendered frame in pixels."""
+        return self._frame_width, self._frame_height
 
     # ------------------------------------------------------------------
-    # Private helpers
+    # Rendering
     # ------------------------------------------------------------------
 
-    def _draw_timestamp(self, frame: np.ndarray) -> None:
-        """Burn a very simple timestamp string into the frame corner.
+    def _backdrop_template(self) -> np.ndarray:
+        """Build (once) the static background every frame is stamped from."""
+        if self._backdrop is not None:
+            return self._backdrop
 
-        We do NOT import cv2 here to keep this module pure-numpy.  Instead
-        we draw a tiny white rectangle as a placeholder.  If cv2 is available
-        in the final deployment it can be used by the stream overlay.
+        height, width = self._frame_height, self._frame_width
+        # Vertical grade: darker overhead, lighter toward the ground.
+        grade = np.linspace(26.0, 58.0, height, dtype=np.float32)
+        plane = np.repeat(grade[:, None], width, axis=1)
+        backdrop = np.stack([plane + 10.0, plane + 4.0, plane], axis=2)
+        backdrop = np.clip(backdrop, 0.0, 255.0).astype(np.uint8)
+
+        horizon = int(height * 0.62)
+        if 0 <= horizon < height:
+            backdrop[horizon:horizon + 2, :] = (90, 84, 74)
+
+        self._backdrop = backdrop
+        return backdrop
+
+    def _pixel_box(self, walker: _Walker, t: float) -> tuple[int, int, int, int]:
+        """Walker bbox in pixel coords, clipped to the frame."""
+        bx, by, bw, bh = walker.bbox_at(t)
+        width, height = self._frame_width, self._frame_height
+        x0 = max(0, min(width - 1, int(round(bx * width))))
+        y0 = max(0, min(height - 1, int(round(by * height))))
+        x1 = max(0, min(width, int(round((bx + bw) * width))))
+        y1 = max(0, min(height, int(round((by + bh) * height))))
+        return x0, y0, x1, y1
+
+    def _draw_walker(self, frame: np.ndarray, walker: _Walker, t: float) -> None:
+        x0, y0, x1, y1 = self._pixel_box(walker, t)
+        box_w, box_h = x1 - x0, y1 - y0
+        if box_w < 4 or box_h < 4:
+            return
+
+        # Ground shadow first, so the body draws over its near edge.
+        shadow_h = max(2, box_h // 24)
+        shadow_y = min(self._frame_height, y1 + shadow_h)
+        if shadow_y > y1:
+            shadow = frame[y1:shadow_y, x0:x1]
+            shadow //= 2
+
+        body = frame[y0:y1, x0:x1]
+        head_r = max(2, min(box_w // 3, box_h // 6))
+
+        # Torso block below the head, then the outline, then the head on top.
+        body[head_r:, :] = walker.colour
+        body[0:2, :] = _OUTLINE_COLOUR
+        body[-2:, :] = _OUTLINE_COLOUR
+        body[:, 0:2] = _OUTLINE_COLOUR
+        body[:, -2:] = _OUTLINE_COLOUR
+
+        head = body[0:2 * head_r, :]
+        rows, cols = head.shape[0], head.shape[1]
+        y_idx, x_idx = np.ogrid[0:rows, 0:cols]
+        disc = (x_idx - cols // 2) ** 2 + (y_idx - head_r) ** 2 <= head_r ** 2
+        head[disc] = _HEAD_COLOUR
+
+    def _burn_in_clock(self, frame: np.ndarray) -> None:
+        """Burn a pure-numpy clock into the top-left corner (no cv2 needed).
+
+        Ten fixed slots count whole seconds modulo 10; the bar beneath them
+        sweeps once per second.  Together they identify any single frame of a
+        recording to within a tenth of a second.
         """
-        # Draw a small white indicator strip at the top-left corner.
-        h_strip = 4
-        w_strip = int(self._frame_width * (self._t % 1.0))
-        w_strip = max(0, min(self._frame_width - 1, w_strip))
-        if w_strip > 0:
-            frame[0:h_strip, 0:w_strip] = (200, 200, 200)
+        width = self._frame_width
+        slot_w = max(2, width // 80)
+        gap = max(1, slot_w // 3)
+        lit = int(self._t) % 10 + 1
+        x = 0
+        for index in range(10):
+            if x + slot_w > width:
+                break
+            if index < lit:
+                frame[2:5, x:x + slot_w] = _CLOCK_ON
+            x += slot_w + gap
+
+        sweep = int(width * (self._t % 1.0))
+        sweep = max(0, min(width, sweep))
+        if sweep > 0:
+            frame[7:9, 0:sweep] = _CLOCK_SWEEP
+
+
+__all__ = ["SimTargetSource", "BBOX_WIDTH", "BBOX_HEIGHT"]

@@ -1,25 +1,28 @@
 /**
- * ipc.ts — registers all ipcMain handlers that implement the ElectronBridge
- * contract on the main-process side.
+ * ipc.ts — main-process side of the `window.eis` bridge.
  *
- * Channel naming matches what preload.ts calls via ipcRenderer.invoke / .send.
+ * One handler per channel preload.ts relays to. The channel names are the
+ * contract; the table at the bottom of this file is the only place they are
+ * bound to code, and `registerIpcHandlers()` walks it.
  *
- * Channels:
- *   settings:get       invoke → Promise<value | undefined>
- *   settings:set       invoke → Promise<void>
- *   settings:all       invoke → Promise<Record<string, unknown>>
+ *   settings:get        invoke  (key)            → value | undefined
+ *   settings:set        invoke  (key, value)     → void  (resolves after the write)
+ *   settings:all        invoke  ()               → Record<string, unknown>
+ *   recorder:start      invoke  (meta?)          → { sessionId }
+ *   recorder:stop       invoke  ()               → { sessionId, path } | null
+ *   recorder:append     send    (frame)          one-way, never acked
+ *   recorder:list       invoke  ()               → SessionMeta[]
+ *   recorder:load       invoke  (id)             → { meta, frames } | null
+ *   app:version         invoke  ()               → string
+ *   app:defaultConfig   invoke  ()               → Partial<ConnectionConfig> from env
+ *   site:load           invoke  ()               → site JSON text (EIS_SITE_FILE)
+ *   site:resolveAsset   invoke  (path)           → data: URL | null
  *
- *   recorder:start     invoke → Promise<{ sessionId }>
- *   recorder:stop      invoke → Promise<{ sessionId, path } | null>
- *   recorder:append    send   (one-way, fire-and-forget)
- *   recorder:list      invoke → Promise<SessionMeta[]>
- *   recorder:load      invoke → Promise<{ meta, frames } | null>
+ * planner:* and sdr:* are registered by phase3Host.ts (not owned here).
  *
- *   app:version        invoke → Promise<string>
- *   app:defaultConfig  invoke → Promise<Partial<ConnectionConfig>>
- *
- *   site:load            invoke → Promise<string>   (site JSON text, EIS_SITE_FILE)
- *   site:resolveAsset    invoke → Promise<string | null>  (site image as a data URL)
+ * The env → config and path → asset rules are pure functions exported for the
+ * shell self-check (scripts/selfcheck.cjs); the handlers only bind them to
+ * process state.
  */
 
 import * as fs from 'fs';
@@ -29,125 +32,160 @@ import { settingsStore } from './settingsStore';
 import { recorder } from './recorder';
 import { registerPhase3Handlers } from './phase3Host';
 
+/* ── app:defaultConfig ──────────────────────────────────────────────────── */
+
 /** Subset of ConnectionConfig — only what the main process provides as defaults */
-interface DefaultConnectionConfig {
+export interface DefaultConnectionConfig {
   host?: string;
   controlPort?: number;
   videoUrl?: string;
   sitl?: boolean;
 }
 
+const DEFAULT_HOST = 'sitl';
+const DEFAULT_CONTROL_PORT = 8765;
+const SITL_FLAG_VALUES = new Set(['true', '1', 'yes']);
+
+/**
+ * Connection defaults baked from the environment (platform/.env via dotenv).
+ *
+ *   EIS_HOST          companion host, default "sitl"
+ *   EIS_CONTROL_PORT  WebSocket port, default 8765 (a non-port value falls back)
+ *   EIS_VIDEO_URL     default ""
+ *   EIS_SITL          true/1/yes; also implied by EIS_HOST=sitl
+ */
+export function defaultConnectionConfig(env: NodeJS.ProcessEnv): DefaultConnectionConfig {
+  const host = env['EIS_HOST'] ?? DEFAULT_HOST;
+
+  const portText = env['EIS_CONTROL_PORT'];
+  const parsedPort = portText === undefined ? NaN : Number.parseInt(portText, 10);
+  const controlPort = Number.isInteger(parsedPort) && parsedPort > 0 && parsedPort <= 65535
+    ? parsedPort
+    : DEFAULT_CONTROL_PORT;
+
+  const videoUrl = env['EIS_VIDEO_URL'] ?? '';
+  const sitlFlag = (env['EIS_SITL'] ?? '').trim().toLowerCase();
+  const sitl = host === DEFAULT_HOST || SITL_FLAG_VALUES.has(sitlFlag);
+
+  return { host, controlPort, videoUrl, sitl };
+}
+
+/* ── Asset roots ────────────────────────────────────────────────────────── */
+
 /**
  * Root that repo-root-relative asset paths (docs/SITE_CONTRACT.md) resolve
  * against:
  *   • packaged        → process.resourcesPath (extraResources land there)
- *   • dev/unpackaged  → the repo root
- *     (dist-electron → ground/app/<os> → ground/app → ground → repo root)
+ *   • dev/unpackaged  → the platform root
+ *     (dist-electron → ground/app/<os> → ground/app → ground → platform)
  */
 function assetRoot(): string {
-  if (app.isPackaged) return process.resourcesPath;
-  return path.join(__dirname, '..', '..', '..', '..');
+  return app.isPackaged
+    ? process.resourcesPath
+    : path.resolve(__dirname, '..', '..', '..', '..');
 }
 
-/** Resolve a repo-root-relative (or absolute) path against assetRoot(). */
-function resolveAsset(p: string): string {
-  return path.isAbsolute(p) ? p : path.join(assetRoot(), p);
+/** A repo-root-relative (or absolute) path, anchored at `root`. */
+function anchored(root: string, p: string): string {
+  return path.isAbsolute(p) ? p : path.join(root, p);
 }
+
+/* ── site:load ──────────────────────────────────────────────────────────── */
+
+/**
+ * Which site file `site:load` reads (docs/SITE_CONTRACT.md):
+ *   EIS_SITE_FILE set → exactly that file, repo-root-relative; a missing file
+ *                       is an error, never a silent fallback
+ *   otherwise         → site/site.json, or site/site.stub.json when the real
+ *                       deliverable is absent
+ */
+export function selectSiteFile(env: NodeJS.ProcessEnv, root: string): string {
+  const explicit = env['EIS_SITE_FILE'];
+  if (explicit) return anchored(root, explicit);
+  const primary = anchored(root, path.join('site', 'site.json'));
+  return fs.existsSync(primary) ? primary : anchored(root, path.join('site', 'site.stub.json'));
+}
+
+/** The directory site-relative asset references resolve inside. */
+export function siteDirectory(env: NodeJS.ProcessEnv, root: string): string {
+  const explicit = env['EIS_SITE_FILE'];
+  return explicit ? path.dirname(anchored(root, explicit)) : anchored(root, 'site');
+}
+
+/* ── site:resolveAsset ──────────────────────────────────────────────────── */
+
+const IMAGE_MIME: Readonly<Record<string, string>> = {
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+};
+
+/**
+ * Resolve a site-declared image reference to a data: URL, or null.
+ *
+ * Only an existing raster image that lives strictly INSIDE `siteDir` is ever
+ * returned: a leading "site/" is tolerated (contract paths are repo-root-
+ * relative), backslashes are normalised, and anything that escapes the
+ * directory, is not png/jpeg/webp, or does not exist yields null.
+ */
+export function siteAssetDataUrl(requested: unknown, siteDir: string): string | null {
+  if (typeof requested !== 'string' || requested.includes('\0')) return null;
+
+  const relative = requested.replace(/\\/g, '/').replace(/^site\//, '');
+  const base = path.resolve(siteDir);
+  const target = path.resolve(base, relative);
+
+  const inside = path.relative(base, target);
+  if (inside === '' || inside.startsWith('..') || path.isAbsolute(inside)) return null;
+
+  const mime = IMAGE_MIME[path.extname(target).toLowerCase()];
+  if (!mime) return null;
+
+  let bytes: Buffer;
+  try {
+    bytes = fs.readFileSync(target);
+  } catch {
+    return null;
+  }
+  return `data:${mime};base64,${bytes.toString('base64')}`;
+}
+
+/* ── Registration ───────────────────────────────────────────────────────── */
+
+type InvokeHandler = (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown;
+type MessageHandler = (event: Electron.IpcMainEvent, ...args: unknown[]) => void;
 
 export function registerIpcHandlers(): void {
-  registerPhase3Handlers(assetRoot());
-  // ── Settings ──────────────────────────────────────────────────────────────
-  ipcMain.handle('settings:get', (_event, key: string) => {
-    return settingsStore.get(key);
-  });
+  const root = assetRoot();
+  registerPhase3Handlers(root);
 
-  ipcMain.handle('settings:set', (_event, key: string, value: unknown) => {
-    return settingsStore.set(key, value);
-  });
+  const requests: Record<string, InvokeHandler> = {
+    'settings:get': (_e, key) => settingsStore.get(key as string),
+    'settings:set': (_e, key, value) => settingsStore.set(key as string, value),
+    'settings:all': () => settingsStore.all(),
 
-  ipcMain.handle('settings:all', () => {
-    return settingsStore.all();
-  });
+    'recorder:start': (_e, meta) => recorder.start(meta as Record<string, unknown> | undefined),
+    'recorder:stop': () => recorder.stop(),
+    'recorder:list': () => recorder.list(),
+    'recorder:load': (_e, id) => recorder.load(id as string),
 
-  // ── Recorder ──────────────────────────────────────────────────────────────
-  ipcMain.handle('recorder:start', (_event, meta?: Record<string, unknown>) => {
-    return recorder.start(meta);
-  });
+    'app:version': () => app.getVersion(),
+    'app:defaultConfig': () => defaultConnectionConfig(process.env),
 
-  ipcMain.handle('recorder:stop', () => {
-    return recorder.stop();
-  });
+    'site:load': () => fs.readFileSync(selectSiteFile(process.env, root), 'utf8'),
+    'site:resolveAsset': (_e, requested) => siteAssetDataUrl(requested, siteDirectory(process.env, root)),
+  };
 
-  // Fire-and-forget — use ipcMain.on (not handle) to match ipcRenderer.send
-  ipcMain.on('recorder:append', (_event, frame: unknown) => {
-    recorder.append(frame);
-  });
+  // One-way channels (ipcRenderer.send ↔ ipcMain.on): no reply, no backpressure.
+  const messages: Record<string, MessageHandler> = {
+    'recorder:append': (_e, frame) => recorder.append(frame),
+  };
 
-  ipcMain.handle('recorder:list', () => {
-    return recorder.list();
-  });
+  for (const [channel, handler] of Object.entries(requests)) ipcMain.handle(channel, handler);
+  for (const [channel, handler] of Object.entries(messages)) ipcMain.on(channel, handler);
 
-  ipcMain.handle('recorder:load', (_event, id: string) => {
-    return recorder.load(id);
-  });
-
-  // ── App metadata ──────────────────────────────────────────────────────────
-  ipcMain.handle('app:version', () => {
-    return Promise.resolve(app.getVersion());
-  });
-
-  ipcMain.handle('app:defaultConfig', (): DefaultConnectionConfig => {
-    const host = process.env['EIS_HOST'] ?? 'sitl';
-    const portStr = process.env['EIS_CONTROL_PORT'];
-    const controlPort = portStr ? parseInt(portStr, 10) : 8765;
-    const videoUrl = process.env['EIS_VIDEO_URL'] ?? '';
-    const sitlStr = process.env['EIS_SITL'];
-    // Default to sitl=true if host is "sitl" or EIS_SITL is truthy
-    const sitl =
-      host === 'sitl' ||
-      sitlStr === 'true' ||
-      sitlStr === '1' ||
-      sitlStr === 'yes';
-
-    return { host, controlPort, videoUrl, sitl };
-  });
-
-  // ── Site model + baked satellite assets (hackathon retrofit) ──────────────
-  // Site JSON selection per docs/SITE_CONTRACT.md: EIS_SITE_FILE (repo-root-
-  // relative), default site/site.json; the default falls back to
-  // site/site.stub.json when the real deliverable is absent. An explicitly set
-  // EIS_SITE_FILE never silently falls back — a missing file rejects loudly.
-  ipcMain.handle('site:load', (): string => {
-    const envFile = process.env['EIS_SITE_FILE'];
-    if (envFile) {
-      return fs.readFileSync(resolveAsset(envFile), 'utf8');
-    }
-    const primary = resolveAsset('site/site.json');
-    if (fs.existsSync(primary)) {
-      return fs.readFileSync(primary, 'utf8');
-    }
-    return fs.readFileSync(resolveAsset('site/site.stub.json'), 'utf8');
-  });
-  ipcMain.handle('site:resolveAsset', (_event, requested: string): string | null => {
-    if (typeof requested !== 'string' || requested.includes('\0')) return null;
-    const envFile = process.env['EIS_SITE_FILE'];
-    const siteDir = envFile ? path.dirname(resolveAsset(envFile)) : resolveAsset('site');
-    const relative = requested.replace(/\\/g, '/').replace(/^site\//, '');
-    const resolved = path.resolve(siteDir, relative);
-    if (!resolved.startsWith(path.resolve(siteDir) + path.sep) || !/\.(png|jpe?g|webp)$/i.test(resolved) || !fs.existsSync(resolved)) return null;
-    const ext = path.extname(resolved).toLowerCase();
-    const mime = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-    return `data:${mime};base64,${fs.readFileSync(resolved).toString('base64')}`;
-  });
-
-  // NOTE (FM-148): there is no `satellite:loadTiles` handler.
-  //
-  // It existed, and nothing ever called it. `SatellitePanel.tsx` imports the
-  // baked tiles through the `@satdata` Vite alias, so they are already in the
-  // renderer bundle in every build — dev, preview and packaged alike. The
-  // handler's own comment described a "renderer can fall back to a dev-server
-  // fetch" contract that the renderer does not implement and does not need,
-  // and its `extraResources` entry copied ~870 KB of PNG into every installer
-  // for a handler that was never invoked. Both are gone rather than left as a
-  // recovery path an operator might one day be told to rely on.
+  // There is deliberately no `satellite:loadTiles` (FM-148): the baked tiles
+  // reach the renderer through the `@satdata` Vite alias in every build, and
+  // the handler that once shadowed that path was never invoked.
 }

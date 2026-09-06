@@ -21,7 +21,7 @@ const battery = (soc = 92): BatteryState => ({
 });
 
 const anomaly: Anomaly = {
-  id: 'cue-east-yard', lat: -26.0891, lon: 29.47515, type: 'motion', confidence: 0.9,
+  id: 'cue-east-yard', lat: 41.1997305, lon: -98.3988061, type: 'motion', confidence: 0.9,
   thumbnail: 'site/staging/stage-b.png', source: 'cctv', observedAt: NOW, ttl_s: 900,
 };
 
@@ -46,8 +46,8 @@ const vehicle = (id: string, position: { lat: number; lon: number },
   context: context({ currentPosition: position, ...over }),
 });
 
-const near = { lat: -26.0895, lon: 29.4750 };
-const far = { lat: -26.0935, lon: 29.4690 };
+const near = { lat: 41.1996407, lon: -98.398567 };
+const far = { lat: 41.1986525, lon: -98.4014327 };
 
 describe('fleet allocation', () => {
   it('picks the nearest ready vehicle with range', () => {

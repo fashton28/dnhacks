@@ -12,60 +12,60 @@
   "site": "../site/site.stub.json",
   "task": {
     "task": {
-      "taskId": "task-stub-east-fence-south",
-      "anomalyId": "stub-east-fence-south",
+      "taskId": "task-stub-east-fence-north",
+      "anomalyId": "stub-east-fence-north",
       "lookFor": "fence_gap",
-      "question": "Is there a gap in the fence line at the cctv cue stub-east-fence-south?",
+      "question": "Is there a gap in the fence line at the cctv cue stub-east-fence-north?",
       "urgency": "immediate",
       "priority": 0.792,
       "rationale": "Rank 1: cctv reliability 0.90; confidence 0.88; age 0 s.",
       "source": "scripted"
     },
     "anomaly": {
-      "id": "stub-east-fence-south",
-      "lat": -26.092,
-      "lon": 29.4763,
+      "id": "stub-east-fence-north",
+      "lat": 41.200539,
+      "lon": -98.398149,
       "type": "breach",
       "confidence": 0.88,
       "thumbnail": "site/staging/stage-a.png",
       "source": "cctv",
       "observedAt": 1757116800000,
       "ttl_s": 900,
-      "cameraId": "cam-east-south"
+      "cameraId": "cam-east-north"
     }
   },
   "plan": {
     "requestId": "fixture-V36",
-    "anomalyId": "stub-east-fence-south",
+    "anomalyId": "stub-east-fence-north",
     "profile": "inspect",
-    "rationale": "Deterministic inspect of fence_gap at cue stub-east-fence-south for task task-stub-east-fence-south: Is there a gap in the fence line at the cctv cue stub-east-fence-south? Route, altitude, radius and duration come from the rule table, not from the cue.",
+    "rationale": "Deterministic inspect of fence_gap at cue stub-east-fence-north for task task-stub-east-fence-north: Is there a gap in the fence line at the cctv cue stub-east-fence-north? Route, altitude, radius and duration come from the rule table, not from the cue.",
     "tools": [
       {
         "tool": "goto_gps",
-        "lat": -26.09,
-        "lon": 29.4719,
-        "alt": 32.5,
+        "lat": 41.199236,
+        "lon": -98.399582,
+        "alt": 25,
         "profile": "inspect"
       },
       {
         "tool": "goto_gps",
-        "lat": -26.091056,
-        "lon": 29.476192,
-        "alt": 32.5,
+        "lat": 41.19973,
+        "lon": -98.398404,
+        "alt": 25,
         "profile": "inspect"
       },
       {
         "tool": "goto_gps",
-        "lat": -26.091919,
-        "lon": 29.476122,
-        "alt": 32.5,
+        "lat": 41.200366,
+        "lon": -98.39834,
+        "alt": 25,
         "profile": "inspect"
       },
       {
         "tool": "orbit_point",
-        "lat": -26.092,
-        "lon": 29.4763,
-        "radius": 19.9,
+        "lat": 41.200539,
+        "lon": -98.398149,
+        "radius": 25,
         "laps": 1
       },
       {
@@ -74,9 +74,9 @@
       },
       {
         "tool": "goto_gps",
-        "lat": -26.091056,
-        "lon": 29.476192,
-        "alt": 32.5,
+        "lat": 41.19973,
+        "lon": -98.398404,
+        "alt": 25,
         "profile": "inspect"
       },
       {
@@ -110,7 +110,7 @@
       },
       {
         "rule": "orbit",
-        "effect": "orbit radius shrunk to clear the buffered no-fly zones and the geofence, never below standoff"
+        "effect": "profile orbit radius clears the buffered no-fly zones and the geofence"
       },
       {
         "rule": "laps",
@@ -149,56 +149,67 @@
       "legs": [
         {
           "from": {
-            "lat": -26.09,
-            "lon": 29.4719
+            "lat": 41.199236,
+            "lon": -98.399582
           },
           "to": {
-            "lat": -26.091056,
-            "lon": 29.476192
+            "lat": 41.199236,
+            "lon": -98.399582
           },
           "lateral_tol_m": 10
         },
         {
           "from": {
-            "lat": -26.091056,
-            "lon": 29.476192
+            "lat": 41.199236,
+            "lon": -98.399582
           },
           "to": {
-            "lat": -26.091919,
-            "lon": 29.476122
+            "lat": 41.19973,
+            "lon": -98.398404
           },
           "lateral_tol_m": 10
         },
         {
           "from": {
-            "lat": -26.091919,
-            "lon": 29.476122
+            "lat": 41.19973,
+            "lon": -98.398404
           },
           "to": {
-            "lat": -26.091919,
-            "lon": 29.476122
+            "lat": 41.200366,
+            "lon": -98.39834
           },
           "lateral_tol_m": 10
         },
         {
           "from": {
-            "lat": -26.091919,
-            "lon": 29.476122
+            "lat": 41.200366,
+            "lon": -98.39834
           },
           "to": {
-            "lat": -26.091056,
-            "lon": 29.476192
+            "lat": 41.200366,
+            "lon": -98.39834
           },
           "lateral_tol_m": 10
         },
         {
           "from": {
-            "lat": -26.091056,
-            "lon": 29.476192
+            "lat": 41.200366,
+            "lon": -98.39834
           },
           "to": {
-            "lat": -26.09,
-            "lon": 29.4719
+            "lat": 41.19973,
+            "lon": -98.398404
+          },
+          "lateral_tol_m": 10
+        },
+        {
+          "from": {
+            "lat": 41.19973,
+            "lon": -98.398404
+          },
+          "to": {
+            "lat": 41.199236,
+            "lon": -98.399582
           },
           "lateral_tol_m": 10
         }
@@ -206,15 +217,15 @@
       "orbits": [
         {
           "center": {
-            "lat": -26.092,
-            "lon": 29.4763
+            "lat": 41.200539,
+            "lon": -98.398149
           },
-          "radius_m": 19.9,
+          "radius_m": 25,
           "radial_tol_m": 5
         }
       ],
       "alt_band_m": {
-        "min": 20,
+        "min": 5,
         "max": 45
       },
       "generated_from": "fixture-V36"
@@ -222,7 +233,7 @@
   },
   "probeTask": {
     "taskId": "probe-V36",
-    "anomalyId": "stub-east-fence-south",
+    "anomalyId": "stub-east-fence-north",
     "lookFor": "vehicle",
     "question": "What is at the flagged change?",
     "urgency": "immediate",
@@ -233,16 +244,16 @@
   "probeRequestId": "probe-V36",
   "telemetry": {
     "anomaly": {
-      "id": "stub-east-fence-south",
-      "lat": -26.092,
-      "lon": 29.4763,
+      "id": "stub-east-fence-north",
+      "lat": 41.200539,
+      "lon": -98.398149,
       "type": "breach",
       "confidence": 0.88,
       "thumbnail": "site/staging/stage-a.png",
       "source": "cctv",
       "observedAt": 1757116800000,
       "ttl_s": 900,
-      "cameraId": "cam-east-south"
+      "cameraId": "cam-east-north"
     },
     "vehicleId": "eis-1",
     "now": 1757116800000,

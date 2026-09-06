@@ -47,8 +47,8 @@ from eis_companion.control.envelope import (
     worst_finding,
 )
 
-# Komati stub geometry (site/site.stub.json).
-HOME_LAT, HOME_LON = -26.0900, 29.4719
+# Meridian Station stub geometry (site/site.stub.json).
+HOME_LAT, HOME_LON = 41.1992364, -98.3995821
 M_PER_DEG_LAT = 111_320.0
 
 TOL_M = 10.0                      # inspect lateral tolerance (ADR D21)
@@ -219,14 +219,14 @@ def test_vehicle_only_has_to_be_inside_one_corridor_element():
 # Containment: geofence + NFZ -> rtl
 # ==========================================================================
 FENCE = (
-    (-26.0871, 29.4677), (-26.0871, 29.4765),
-    (-26.0936, 29.4765), (-26.0936, 29.4677),
+    (41.1980237, -98.4026266), (41.1980237, -98.3973734),
+    (41.2019763, -98.3973734), (41.2019763, -98.4026266),
 )
 NFZ = MonitoredZone(
     name="switchyard",
-    polygon=((-26.09135, 29.47365), (-26.09135, 29.47575),
-             (-26.09275, 29.47575), (-26.09275, 29.47365)),
-    ceiling_m=80.0,
+    polygon=((41.2001069, -98.3994998), (41.2001069, -98.3988288),
+             (41.2007016, -98.3988288), (41.2007016, -98.3994998)),
+    ceiling_m=60.0,
 )
 
 
@@ -234,7 +234,7 @@ def test_geofence_margin_intrusion_returns_to_launch():
     geometry = SiteGeometry(geofence=FENCE, nfz=(), nfz_buffer_m=25.0)
     # 1 m inside the northern fence edge: inside the polygon, inside the margin.
     sample = EnvelopeSample(
-        lat=-26.0871 - 1.0 / M_PER_DEG_LAT, lon=29.472, rel_alt_m=40.0
+        lat=41.2019763 - 1.0 / M_PER_DEG_LAT, lon=-98.4, rel_alt_m=40.0
     )
     decision = evaluate(sample, geometry=geometry, limits=LIMITS)
     assert decision.constraint == "geofence"
@@ -247,7 +247,7 @@ def test_nfz_buffer_intrusion_returns_to_launch():
     # 10 m north of the switchyard's northern edge: outside the polygon but
     # well inside the 25 m buffer.
     sample = EnvelopeSample(
-        lat=-26.09135 + 10.0 / M_PER_DEG_LAT, lon=29.4747, rel_alt_m=40.0
+        lat=41.2007016 + 10.0 / M_PER_DEG_LAT, lon=-98.3991643, rel_alt_m=40.0
     )
     decision = evaluate(sample, geometry=geometry, limits=LIMITS)
     assert decision.constraint == "nfz"
@@ -258,8 +258,8 @@ def test_overflight_above_the_nfz_ceiling_is_permitted():
     """ADR D3: inside the polygon at or below the ceiling is forbidden;
     overflight above it is allowed."""
     geometry = SiteGeometry(geofence=FENCE, nfz=(NFZ,), nfz_buffer_m=25.0)
-    inside = EnvelopeSample(lat=-26.0920, lon=29.4747, rel_alt_m=40.0)
-    over = EnvelopeSample(lat=-26.0920, lon=29.4747, rel_alt_m=100.0)
+    inside = EnvelopeSample(lat=41.2004042, lon=-98.3991643, rel_alt_m=40.0)
+    over = EnvelopeSample(lat=41.2004042, lon=-98.3991643, rel_alt_m=100.0)
     assert evaluate(inside, geometry=geometry).action == "rtl"
     assert evaluate(over, geometry=geometry).action == "none"
 
@@ -381,7 +381,7 @@ def test_a_worse_constraint_supersedes_a_milder_latch():
     assert warned.action == "slow"
 
     into_nfz = EnvelopeSample(
-        t_s=0.05, lat=-26.0920, lon=29.4747, rel_alt_m=40.0, airborne=True
+        t_s=0.05, lat=41.2004042, lon=-98.3991643, rel_alt_m=40.0, airborne=True
     )
     assert monitor.update(into_nfz).action == "rtl"
 
@@ -407,7 +407,7 @@ def test_disarm_drops_the_corridor_but_not_the_site_geometry():
     assert monitor.armed is False
     assert monitor.update(offset_sample(40.0, t_s=1.0)).state == STATE_IN_ENVELOPE
     # Containment still applies with no plan loaded.
-    into_nfz = EnvelopeSample(t_s=2.0, lat=-26.0920, lon=29.4747, rel_alt_m=40.0)
+    into_nfz = EnvelopeSample(t_s=2.0, lat=41.2004042, lon=-98.3991643, rel_alt_m=40.0)
     assert monitor.update(into_nfz).action == "rtl"
 
 
@@ -449,12 +449,12 @@ def test_malformed_corridor_parts_are_dropped_not_guessed(raw):
 # Geometry helpers
 # ==========================================================================
 def test_signed_distance_is_positive_inside_and_negative_outside():
-    inside = signed_distance_inside_m((-26.0900, 29.4719), FENCE)
-    outside = signed_distance_inside_m((-26.0800, 29.4719), FENCE)
+    inside = signed_distance_inside_m((41.1992364, -98.3995821), FENCE)
+    outside = signed_distance_inside_m((41.2100000, -98.3995821), FENCE)
     assert inside > 0.0
     assert outside < 0.0
-    assert point_in_polygon((-26.0900, 29.4719), FENCE)
-    assert not point_in_polygon((-26.0800, 29.4719), FENCE)
+    assert point_in_polygon((41.1992364, -98.3995821), FENCE)
+    assert not point_in_polygon((41.2100000, -98.3995821), FENCE)
 
 
 def test_degenerate_polygon_constrains_nothing_rather_than_faking_a_breach():

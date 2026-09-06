@@ -1,33 +1,140 @@
 """
-PID controller -- pure stdlib, dt-aware, output-clamped, with anti-windup.
+Discrete PID controller for the guidance servo channels.
 
-Used by the guidance visual-servoing loops (yaw / climb / forward). Kept
-hardware-free and dependency-free so it unit-tests in isolation.
+Three pieces, so the arithmetic is testable without a controller object:
+
+  PIDGains   the tuning record: (kp, ki, kd), the output band and an optional
+             cap on the integrator sum. Immutable.
+  PIDState   what one step must remember: the integrator sum and the previous
+             error. Immutable -- a step returns a NEW state, never mutates.
+  pid_step   the pure step: (gains, state, error, dt) -> (output, next_state).
+
+``PID`` is the stateful facade the control core instantiates. Its field order
+``(kp, ki, kd, out_min, out_max, integral_limit)`` is positional API: callers
+write ``PID(*gain_triple)`` and ``PID(kp, ki, kd, out_min=.., out_max=..)``.
+
+Behaviour the rest of the system relies on
+------------------------------------------
+* The returned output always lies inside ``[out_min, out_max]`` (a swapped
+  band is tolerated).
+* Anti-windup is the *tracking* form: whenever the unsaturated sum leaves the
+  band, the integrator is re-solved so that ``P + I + D`` sits exactly on the
+  bound. The integrator can never hold more authority than the band can
+  spend, so a reversal of the error is answered immediately, not after the
+  surplus has been paid off. ``integral_limit`` additionally caps the raw
+  integrator sum when given.
+* ``dt <= 0`` is "no time elapsed": nothing is integrated and no derivative is
+  formed. The error is still remembered so the next real step differentiates
+  against the most recent sample rather than a stale one.
+* The first step after construction or ``reset()`` forms no derivative.
+* A non-finite ``error`` or ``dt`` is refused outright: the output is ``0.0``
+  and the state is returned unchanged, so a single NaN cannot poison the
+  integrator or the derivative memory (FM-07).
+* ``set_gains`` retunes live and leaves the state alone.
+
+stdlib only.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import NamedTuple, Optional, Tuple
+
+
+class PIDState(NamedTuple):
+    """Controller memory. ``prev_error is None`` means "no sample seen yet"."""
+    integral: float = 0.0
+    prev_error: Optional[float] = None
+
+
+class PIDGains(NamedTuple):
+    """Tuning + output band. ``integral_limit=None`` means no explicit cap."""
+    kp: float
+    ki: float
+    kd: float
+    out_min: float
+    out_max: float
+    integral_limit: Optional[float]
+
+    @property
+    def band(self) -> Tuple[float, float]:
+        """The output band as (lo, hi), ordered even if configured swapped."""
+        lo, hi = float(self.out_min), float(self.out_max)
+        return (lo, hi) if lo <= hi else (hi, lo)
+
+
+def _as_finite(value) -> Optional[float]:
+    """float(value) if it is a finite number, else None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _saturate(value: float, lo: float, hi: float) -> float:
+    """Clamp to [lo, hi]. A non-finite value becomes 0.0 -- never a bound.
+
+    ``min(hi, nan)`` is ``hi`` under CPython, so the naive clamp would turn an
+    unusable number into the maximum commanded output (FM-06).
+    """
+    if not math.isfinite(value):
+        return 0.0
+    return lo if value < lo else hi if value > hi else value
+
+
+def pid_step(
+    gains: PIDGains, state: PIDState, error: float, dt: float
+) -> Tuple[float, PIDState]:
+    """Advance one PID step. Pure: returns ``(output, next_state)``.
+
+    See the module docstring for the contract. ``state`` is never mutated.
+    """
+    e = _as_finite(error)
+    step = _as_finite(dt)
+    if e is None or step is None:
+        return 0.0, state
+
+    lo, hi = gains.band
+    elapsed = step > 0.0
+
+    proportional = gains.kp * e
+
+    derivative = 0.0
+    if elapsed and state.prev_error is not None:
+        derivative = gains.kd * (e - state.prev_error) / step
+
+    integral = state.integral
+    if elapsed and gains.ki != 0.0:
+        integral += e * step
+        if gains.integral_limit is not None:
+            cap = abs(float(gains.integral_limit))
+            integral = _saturate(integral, -cap, cap)
+
+    unsaturated = proportional + gains.ki * integral + derivative
+    output = _saturate(unsaturated, lo, hi)
+
+    if elapsed and gains.ki != 0.0 and output != unsaturated:
+        # Tracking anti-windup: hand the excess back to the integrator so the
+        # stored I contribution is exactly what the band could spend.
+        integral -= (unsaturated - output) / gains.ki
+        if not math.isfinite(integral):
+            integral = 0.0
+
+    return output, PIDState(integral=integral, prev_error=e)
 
 
 @dataclass
 class PID:
-    """A discrete PID controller.
+    """Stateful PID facade over :func:`pid_step`.
 
     Args:
       kp, ki, kd: gains.
-      out_min, out_max: hard clamp on the controller output. Also bounds the
-        integral term (clamped anti-windup): when the output saturates the
-        integrator is back-calculated so it never winds past what could be
-        used, preventing overshoot when the error reverses.
-      integral_limit: optional explicit |integral| cap (in integral units). If
-        None, the integral is bounded only by the back-calculation against the
-        output limits.
+      out_min, out_max: hard output band (also bounds the integral authority).
+      integral_limit: optional explicit |integral| cap in integral units.
 
-    update(error, dt) returns the clamped output. dt is in seconds; dt<=0 is
-    treated as "no time elapsed" (derivative skipped, integral not advanced) so
-    callers never divide by zero or get a derivative kick on a stalled clock.
+    ``update(error, dt)`` returns the clamped output; ``reset()`` forgets the
+    integrator and the previous error; ``set_gains`` retunes live.
     """
     kp: float = 0.0
     ki: float = 0.0
@@ -35,20 +142,38 @@ class PID:
     out_min: float = -1e9
     out_max: float = 1e9
     integral_limit: Optional[float] = None
+    _memory: PIDState = field(
+        default_factory=PIDState, init=False, repr=False, compare=False
+    )
 
-    def __post_init__(self) -> None:
-        self._integral: float = 0.0
-        self._prev_error: Optional[float] = None
+    @property
+    def gains(self) -> PIDGains:
+        """The current tuning as an immutable record."""
+        return PIDGains(
+            kp=float(self.kp),
+            ki=float(self.ki),
+            kd=float(self.kd),
+            out_min=float(self.out_min),
+            out_max=float(self.out_max),
+            integral_limit=self.integral_limit,
+        )
+
+    @property
+    def state(self) -> PIDState:
+        """The current memory (read-only snapshot)."""
+        return self._memory
 
     def reset(self) -> None:
-        """Zero the integrator and forget the previous error (no derivative kick)."""
-        self._integral = 0.0
-        self._prev_error = None
+        """Forget the integrator and the previous error (no derivative kick)."""
+        self._memory = PIDState()
 
-    def set_gains(self, kp: Optional[float] = None,
-                  ki: Optional[float] = None,
-                  kd: Optional[float] = None) -> None:
-        """Update any subset of gains live. Does not reset internal state."""
+    def set_gains(
+        self,
+        kp: Optional[float] = None,
+        ki: Optional[float] = None,
+        kd: Optional[float] = None,
+    ) -> None:
+        """Retune any subset of the gains live. The memory is untouched."""
         if kp is not None:
             self.kp = float(kp)
         if ki is not None:
@@ -57,65 +182,9 @@ class PID:
             self.kd = float(kd)
 
     def update(self, error: float, dt: float) -> float:
-        """Advance the controller one step and return the clamped output.
-
-        A NON-FINITE error is refused outright: it is not integrated, it does
-        not become ``_prev_error``, and the output is 0.0. One NaN admitted
-        here latches in ``_integral`` and ``_prev_error`` for the life of the
-        controller, and the output clamp would render it as ``out_max`` (FM-07).
-        """
-        try:
-            error = float(error)
-        except (TypeError, ValueError):
-            return 0.0
-        if not math.isfinite(error) or not math.isfinite(float(dt)):
-            return 0.0
-
-        # Proportional
-        p = self.kp * error
-
-        # Derivative (skip on first call or stalled clock to avoid a kick)
-        d = 0.0
-        if dt > 0.0 and self._prev_error is not None:
-            d = self.kd * (error - self._prev_error) / dt
-        self._prev_error = error
-
-        # Integral (only advance when time actually elapsed)
-        if dt > 0.0 and self.ki != 0.0:
-            self._integral += error * dt
-            # explicit integral cap if requested
-            if self.integral_limit is not None:
-                self._integral = _clamp(
-                    self._integral, -self.integral_limit, self.integral_limit
-                )
-            # clamped anti-windup: bound the integral *contribution* so the
-            # summed output cannot be pushed beyond the output limits by I alone
-            i_term_max = (self.out_max - p - d)
-            i_term_min = (self.out_min - p - d)
-            i_contrib = self.ki * self._integral
-            if i_contrib > i_term_max:
-                self._integral = i_term_max / self.ki if self.ki else 0.0
-            elif i_contrib < i_term_min:
-                self._integral = i_term_min / self.ki if self.ki else 0.0
-
-        i = self.ki * self._integral
-
-        out = p + i + d
-        return _clamp(out, self.out_min, self.out_max)
+        """Advance one step and return the clamped output."""
+        output, self._memory = pid_step(self.gains, self._memory, error, dt)
+        return output
 
 
-def _clamp(v: float, lo: float, hi: float) -> float:
-    """Clamp v to [lo, hi]; tolerant if lo/hi are swapped.
-
-    A non-finite value clamps to 0.0, not to ``hi`` -- ``min(hi, NaN)`` returns
-    ``hi`` under CPython, which would turn an unusable number into the maximum
-    commanded output.
-    """
-    if not math.isfinite(v):
-        return 0.0
-    if lo > hi:
-        lo, hi = hi, lo
-    return max(lo, min(hi, v))
-
-
-__all__ = ["PID"]
+__all__ = ["PID", "PIDGains", "PIDState", "pid_step"]

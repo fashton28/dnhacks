@@ -1,48 +1,23 @@
-import React from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 
-/** Badge — compact count / tag label. Lighter than StatusPill, no dot. */
+/**
+ * Badge — compact count / tag label; lighter than a StatusPill, no dot.
+ * `mono` switches to the numeric face (identifiers, counts, "12 · 40%")
+ * and drops the uppercase transform.
+ */
 
 export type BadgeTone = 'neutral' | 'accent' | 'nominal' | 'caution' | 'danger' | 'outline';
 
 export interface BadgeProps {
-  children?: React.ReactNode;
+  children?: ReactNode;
   tone?: BadgeTone;
   mono?: boolean;
-  style?: React.CSSProperties;
+  style?: CSSProperties;
 }
 
-export function Badge({ children, tone = 'neutral', mono = false, style = {} }: BadgeProps) {
-  const tones: Record<BadgeTone, { bg: string; fg: string; bd: string }> = {
-    neutral: { bg: 'rgba(255,255,255,0.06)', fg: 'var(--text-secondary)', bd: 'var(--border-default)' },
-    accent:  { bg: 'var(--accent-subtle)', fg: 'var(--accent-text)', bd: 'var(--accent-border)' },
-    nominal: { bg: 'var(--nominal-bg)', fg: 'var(--nominal-fg)', bd: 'var(--green-line)' },
-    caution: { bg: 'var(--caution-bg)', fg: 'var(--caution-fg)', bd: 'var(--amber-line)' },
-    danger:  { bg: 'var(--danger-bg)', fg: 'var(--danger-fg)', bd: 'var(--red-line)' },
-    outline: { bg: 'transparent', fg: 'var(--text-tertiary)', bd: 'var(--border-strong)' },
-  };
-  const t = tones[tone] ?? tones.neutral;
-
+export function Badge({ children, tone = 'neutral', mono = false, style }: BadgeProps) {
   return (
-    <span
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        height: 18,
-        padding: '0 6px',
-        borderRadius: 'var(--radius-xs)',
-        background: t.bg,
-        border: `1px solid ${t.bd}`,
-        color: t.fg,
-        fontFamily: mono ? 'var(--font-mono)' : 'var(--font-sans)',
-        fontSize: 'var(--text-2xs)',
-        fontWeight: 'var(--weight-semibold)',
-        letterSpacing: mono ? 0 : '0.04em',
-        textTransform: mono ? 'none' : 'uppercase',
-        lineHeight: 1,
-        fontVariantNumeric: 'tabular-nums',
-        ...style,
-      }}
-    >
+    <span className="eis-badge" data-tone={tone} data-mono={mono || undefined} style={style}>
       {children}
     </span>
   );

@@ -1,141 +1,75 @@
-import React from 'react';
+import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react';
 
 /**
- * Button — primary action control for the Drone Safety Platform GCS.
- * Variants map to intent; `danger` is reserved for genuinely destructive actions.
+ * Button — the GCS's ordinary click control.
+ *
+ * Intent is expressed through `variant`; `danger` is reserved for actions
+ * that destroy something (it is never the "stop" control — stopping uses the
+ * always-instant secondary/danger-soft buttons the panels own).
+ *
+ * The element carries its variant, size and layout as data-attributes and
+ * `.eis-btn` in index.css does the rest, including hover / active / disabled
+ * colours through pseudo-classes. Any `style` a caller passes lands on the
+ * element as inline CSS and therefore wins over the class rules, which is how
+ * the panels nudge alignment (`justifyContent`, `marginLeft`) without a prop.
  */
 
-type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-soft';
-type ButtonSize = 'sm' | 'md' | 'lg';
+export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger' | 'danger-soft';
+export type ButtonSize = 'sm' | 'md' | 'lg';
 
-export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
+export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
-  icon?: React.ReactNode;
-  iconRight?: React.ReactNode;
+  icon?: ReactNode;
+  iconRight?: ReactNode;
   block?: boolean;
   pending?: boolean;
-  style?: React.CSSProperties;
+  style?: CSSProperties;
+}
+
+const VARIANTS: ReadonlySet<string> = new Set<ButtonVariant>(['primary', 'secondary', 'ghost', 'danger', 'danger-soft']);
+const SIZES: ReadonlySet<string> = new Set<ButtonSize>(['sm', 'md', 'lg']);
+
+/** Unknown values (a stale caller, a typo that slipped past a cast) fall back to the default look. */
+export function buttonVariant(v: string | undefined): ButtonVariant {
+  return v !== undefined && VARIANTS.has(v) ? (v as ButtonVariant) : 'secondary';
+}
+export function buttonSize(s: string | undefined): ButtonSize {
+  return s !== undefined && SIZES.has(s) ? (s as ButtonSize) : 'md';
 }
 
 export function Button({
-  children,
-  variant = 'secondary',
-  size = 'md',
+  variant,
+  size,
   icon = null,
   iconRight = null,
   block = false,
   pending = false,
   disabled = false,
-  onClick,
   type = 'button',
-  title,
-  style = {},
+  className,
+  children,
   ...rest
 }: ButtonProps) {
-  const [hover, setHover] = React.useState(false);
-  const [active, setActive] = React.useState(false);
-  const isDisabled = disabled || pending;
-
-  const heights: Record<ButtonSize, string> = {
-    sm: 'var(--control-h-sm)',
-    md: 'var(--control-h)',
-    lg: 'var(--control-h-lg)',
-  };
-  const fontSizes: Record<ButtonSize, string> = {
-    sm: 'var(--text-xs)',
-    md: 'var(--text-base)',
-    lg: 'var(--text-md)',
-  };
-  const pads: Record<ButtonSize, string> = {
-    sm: '0 10px',
-    md: '0 14px',
-    lg: '0 18px',
-  };
-
-  const palettes: Record<ButtonVariant, {
-    bg: string; bgHover: string; bgActive: string;
-    fg: string; border: string;
-  }> = {
-    primary: {
-      bg: 'var(--accent)', bgHover: 'var(--accent-hover)', bgActive: 'var(--accent-active)',
-      fg: 'var(--text-on-accent)', border: 'transparent',
-    },
-    secondary: {
-      bg: 'var(--surface-input)', bgHover: 'var(--surface-hover)', bgActive: 'var(--surface-raised)',
-      fg: 'var(--text-primary)', border: 'var(--border-input)',
-    },
-    ghost: {
-      bg: 'transparent', bgHover: 'var(--surface-hover)', bgActive: 'var(--surface-input)',
-      fg: 'var(--text-secondary)', border: 'transparent',
-    },
-    danger: {
-      bg: 'var(--red-deep)', bgHover: 'var(--red)', bgActive: '#b42318',
-      fg: '#fff', border: 'transparent',
-    },
-    'danger-soft': {
-      bg: 'var(--red-tint)', bgHover: 'var(--red-tint-2)', bgActive: 'var(--red-tint-2)',
-      fg: 'var(--red-bright)', border: 'var(--red-line)',
-    },
-  };
-
-  const p = palettes[variant] ?? palettes.secondary;
-  const bg = isDisabled ? 'var(--surface-input)' : active ? p.bgActive : hover ? p.bgHover : p.bg;
+  // A pending button is inert: the click that started the request must not
+  // be able to fire it twice, and the spinner takes the leading icon's slot.
+  const inert = disabled || pending;
+  const classes = className ? `eis-btn ${className}` : 'eis-btn';
 
   return (
     <button
-      type={type}
-      title={title}
-      disabled={isDisabled}
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => { setHover(false); setActive(false); }}
-      onMouseDown={() => setActive(true)}
-      onMouseUp={() => setActive(false)}
-      style={{
-        display: block ? 'flex' : 'inline-flex',
-        width: block ? '100%' : 'auto',
-        alignItems: 'center',
-        justifyContent: 'center',
-        gap: '7px',
-        height: heights[size],
-        padding: pads[size],
-        fontFamily: 'var(--font-sans)',
-        fontSize: fontSizes[size],
-        fontWeight: 'var(--weight-semibold)',
-        letterSpacing: '0.01em',
-        lineHeight: 1,
-        color: isDisabled ? 'var(--text-disabled)' : p.fg,
-        background: bg,
-        border: `1px solid ${p.border === 'transparent' ? 'transparent' : p.border}`,
-        borderRadius: 'var(--radius-md)',
-        cursor: isDisabled ? 'not-allowed' : 'pointer',
-        opacity: isDisabled ? 0.6 : 1,
-        transition: 'background var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out)',
-        transform: active && !isDisabled ? 'translateY(0.5px)' : 'none',
-        whiteSpace: 'nowrap',
-        userSelect: 'none',
-        ...style,
-      }}
       {...rest}
+      type={type}
+      className={classes}
+      disabled={inert}
+      aria-busy={pending || undefined}
+      data-variant={buttonVariant(variant)}
+      data-size={buttonSize(size)}
+      data-block={block || undefined}
     >
-      {pending ? <Spinner /> : icon}
+      {pending ? <span className="eis-spin" aria-hidden="true" /> : icon}
       {children != null && <span>{children}</span>}
-      {!pending && iconRight}
+      {pending ? null : iconRight}
     </button>
-  );
-}
-
-function Spinner() {
-  return (
-    <span
-      style={{
-        width: 13, height: 13, borderRadius: '50%',
-        border: '2px solid rgba(255,255,255,0.35)',
-        borderTopColor: '#fff',
-        display: 'inline-block',
-        animation: 'eis-spin 0.7s linear infinite',
-      }}
-    />
   );
 }

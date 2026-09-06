@@ -2,45 +2,58 @@
 ============================================================================
 Drone Safety Platform -- COMPANION FC connection (pymavlink)
 ----------------------------------------------------------------------------
-``Vehicle`` is a thin, defensive wrapper over ``pymavlink.mavutil`` that the
-orchestrator uses to talk to the ArduPilot flight controller:
+``Vehicle`` is the companion's whole conversation with the ArduPilot flight
+controller, and the ONLY module (packaging aside) allowed to import a hardware
+library. The pure-logic core -- guidance, manual, tracker, safety -- never
+imports it, which is what keeps that core testable on a laptop.
 
-  * connect over UDP (SITL: ``udp:127.0.0.1:14550``) or serial (hardware:
-    ``/dev/ttyTHS1``), wait for the heartbeat, and request the data streams we
-    need at ~10 Hz;
-  * cache the latest of each interesting MAVLink message and translate them
-    into the contract ``telemetry`` dict (shared.py shapes) plus a
-    ``VehicleState`` snapshot the control core reasons about;
-  * run the discrete command set (arm/disarm/setMode/takeoff/land/rtl);
-  * stream BODY-frame velocity setpoints (``VelocitySetpoint``) as
-    SET_POSITION_TARGET_LOCAL_NED at 10-20 Hz;
-  * fly GUIDED global position targets (``goto_global`` ->
-    SET_POSITION_TARGET_GLOBAL_INT, speed via DO_CHANGE_SPEED) for the
-    mission planner; and
-  * upload the site perimeter as an ArduPilot polygon inclusion fence on
-    request (``upload_geofence`` -- the orchestrator calls it after connect
-    with the loaded site perimeter; this module never reads the site file).
+Everything it does falls into four directions of travel:
 
-This is the ONLY companion module (besides packaging) allowed to import
-hardware libraries. Pure-logic guidance/manual/safety never import this.
+  IN   ``poll`` drains the link into a per-type cache that also records WHEN
+       each message arrived, and ``read_telemetry`` / ``vehicle_state`` /
+       ``health_inputs`` translate that cache into the contract ``telemetry``
+       dict, the internal ``VehicleState`` snapshot, and the plain health
+       rails the pure-logic ladders consume. Ages travel with the values: a
+       cache that never expires answers "the sensor stopped talking" and
+       "the sensor says everything is fine" with the same number.
+
+  OUT  the discrete command set (arm / disarm / mode / takeoff / land / RTL /
+       brake), the 10-20 Hz BODY-frame velocity stream, and the planner's
+       GUIDED global position targets.
+
+  UP   the sensor rails this companion PUBLISHES to the FC -- distance sensor,
+       obstacle fan, extnav odometry, EKF source selection, gimbal pitch.
+
+  SET  parameters and the site geofence: echo-verified PARAM_SET, the derived
+       failsafe envelope (``apply_failsafe_params``), and the perimeter /
+       no-fly polygons uploaded through the fence mission protocol. What the
+       FC actually STORED and ENABLED is tracked separately from what we
+       asked for, because "we sent it" is not containment.
 
 Frame & unit conventions
-  VelocitySetpoint is BODY frame: vx fwd(+)/back(-), vy right(+)/left(-),
-  vz down(+)/up(-) m/s, yaw_rate deg/s (clockwise +). We send it in
-  MAV_FRAME_BODY_NED which already matches (x fwd, y right, z down); yaw_rate is
-  converted deg/s -> rad/s for the wire. valid=False -> zero-velocity hold.
+  ``VelocitySetpoint`` is BODY frame: vx fwd(+)/back(-), vy right(+)/left(-),
+  vz down(+)/up(-) in m/s, yaw_rate in deg/s (clockwise +). That is already
+  MAV_FRAME_BODY_NED's convention (x fwd, y right, z down); only yaw_rate is
+  converted, deg/s -> rad/s, on the way to the wire. ``valid=False`` means a
+  zero-velocity HOLD, and the frame is still sent so the FC's GUIDED
+  controller actively holds instead of coasting on a stale target.
 
-SAFETY: ``send_body_velocity`` does NOT itself clamp to ``Limits`` -- clamping
-is the guidance/manual layer's job (it owns the envelope and the standoff hard
-limit). This layer simply refuses to send a non-finite or absurd value and
-treats ``valid=False`` as a hard zero hold. Defaults to the safe (zero) command
-on any error.
+SAFETY -- this layer is the SECOND stage of "clamped twice". The guidance and
+manual layers own the envelope (including the standoff hard limit) and clamp
+first; every command leaving this module is then folded through the pure-logic
+clamp in ``mavlink.safety`` immediately before the wire:
 
-EXCEPTION -- ``goto_global`` DOES clamp: global position targets bypass the
-orchestrator's per-tick body-velocity clamp (``_clamp_setpoint`` only sees
-VelocitySetpoints), so the "clamped twice" rule's second clamp for the planner
-path lives here: speed is clamped to ``[0, Limits.max_speed]`` (never raised)
-and altitude to ``Limits.max_altitude`` immediately before the wire.
+  * ``send_body_velocity`` -> ``clamp_body_velocity``: axes bounded by
+    ``Limits``, and a non-finite value on ANY axis collapses the WHOLE frame
+    to the zero hold rather than to a bound.
+  * ``goto_global`` -> ``clamp_goto_target``: speed folded into
+    ``[0, max_speed]`` (never raised) and altitude into ``[0, max_altitude]``.
+    Global targets bypass the orchestrator's per-tick velocity clamp entirely,
+    so for the planner path this IS the second clamp.
+
+Neither stage can raise a value the control core already lowered -- they only
+tighten, and they default to "no motion" whenever they cannot understand an
+input.
 ============================================================================
 """
 from __future__ import annotations
@@ -58,56 +71,73 @@ from eis_companion.types import (
     now,
 )
 
+from .safety import clamp_body_velocity, clamp_goto_target
+
 log = logging.getLogger("eis.mavlink")
 
-# pymavlink is hardware-facing; import lazily-tolerant so that merely importing
-# this module on a dev box without it gives a clear error only when used.
+# The pymavlink import is TOLERATED, not required, at module import time: a
+# dev box or a CI runner without it should still be able to import this file
+# (for its constants, or transitively) and get a clear error only when someone
+# actually tries to talk to a flight controller. ``connect()`` is where that
+# error is raised.
+# The v20 ardupilotmega dialect is imported for its side effect -- it is what
+# makes ArduPilot's message set available to mavutil -- so the capability flag
+# is derived from BOTH names rather than asserted. That keeps the flag honest
+# (it means "the transport AND the dialect are here") and keeps the names used,
+# so no linter suppression is needed for either.
 try:  # pragma: no cover - import guard
     from pymavlink import mavutil
-    from pymavlink.dialects.v20 import ardupilotmega as mavlink2  # noqa: F401
-    _HAVE_PYMAVLINK = True
+    from pymavlink.dialects.v20 import ardupilotmega as mavlink2
+    _HAVE_PYMAVLINK = mavutil is not None and mavlink2 is not None
 except Exception:  # pragma: no cover - import guard
     mavutil = None  # type: ignore
+    mavlink2 = None  # type: ignore
     _HAVE_PYMAVLINK = False
 
 
-# Sentinel for "no SET_POSITION_TARGET_LOCAL_NED for position/accel": all the
-# position + acceleration + yaw(angle) bits set to ignore, leaving only the
-# velocity components and yaw_rate active.
-#   bit0..2  = x,y,z position    (ignore)
-#   bit3..5  = vx,vy,vz velocity (USE)
-#   bit6..8  = ax,ay,az accel    (ignore)
-#   bit9     = force
-#   bit10    = yaw   (angle)     (ignore)
-#   bit11    = yaw_rate          (USE)
-# So mask = position(0b111) | accel(0b111000000) | yaw(0b10000000000)
-#         leaving velocity + yaw_rate active.
-_TYPEMASK_VEL_YAWRATE = (
-    (1 << 0) | (1 << 1) | (1 << 2)          # ignore position
-    | (1 << 6) | (1 << 7) | (1 << 8)        # ignore acceleration
-    | (1 << 9)                              # ignore force
-    | (1 << 10)                             # ignore yaw angle
-    # bit 3,4,5 (velocity) and bit 11 (yaw_rate) are left ENABLED (0)
+# --------------------------------------------------------------------------
+# SET_POSITION_TARGET_* type masks
+# --------------------------------------------------------------------------
+# In both SET_POSITION_TARGET messages a SET bit means "IGNORE this field", so
+# a mask is built by naming the field groups we are NOT commanding. Spelling
+# the groups out once and OR-ing the named tuples keeps the two masks from
+# drifting apart, and makes a wrong bit a readable mistake instead of a magic
+# number: MAV_FRAME field groups are, by bit index,
+#   0-2 position | 3-5 velocity | 6-8 acceleration | 9 force | 10 yaw | 11 yaw rate
+_POSITION_BITS: Tuple[int, ...] = (0, 1, 2)
+_VELOCITY_BITS: Tuple[int, ...] = (3, 4, 5)
+_ACCEL_BITS: Tuple[int, ...] = (6, 7, 8)
+_FORCE_BITS: Tuple[int, ...] = (9,)
+_YAW_BITS: Tuple[int, ...] = (10,)
+_YAW_RATE_BITS: Tuple[int, ...] = (11,)
+
+
+def _ignore_mask(*groups: Tuple[int, ...]) -> int:
+    """Build a type mask that IGNORES every field group passed in."""
+    mask = 0
+    for group in groups:
+        for bit in group:
+            mask |= 1 << bit
+    return mask
+
+
+#: BODY-frame velocity streaming: command velocity + yaw rate, ignore the rest.
+_TYPEMASK_VEL_YAWRATE = _ignore_mask(
+    _POSITION_BITS, _ACCEL_BITS, _FORCE_BITS, _YAW_BITS
 )
 
-# Typemask for SET_POSITION_TARGET_GLOBAL_INT position-only targets (the
-# planner's goto path): everything ignored EXCEPT the x/y/z position fields.
-# The velocity fields of a position target are a feed-forward term in
-# ArduPilot, NOT a cruise-speed cap, so speed is set separately via
-# MAV_CMD_DO_CHANGE_SPEED (which GUIDED honours) and the velocity bits stay
-# ignored here.
-_TYPEMASK_POS_ONLY = (
-    (1 << 3) | (1 << 4) | (1 << 5)          # ignore velocity
-    | (1 << 6) | (1 << 7) | (1 << 8)        # ignore acceleration
-    | (1 << 9)                              # ignore force
-    | (1 << 10)                             # ignore yaw angle
-    | (1 << 11)                             # ignore yaw rate
-    # bit 0,1,2 (position) are left ENABLED (0)
+#: The planner's GUIDED goto: command position ONLY. A position target's
+#: velocity fields are a feed-forward term in ArduPilot, NOT a cruise-speed
+#: cap, so the leg speed goes out separately as MAV_CMD_DO_CHANGE_SPEED (which
+#: GUIDED honours) and the velocity bits stay ignored here.
+_TYPEMASK_POS_ONLY = _ignore_mask(
+    _VELOCITY_BITS, _ACCEL_BITS, _FORCE_BITS, _YAW_BITS, _YAW_RATE_BITS
 )
 
-# Data streams we ask the FC to emit, and the rate (Hz). ArduPilot honours
-# REQUEST_DATA_STREAM; on newer firmware SET_MESSAGE_INTERVAL is preferred, so
-# we send both for robustness.
+#: Inbound telemetry rate, in Hz, requested from the FC. It is deliberately
+#: double the 10 Hz telemetry pump and half the 20 Hz control loop: fast
+#: enough that a control tick never reasons about a frame it has already
+#: reported to the ground, slow enough not to swamp a 57 600 baud radio.
 _STREAM_RATE_HZ = 10
 
 # --------------------------------------------------------------------------
@@ -126,11 +156,18 @@ WIND_MAX_AGE_S: float = 10.0
 
 
 class Vehicle:
-    """Pymavlink connection to the ArduPilot FC.
+    """The companion's pymavlink connection to one ArduPilot flight controller.
 
-    Not thread-safe by itself: call ``poll()`` / ``read_telemetry()`` /
-    ``send_body_velocity()`` from a single control loop. If you fan out, guard
-    with your own lock.
+    SINGLE OWNER. Nothing here is synchronised, and it is not meant to be: the
+    receive path mutates a shared cache and the blocking waits consume from
+    the same socket the control loop polls, so two callers racing would give
+    each other each other's messages. Drive it from one loop -- the
+    orchestrator's -- and put your own lock in front if you ever fan out.
+
+    Every method degrades toward "do nothing" rather than raising, with two
+    deliberate exceptions: ``connect()`` raises when there is no pymavlink or
+    no heartbeat, and ``_command_long`` raises on a missing link, because a
+    discrete command that silently evaporates would be reported as success.
     """
 
     def __init__(
@@ -142,34 +179,45 @@ class Vehicle:
         target_system: int = 1,
         limits: Optional[Limits] = None,
     ) -> None:
-        # Connection parameters may be supplied at construction (the orchestrator
-        # builds Vehicle(connection=..., baud=..., source_system=..., target_system=...))
-        # and reused by a no-arg connect(); they can still be overridden per-call.
+        # --- how to dial, remembered so connect() can be called with no args.
+        # The orchestrator builds Vehicle(connection=, baud=, source_system=,
+        # target_system=); any of them can still be overridden per connect().
         self._connection = connection
         self._init_baud = baud
         self._init_source_system = source_system
-        # The hard safety envelope for the paths that clamp AT THIS LAYER
-        # (goto_global). Defaults to the conservative stock Limits; the
-        # orchestrator passes / updates its configured copy.
+
+        # --- the envelope this layer clamps its egress to. Defaults to the
+        # conservative stock Limits so a caller that forgets to pass one gets
+        # TIGHTER bounds, never looser; the orchestrator shares its live copy
+        # so runtime edits (setMaxSpeed) apply on the next frame.
         self._limits: Limits = limits if limits is not None else Limits()
+
+        # --- link identity + state
         self._master: Any = None
         self._connected: bool = False
         self._target_system: int = target_system
         self._target_component: int = 1
-        # Latest cached message of each type we care about (raw mavlink objs).
-        self._msgs: dict[str, Any] = {}
-        self._msg_ts: dict[str, float] = {}
         self._mode_mapping: dict[str, int] = {}
         self._inv_mode_mapping: dict[int, str] = {}
+
+        # --- inbound cache. Two parallel dicts, keyed by MAVLink type name:
+        # the newest message, and WHEN it landed. The timestamps are what let
+        # every consumer ask "how old is this?" instead of trusting a value
+        # that may not have moved in a minute (FM-08 / FM-19 / FM-20).
+        self._msgs: dict[str, Any] = {}
+        self._msg_ts: dict[str, float] = {}
         self._last_heartbeat_ts: float = 0.0
         self._link_latency_ms: float = 0.0
         self._fc_ready: bool = False
-        # Set when recv raises (a wedged / closed socket). Cleared by the next
-        # message that actually arrives. Feeds fc_link_lost() (FM-08).
+        # Raised by a wedged / closed socket, cleared by the next message that
+        # actually arrives. Without it a dead link keeps serving the cache as
+        # though it were live (FM-08).
         self._recv_error: bool = False
-        # What the FC actually holds for the geofence, as far as we can prove.
-        # 'stored' = the polygon transfer was ACCEPTED; 'enabled' = FENCE_ENABLE
-        # was read back as 1. Both start unknown (None) (FM-14 / FM-15).
+
+        # --- what the FC actually holds for the geofence, as far as we can
+        # PROVE. 'stored' = the polygon transfer was accepted; 'enabled' =
+        # FENCE_ENABLE was read back as 1. Both start unknown, and unknown is
+        # not the same as false (FM-14 / FM-15).
         self._fence_stored: Optional[bool] = None
         self._fence_enabled: Optional[bool] = None
         self._fence_detail: str = "geofence upload not attempted"
@@ -185,15 +233,28 @@ class Vehicle:
         source_system: Optional[int] = None,
         wait_heartbeat_timeout: float = 30.0,
     ) -> None:
-        """Open the link, wait for the first heartbeat, request data streams.
+        """Open the link, prove it with a heartbeat, then adopt it.
+
+        Acquisition is TRANSACTIONAL: the transport is opened and handshaken
+        on the side, and only a link that actually produced a heartbeat is
+        installed as ``self._master``. A handshake that times out or raises
+        closes the half-open transport and leaves the previous state exactly
+        as it was, instead of leaving a live socket dangling behind an object
+        that believes it is disconnected.
+
+        Adopting a link also RESETS the inbound cache and the fence claim: a
+        new session must not answer questions with the previous session's
+        telemetry, and a fence proven on a link that has since dropped is not
+        proven on this one.
 
         Args:
           connection_string: ``udp:127.0.0.1:14550`` (SITL) or a serial device
-            like ``/dev/ttyTHS1`` (hardware). pymavlink infers the type from the
-            scheme; a bare device path is treated as serial.
+            such as ``/dev/ttyTHS1``. pymavlink infers the transport from the
+            scheme; a bare device path is treated as serial. Defaults to the
+            construction-time connection.
           baud: serial baud (ignored for UDP/TCP).
-          source_system: our MAVLink system id. 255 = a GCS-style id so we don't
-            collide with the autopilot (1) or another companion.
+          source_system: our MAVLink system id. 255 is a GCS-style id, so we
+            cannot collide with the autopilot (1) or another companion.
           wait_heartbeat_timeout: seconds to wait for the first heartbeat.
         """
         if not _HAVE_PYMAVLINK:
@@ -202,40 +263,59 @@ class Vehicle:
                 "(Pure-logic modules must not import this layer.)"
             )
 
-        # Fall back to the construction-time connection params when not given.
-        conn = connection_string or self._connection
-        baud = self._init_baud if baud is None else baud
-        source_system = self._init_source_system if source_system is None else source_system
-
-        self._master = mavutil.mavlink_connection(
-            conn,
-            baud=baud,
-            source_system=source_system,
+        address = connection_string or self._connection
+        transport = mavutil.mavlink_connection(
+            address,
+            baud=self._init_baud if baud is None else baud,
+            source_system=(
+                self._init_source_system if source_system is None else source_system
+            ),
             autoreconnect=True,
         )
-
-        hb = self._master.wait_heartbeat(timeout=wait_heartbeat_timeout)
-        if hb is None:
-            raise TimeoutError(
-                f"no heartbeat from FC on {conn} within "
-                f"{wait_heartbeat_timeout:.0f}s"
-            )
-
-        self._target_system = self._master.target_system
-        self._target_component = self._master.target_component
-        self._connected = True
-        self._fc_ready = False
-        self._last_heartbeat_ts = now()
-        self._msgs["HEARTBEAT"] = hb
-
-        # mode_mapping(): {name -> number}; build the inverse for translation.
         try:
-            self._mode_mapping = self._master.mode_mapping() or {}
-        except Exception:
-            self._mode_mapping = {}
-        self._inv_mode_mapping = {v: k for k, v in self._mode_mapping.items()}
+            heartbeat = transport.wait_heartbeat(timeout=wait_heartbeat_timeout)
+            if heartbeat is None:
+                raise TimeoutError(
+                    f"no heartbeat from FC on {address} within "
+                    f"{wait_heartbeat_timeout:.0f}s"
+                )
+        except BaseException:
+            # Never leave a half-open transport behind a failed connect().
+            try:
+                transport.close()
+            except Exception:
+                pass
+            raise
 
+        self.close()                       # drop any previous link first
+        self._master = transport
+        self._connected = True
+        self._target_system = transport.target_system
+        self._target_component = transport.target_component
+        self._adopt_fresh_session(heartbeat)
+        self._load_mode_mapping()
         self.request_data_streams(rate_hz=_STREAM_RATE_HZ)
+
+    def _adopt_fresh_session(self, heartbeat: Any) -> None:
+        """Clear last session's cache and seed this one with its heartbeat."""
+        self._msgs.clear()
+        self._msg_ts.clear()
+        self._recv_error = False
+        self._fc_ready = False
+        stamp = now()
+        self._msgs["HEARTBEAT"] = heartbeat
+        self._msg_ts["HEARTBEAT"] = stamp
+        self._last_heartbeat_ts = stamp
+        self._note_fence(None, None, "geofence upload not attempted")
+
+    def _load_mode_mapping(self) -> None:
+        """Cache ``{mode name -> number}`` and its inverse, tolerating silence."""
+        try:
+            mapping = self._master.mode_mapping() or {}
+        except Exception:
+            mapping = {}
+        self._mode_mapping = mapping
+        self._inv_mode_mapping = {number: name for name, number in mapping.items()}
 
     @property
     def connected(self) -> bool:
@@ -256,27 +336,38 @@ class Vehicle:
         self._limits = limits
 
     def close(self) -> None:
-        """Close the link. Safe to call when never connected."""
+        """Close the link and mark us disconnected. Safe when never connected.
+
+        Idempotent by design: teardown paths call it from ``finally`` blocks
+        and from ``connect()`` itself, so a close that raises must not become
+        the reason a reconnect fails.
+        """
+        master, self._master = self._master, None
+        self._connected = False
+        if master is None:
+            return
         try:
-            if self._master is not None:
-                self._master.close()
+            master.close()
         except Exception:
-            pass
-        finally:
-            self._connected = False
+            log.debug("closing the FC link raised; link dropped anyway", exc_info=True)
 
     def send_heartbeat(self) -> bool:
-        """Send the 1 Hz GCS heartbeat used by the FC link-loss backstop."""
+        """Send the 1 Hz GCS heartbeat the FC's link-loss backstop watches for.
+
+        This is the companion half of FS_GCS_*: the firmware RTLs when OUR
+        heartbeat stops. It says nothing about whether we can still HEAR the
+        FC -- that asymmetric failure is ``fc_link_lost()``'s job.
+        """
         if not self._connected or self._master is None:
             return False
         try:
             self._master.mav.heartbeat_send(
                 mavutil.mavlink.MAV_TYPE_GCS,
                 mavutil.mavlink.MAV_AUTOPILOT_INVALID,
-                0,
-                0,
+                0,                                     # base_mode
+                0,                                     # custom_mode
                 mavutil.mavlink.MAV_STATE_ACTIVE,
-                3,
+                3,                                     # mavlink_version
             )
             return True
         except Exception:
@@ -286,94 +377,101 @@ class Vehicle:
     # ----------------------------------------------------------------------
     # Data-stream setup
     # ----------------------------------------------------------------------
-    def request_data_streams(self, rate_hz: int = _STREAM_RATE_HZ) -> None:
-        """Ask the FC to stream the telemetry we translate, at ~rate_hz.
+    #: The MAVLink messages this module actually TRANSLATES, by name. Every
+    #: one is looked up on the dialect at runtime rather than hard-coded,
+    #: because the second half of the list only exists on newer firmware and a
+    #: missing id must be a message we skip, not an AttributeError that aborts
+    #: the whole stream request. Grouped by the consumer that needs it.
+    _STREAMED_MESSAGES: Tuple[str, ...] = (
+        # contract telemetry + VehicleState
+        "HEARTBEAT", "ATTITUDE", "GLOBAL_POSITION_INT", "VFR_HUD",
+        "SYS_STATUS", "GPS_RAW_INT",
+        # health rails (battery / estimator / wind ladders)
+        "BATTERY_STATUS", "EKF_STATUS_REPORT", "ESTIMATOR_STATUS", "WIND",
+        # navigation-source rails (optical flow + external odometry)
+        "OPTICAL_FLOW_RAD", "ODOMETRY",
+        # SITL ground truth, and the camera mount
+        "SIMSTATE", "MOUNT_STATUS", "GIMBAL_DEVICE_ATTITUDE_STATUS",
+    )
 
-        Sends the legacy REQUEST_DATA_STREAM (works on every ArduPilot build)
-        and, best-effort, per-message SET_MESSAGE_INTERVAL for the specific
-        messages we translate (ATTITUDE, GLOBAL_POSITION_INT, VFR_HUD,
-        SYS_STATUS, GPS_RAW_INT, HEARTBEAT).
+    def _streamed_message_ids(self) -> Tuple[int, ...]:
+        """Resolve ``_STREAMED_MESSAGES`` to the ids this dialect knows."""
+        resolved = []
+        for name in self._STREAMED_MESSAGES:
+            msg_id = getattr(mavutil.mavlink, f"MAVLINK_MSG_ID_{name}", None)
+            if isinstance(msg_id, int) and msg_id >= 0:
+                resolved.append(msg_id)
+        return tuple(resolved)
+
+    def request_data_streams(self, rate_hz: int = _STREAM_RATE_HZ) -> None:
+        """Ask the FC to emit the telemetry we translate, at ~``rate_hz``.
+
+        Both protocols are used, deliberately: the legacy REQUEST_DATA_STREAM
+        works on every ArduPilot build ever shipped, and the modern
+        SET_MESSAGE_INTERVAL pins the exact messages we consume so a firmware
+        that has retired the stream groups still feeds us. Every send is
+        best-effort -- a firmware that refuses one of them must not stop the
+        others, and none of this is worth losing the link over.
         """
         if not self._connected or self._master is None:
             return
         rate_hz = max(1, int(rate_hz))
+        interval_us = float(int(1_000_000 / rate_hz))
 
-        # Legacy: request the relevant stream groups.
-        for stream_id in (
+        def _try(what: str, send) -> None:
+            try:
+                send()
+            except Exception:
+                log.debug("data-stream request (%s) refused", what, exc_info=True)
+
+        # Legacy, one shot: every stream group at the requested rate.
+        _try("REQUEST_DATA_STREAM", lambda: self._master.mav.request_data_stream_send(
+            self._target_system,
+            self._target_component,
             mavutil.mavlink.MAV_DATA_STREAM_ALL,
-        ):
-            try:
-                self._master.mav.request_data_stream_send(
-                    self._target_system,
-                    self._target_component,
-                    stream_id,
-                    rate_hz,
-                    1,  # start
-                )
-            except Exception:
-                pass
+            rate_hz,
+            1,                                   # 1 = start streaming
+        ))
 
-        # Modern: pin the exact messages we consume (interval in microseconds).
-        interval_us = int(1_000_000 / rate_hz)
-        wanted = tuple(msg_id for msg_id in (
-            mavutil.mavlink.MAVLINK_MSG_ID_ATTITUDE,
-            mavutil.mavlink.MAVLINK_MSG_ID_GLOBAL_POSITION_INT,
-            mavutil.mavlink.MAVLINK_MSG_ID_VFR_HUD,
-            mavutil.mavlink.MAVLINK_MSG_ID_SYS_STATUS,
-            mavutil.mavlink.MAVLINK_MSG_ID_GPS_RAW_INT,
-            mavutil.mavlink.MAVLINK_MSG_ID_HEARTBEAT,
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_BATTERY_STATUS", -1),
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_EKF_STATUS_REPORT", -1),
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_ESTIMATOR_STATUS", -1),
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_WIND", -1),
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_OPTICAL_FLOW_RAD", -1),
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_ODOMETRY", -1),
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_SIMSTATE", -1),
-            getattr(mavutil.mavlink, "MAVLINK_MSG_ID_MOUNT_STATUS", -1),
-            getattr(
-                mavutil.mavlink, "MAVLINK_MSG_ID_GIMBAL_DEVICE_ATTITUDE_STATUS", -1
-            ),
-        ) if msg_id >= 0)
-        for msg_id in wanted:
-            try:
-                self._master.mav.command_long_send(
-                    self._target_system,
-                    self._target_component,
-                    mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
-                    0,
-                    float(msg_id),
-                    float(interval_us),
-                    0, 0, 0, 0, 0,
-                )
-            except Exception:
-                pass
+        # Modern, one per message: interval in MICROseconds.
+        for msg_id in self._streamed_message_ids():
+            _try(f"SET_MESSAGE_INTERVAL {msg_id}", lambda mid=msg_id: self._command_long(
+                mavutil.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL,
+                float(mid),
+                interval_us,
+            ))
 
     # ----------------------------------------------------------------------
     # Receive / cache
     # ----------------------------------------------------------------------
     def poll(self, *, max_msgs: int = 50) -> int:
-        """Drain pending MAVLink messages into the cache. Returns count read.
+        """Drain what the link has waiting into the cache; return the count kept.
 
-        Non-blocking. Call this once per control-loop tick before
-        ``read_telemetry``. Caches the latest of each interesting type.
+        Non-blocking, and bounded by ``max_msgs`` so a backed-up socket can
+        never starve the control loop it is called from. Run it once per tick
+        before ``read_telemetry`` / ``vehicle_state``.
+
+        The count is of messages KEPT, not received: BAD_DATA and heartbeats
+        from a system that is not our FC are drained and discarded.
         """
         if not self._connected or self._master is None:
             return 0
-        count = 0
-        for _ in range(max_msgs):
+        kept = 0
+        budget = max(0, int(max_msgs))
+        while budget > 0:
+            budget -= 1
             try:
                 msg = self._master.recv_match(blocking=False)
             except Exception:
-                # A dead socket raises here forever. Record it: without this
-                # the link failure is invisible and every cached message keeps
-                # being served as live (FM-08).
+                # A dead socket raises here, and goes on raising. Recording it
+                # is the difference between a visible link failure and a cache
+                # that keeps being served as though it were live (FM-08).
                 self._recv_error = True
                 break
             if msg is None:
-                break
-            if self._absorb(msg):
-                count += 1
-        return count
+                break                       # nothing more waiting right now
+            kept += int(self._absorb(msg))
+        return kept
 
     def _absorb(self, msg: Any) -> bool:
         """Cache one received message. Returns True when it was kept.
@@ -477,80 +575,182 @@ class Vehicle:
     # ----------------------------------------------------------------------
     # Translation -> contract telemetry + VehicleState
     # ----------------------------------------------------------------------
+    #: What we report when the FC has told us nothing about its mode. The
+    #: safest possible lie is the least capable mode, never GUIDED.
+    _UNKNOWN_MODE = "STABILIZE"
+
     def _mode_name(self) -> str:
-        """Decode the current flight mode name from the cached heartbeat."""
-        hb = self._msgs.get("HEARTBEAT")
-        if hb is None:
-            return "STABILIZE"
-        custom = getattr(hb, "custom_mode", 0)
-        name = self._inv_mode_mapping.get(custom)
+        """The current flight-mode NAME, decoded from the cached heartbeat.
+
+        Three sources, in order of how much we trust them: this FC's own mode
+        map, pymavlink's decoded ``flightmode`` string, and finally the
+        unknown-mode placeholder.
+        """
+        heartbeat = self._msgs.get("HEARTBEAT")
+        if heartbeat is None:
+            return self._UNKNOWN_MODE
+        name = self._inv_mode_mapping.get(getattr(heartbeat, "custom_mode", 0))
         if name:
             return str(name).upper()
-        # Fallback to pymavlink's flightmode string if available.
         try:
-            fm = self._master.flightmode
-            if fm:
-                return str(fm).upper()
+            decoded = self._master.flightmode
         except Exception:
-            pass
-        return "STABILIZE"
+            decoded = None
+        return str(decoded).upper() if decoded else self._UNKNOWN_MODE
 
     def _is_armed(self) -> bool:
-        """Armed flag from the heartbeat base_mode SAFETY_ARMED bit."""
-        hb = self._msgs.get("HEARTBEAT")
-        if hb is None:
+        """Armed flag: the SAFETY_ARMED bit of the cached heartbeat's base_mode.
+
+        No heartbeat means NOT armed -- the conservative answer, since the
+        callers use this to decide whether the aircraft can be flying.
+        """
+        heartbeat = self._msgs.get("HEARTBEAT")
+        if heartbeat is None:
             return False
-        base = getattr(hb, "base_mode", 0)
-        return bool(base & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
+        armed_bit = mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED
+        return bool(getattr(heartbeat, "base_mode", 0) & armed_bit)
+
+    #: How each position field is decoded: contract key, MAVLink field on
+    #: GLOBAL_POSITION_INT, and the integer scale it arrives in (1e7 for
+    #: degE7, 1000 for millimetres).
+    _POSITION_FIELDS: Tuple[Tuple[str, str, float], ...] = (
+        ("lat", "lat", 1e7),
+        ("lon", "lon", 1e7),
+        ("relAlt", "relative_alt", 1000.0),
+        ("absAlt", "alt", 1000.0),
+    )
+
+    #: A MAVLink field carrying either of these is saying "not measured",
+    #: not "measured as zero" / "measured as 65535".
+    _UNMEASURED = (0, 65535)
+
+    def _kinematics(self) -> Tuple[dict, dict, dict, float]:
+        """The ONE unit-conversion boundary for attitude / position / velocity.
+
+        ``vehicle_state`` and ``read_telemetry`` both need the same numbers in
+        the same units, and having each do its own radians-to-degrees and
+        degE7-to-degrees arithmetic is how the two drift apart. Returns
+        ``(attitude_deg, position, velocity, heading_deg)``; every missing
+        message degrades to a zero rather than raising, because a partial
+        telemetry frame must still reach the ground.
+        """
+        attitude_msg = self._msgs.get("ATTITUDE")
+        position_msg = self._msgs.get("GLOBAL_POSITION_INT")
+        hud = self._msgs.get("VFR_HUD")
+
+        attitude = {
+            axis: (
+                math.degrees(float(getattr(attitude_msg, axis, 0.0)))
+                if attitude_msg is not None else 0.0
+            )
+            for axis in ("roll", "pitch", "yaw")
+        }
+        position = {
+            key: (
+                float(getattr(position_msg, field, 0)) / scale
+                if position_msg is not None else 0.0
+            )
+            for key, field, scale in self._POSITION_FIELDS
+        }
+
+        # GLOBAL_POSITION_INT.vz is cm/s and points DOWN; the contract reports
+        # vertical speed as +UP. VFR_HUD.climb is already +up and is preferred
+        # when the FC sends it.
+        climb = (
+            -float(getattr(position_msg, "vz", 0)) / 100.0
+            if position_msg is not None else 0.0
+        )
+        velocity = {
+            "groundspeed": (
+                float(getattr(hud, "groundspeed", 0.0)) if hud is not None else 0.0
+            ),
+            "verticalSpeed": (
+                float(getattr(hud, "climb", climb)) if hud is not None else climb
+            ),
+        }
+
+        if hud is not None:
+            heading = float(getattr(hud, "heading", 0.0))
+        elif position_msg is not None:
+            heading = float(getattr(position_msg, "hdg", 0)) / 100.0
+        else:
+            heading = 0.0
+        return attitude, position, velocity, heading % 360.0
 
     def vehicle_state(
         self, control_source: str = ControlSource.AUTO.value
     ) -> VehicleState:
-        """Build the internal ``VehicleState`` snapshot from cached messages.
+        """The internal ``VehicleState`` snapshot the control core reasons about.
 
-        ``control_source`` is supplied by the caller (the orchestrator owns the
-        authoritative control source); we just stamp it onto the snapshot.
+        ``control_source`` is stamped by the caller: the orchestrator owns the
+        authoritative active source, and this layer only records what it is
+        told.
         """
-        att = self._msgs.get("ATTITUDE")
-        gpi = self._msgs.get("GLOBAL_POSITION_INT")
-        vfr = self._msgs.get("VFR_HUD")
-
-        roll = math.degrees(getattr(att, "roll", 0.0)) if att else 0.0
-        pitch = math.degrees(getattr(att, "pitch", 0.0)) if att else 0.0
-
-        rel_alt = (getattr(gpi, "relative_alt", 0) / 1000.0) if gpi else 0.0
-        lat = (getattr(gpi, "lat", 0) / 1e7) if gpi else 0.0
-        lon = (getattr(gpi, "lon", 0) / 1e7) if gpi else 0.0
-        # GLOBAL_POSITION_INT.vz is cm/s, +down -> vspeed is +up.
-        vspeed = (-getattr(gpi, "vz", 0) / 100.0) if gpi else 0.0
-        if vfr is not None:
-            vspeed = float(getattr(vfr, "climb", vspeed))
-
-        groundspeed = float(getattr(vfr, "groundspeed", 0.0)) if vfr else 0.0
-        heading = float(getattr(vfr, "heading", 0.0)) if vfr else (
-            (getattr(gpi, "hdg", 0) / 100.0) if gpi else 0.0
-        )
-
+        attitude, position, velocity, heading = self._kinematics()
         armed = self._is_armed()
-        # "airborne": armed AND meaningfully above home. Conservative 0.5 m gate
-        # so we don't treat ground noise as flight (gates manual-control enable).
-        airborne = bool(armed and rel_alt > 0.5)
-
+        rel_alt = position["relAlt"]
         return VehicleState(
             armed=armed,
             mode=self._mode_name(),
             control_source=control_source,
-            relAlt=float(rel_alt),
-            groundspeed=groundspeed,
-            vspeed=float(vspeed),
-            heading=float(heading) % 360.0,
-            lat=float(lat),
-            lon=float(lon),
-            roll=float(roll),
-            pitch=float(pitch),
-            airborne=airborne,
+            relAlt=rel_alt,
+            groundspeed=velocity["groundspeed"],
+            vspeed=velocity["verticalSpeed"],
+            heading=heading,
+            lat=position["lat"],
+            lon=position["lon"],
+            roll=attitude["roll"],
+            pitch=attitude["pitch"],
+            # AIRBORNE = armed AND meaningfully off the ground. The 0.5 m gate
+            # keeps ground noise from reading as flight, which matters because
+            # this is what enables manual control.
+            airborne=bool(armed and rel_alt > 0.5),
             ts=now(),
         )
+
+    def _battery_report(self) -> dict:
+        """Contract ``battery`` block from SYS_STATUS (mV / cA / percent).
+
+        The MAVLink "not measured" sentinels are honoured: they become 0.0
+        here (the contract has no null), and the health rails in
+        ``health_inputs`` carry the richer, age-aware version for anything
+        that has to reason about a dead pack sensor.
+        """
+        status = self._msgs.get("SYS_STATUS")
+        if status is None:
+            return {"voltage": 0.0, "current": 0.0, "remaining": 0.0}
+        millivolts = getattr(status, "voltage_battery", 0)
+        centiamps = getattr(status, "current_battery", -1)
+        percent = getattr(status, "battery_remaining", -1)
+        return {
+            "voltage": (
+                millivolts / 1000.0 if millivolts not in self._UNMEASURED else 0.0
+            ),
+            "current": centiamps / 100.0 if centiamps >= 0 else 0.0,
+            "remaining": float(percent) if percent >= 0 else 0.0,
+        }
+
+    def _gps_report(self) -> dict:
+        """Contract ``gps`` block from GPS_RAW_INT (eph is HDOP x100)."""
+        gps = self._msgs.get("GPS_RAW_INT")
+        if gps is None:
+            return {"fixType": 0, "satellites": 0, "hdop": 99.0}
+        eph = getattr(gps, "eph", 65535)
+        return {
+            "fixType": int(getattr(gps, "fix_type", 0)),
+            "satellites": int(getattr(gps, "satellites_visible", 0)),
+            # 99.0 is the contract's "unusable", not a measured dilution.
+            "hdop": eph / 100.0 if eph not in self._UNMEASURED else 99.0,
+        }
+
+    def _link_report(self, age_s: float) -> dict:
+        """Contract ``link`` block: radio RSSI + FC heartbeat freshness."""
+        radio = self._msgs.get("RADIO_STATUS") or self._msgs.get("RADIO")
+        age_ms = age_s * 1000.0
+        return {
+            "rssi": float(getattr(radio, "rssi", 0)) if radio is not None else 0.0,
+            "latencyMs": float(age_ms if math.isfinite(age_ms) else 9999.0),
+        }
 
     def read_telemetry(
         self,
@@ -558,95 +758,23 @@ class Vehicle:
         *,
         home_distance: Optional[float] = None,
     ) -> dict:
-        """Build a contract ``telemetry`` dict from the cached FC messages.
+        """Build a contract ``telemetry`` frame from the cached FC messages.
 
-        Mirrors ``shared.shared.Telemetry`` exactly (degrees for attitude,
-        1e-7 for lat/lon, metres for altitude, etc.). ``controlSource`` is
-        filled from the caller; ``home.distance`` may be supplied (the caller
-        usually computes it once it knows home), else best-effort 0.
+        Mirrors ``shared.shared.Telemetry`` exactly: degrees for attitude and
+        heading, decimal degrees for lat/lon, metres for altitude, m/s for
+        velocity, milliseconds for the frame timestamp. ``controlSource`` is
+        stamped by the caller; ``home.distance`` is filled in by the caller
+        once it knows home, and is 0 until then.
 
-        This never raises -- any missing message degrades to a safe default so
-        the link to the ground stays up even with partial telemetry.
+        Never raises. A missing message degrades to a safe default so the
+        ground link stays up on partial telemetry -- but the frame also
+        carries ``fcLink``, because a cache being served after the FC went
+        quiet must SAY so rather than presenting last-known values under a
+        moving timestamp (FM-08).
         """
-        att = self._msgs.get("ATTITUDE")
-        gpi = self._msgs.get("GLOBAL_POSITION_INT")
-        vfr = self._msgs.get("VFR_HUD")
-        sysst = self._msgs.get("SYS_STATUS")
-        gps = self._msgs.get("GPS_RAW_INT")
-
-        # --- attitude (rad -> deg) ----------------------------------------
-        attitude = {
-            "roll": math.degrees(getattr(att, "roll", 0.0)) if att else 0.0,
-            "pitch": math.degrees(getattr(att, "pitch", 0.0)) if att else 0.0,
-            "yaw": math.degrees(getattr(att, "yaw", 0.0)) if att else 0.0,
-        }
-
-        # --- position -----------------------------------------------------
-        position = {
-            "lat": (getattr(gpi, "lat", 0) / 1e7) if gpi else 0.0,
-            "lon": (getattr(gpi, "lon", 0) / 1e7) if gpi else 0.0,
-            "relAlt": (getattr(gpi, "relative_alt", 0) / 1000.0) if gpi else 0.0,
-            "absAlt": (getattr(gpi, "alt", 0) / 1000.0) if gpi else 0.0,
-        }
-
-        # --- velocity -----------------------------------------------------
-        vspeed = (-getattr(gpi, "vz", 0) / 100.0) if gpi else 0.0
-        if vfr is not None:
-            vspeed = float(getattr(vfr, "climb", vspeed))
-        velocity = {
-            "groundspeed": float(getattr(vfr, "groundspeed", 0.0)) if vfr else 0.0,
-            "verticalSpeed": float(vspeed),
-        }
-
-        heading = float(getattr(vfr, "heading", 0.0)) if vfr else (
-            (getattr(gpi, "hdg", 0) / 100.0) if gpi else 0.0
-        )
-
-        # --- battery (SYS_STATUS: voltage mV, current cA, remaining %) -----
-        if sysst is not None:
-            v_raw = getattr(sysst, "voltage_battery", 0)
-            c_raw = getattr(sysst, "current_battery", -1)
-            rem_raw = getattr(sysst, "battery_remaining", -1)
-            battery = {
-                "voltage": (v_raw / 1000.0) if v_raw not in (0, 65535) else 0.0,
-                "current": (c_raw / 100.0) if c_raw >= 0 else 0.0,
-                "remaining": float(rem_raw) if rem_raw >= 0 else 0.0,
-            }
-        else:
-            battery = {"voltage": 0.0, "current": 0.0, "remaining": 0.0}
-
-        # --- gps (GPS_RAW_INT) --------------------------------------------
-        if gps is not None:
-            hdop_raw = getattr(gps, "eph", 65535)
-            gps_dict = {
-                "fixType": int(getattr(gps, "fix_type", 0)),
-                "satellites": int(getattr(gps, "satellites_visible", 0)),
-                "hdop": (hdop_raw / 100.0) if hdop_raw not in (0, 65535) else 99.0,
-            }
-        else:
-            gps_dict = {"fixType": 0, "satellites": 0, "hdop": 99.0}
-
-        # --- home ----------------------------------------------------------
-        home = {
-            "lat": 0.0,
-            "lon": 0.0,
-            "distance": float(home_distance) if home_distance is not None else 0.0,
-        }
-
-        # --- link (best-effort: FC heartbeat freshness + radio RSSI) -------
-        rssi = 0.0
-        radio = self._msgs.get("RADIO_STATUS") or self._msgs.get("RADIO")
-        if radio is not None:
-            rssi = float(getattr(radio, "rssi", 0))
+        attitude, position, velocity, heading = self._kinematics()
         age_s = self.fc_heartbeat_age_s()
-        age_ms = age_s * 1000.0
-        link = {
-            "rssi": rssi,
-            "latencyMs": float(age_ms if math.isfinite(age_ms) else 9999.0),
-        }
-        # A dead FC link must not present as fresh telemetry with a moving
-        # timestamp. Every cached rail below is last-known, not live (FM-08).
-        stale = self.fc_link_lost()
+        stale = bool(self.fc_link_lost())
 
         return {
             "type": "telemetry",
@@ -657,18 +785,24 @@ class Vehicle:
             "attitude": attitude,
             "position": position,
             "velocity": velocity,
-            "heading": float(heading) % 360.0,
-            "battery": battery,
-            "gps": gps_dict,
-            "home": home,
-            "link": link,
-            # Companion-side FC-link health. The orchestrator turns this into a
-            # failsafe signal and a healthEvent; it is deliberately NOT a
+            "heading": heading,
+            "battery": self._battery_report(),
+            "gps": self._gps_report(),
+            "home": {
+                "lat": 0.0,
+                "lon": 0.0,
+                "distance": (
+                    float(home_distance) if home_distance is not None else 0.0
+                ),
+            },
+            "link": self._link_report(age_s),
+            # Companion-side FC-link health. The orchestrator turns this into
+            # a failsafe signal and a healthEvent; it is deliberately NOT a
             # decorative latency number nobody thresholds (FM-08).
             "fcLink": {
-                "lost": bool(stale),
+                "lost": stale,
                 "heartbeatAgeS": float(age_s if math.isfinite(age_s) else 9999.0),
-                "telemetryStale": bool(stale),
+                "telemetryStale": stale,
             },
         }
 
@@ -1053,17 +1187,31 @@ class Vehicle:
     # ----------------------------------------------------------------------
     # Discrete commands
     # ----------------------------------------------------------------------
+    #: COMMAND_LONG carries exactly seven float parameters. Callers pass only
+    #: the leading ones they mean; the rest are zero-filled.
+    _COMMAND_PARAMS = 7
+
     def _command_long(self, command: int, *params: float) -> None:
-        """Send a COMMAND_LONG with up to 7 float params (rest zero-filled)."""
+        """Send one COMMAND_LONG, zero-filling the parameters not supplied.
+
+        Raises ``RuntimeError`` when there is no link: a discrete command that
+        silently evaporates is worse than one that fails loudly, because the
+        caller would report success for a vehicle that never heard it.
+        """
         if not self._connected or self._master is None:
             raise RuntimeError("not connected")
-        p = list(params) + [0.0] * (7 - len(params))
+        if len(params) > self._COMMAND_PARAMS:
+            raise ValueError(
+                f"COMMAND_LONG takes at most {self._COMMAND_PARAMS} params, "
+                f"got {len(params)}"
+            )
+        padded = tuple(params) + (0.0,) * (self._COMMAND_PARAMS - len(params))
         self._master.mav.command_long_send(
             self._target_system,
             self._target_component,
             command,
-            0,  # confirmation
-            p[0], p[1], p[2], p[3], p[4], p[5], p[6],
+            0,                                  # confirmation
+            *padded,
         )
 
     def _wait_command_ack(self, command: int, timeout_s: float = 2.0) -> bool:
@@ -1093,26 +1241,41 @@ class Vehicle:
             return True
         return bool(inbox)
 
-    def arm(self, *, force: bool = False) -> bool:
-        """Arm the motors. ``force=True`` bypasses some prearm checks (emergency).
+    #: ArduPilot's "yes, I really mean it" magic number in param2 of
+    #: MAV_CMD_COMPONENT_ARM_DISARM. It bypasses prearm checks when arming and
+    #: permits an in-flight kill when disarming, so it is never a default.
+    _FORCE_MAGIC: float = 21196.0
 
-        SAFETY: prefer the SafetyManager arming checklist *before* calling this;
-        ``force`` is for the emergency path only.
+    def _set_motor_state(self, running: bool, *, force: bool) -> bool:
+        """Arm (``running``) or disarm, and report the FC's ACTUAL verdict.
+
+        One command with one parameter of difference, so the arm and disarm
+        paths cannot drift: a fix to the ack handling of one is a fix to both.
         """
-        magic = 21196.0 if force else 0.0  # ArduPilot force-arm magic number
         command = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
-        self._command_long(command, 1.0, magic)
+        self._command_long(
+            command,
+            1.0 if running else 0.0,
+            self._FORCE_MAGIC if force else 0.0,
+        )
         return self._wait_command_ack(command)
+
+    def arm(self, *, force: bool = False) -> bool:
+        """Arm the motors; ``force=True`` bypasses prearm checks (emergency).
+
+        SAFETY: run the SafetyManager arming checklist BEFORE calling this.
+        ``force`` exists for the emergency path only -- it is the operator
+        asserting that the FC's own refusal is the wrong answer.
+        """
+        return self._set_motor_state(True, force=force)
 
     def disarm(self, *, force: bool = False) -> bool:
-        """Disarm the motors. ``force=True`` disarms even when airborne (kill).
+        """Disarm the motors; ``force=True`` cuts them even when airborne.
 
-        emergencyStop uses ``force=True`` -- no confirmation, overrides all.
+        emergencyStop on the ground uses ``force=True``: no confirmation, and
+        it overrides everything else in flight.
         """
-        magic = 21196.0 if force else 0.0
-        command = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
-        self._command_long(command, 0.0, magic)
-        return self._wait_command_ack(command)
+        return self._set_motor_state(False, force=force)
 
     def set_mode(
         self,
@@ -1143,17 +1306,10 @@ class Vehicle:
         """
         if not self._connected or self._master is None:
             raise RuntimeError("not connected")
-        mode = str(mode).upper()
-        if not self._mode_mapping:
-            try:
-                self._mode_mapping = self._master.mode_mapping() or {}
-                self._inv_mode_mapping = {v: k for k, v in self._mode_mapping.items()}
-            except Exception:
-                self._mode_mapping = {}
-        if mode not in self._mode_mapping:
-            log.warning("set_mode(%s) refused: unknown to this FC's mode map", mode)
+        mode_id = self._resolve_mode_id(mode)
+        if mode_id is None:
             return False
-        mode_id = int(self._mode_mapping[mode])
+        mode = str(mode).upper()
 
         if self._observed_custom_mode() == mode_id:
             return True
@@ -1190,6 +1346,24 @@ class Vehicle:
         log.error("set_mode(%s) NOT confirmed by the flight controller", mode)
         return False
 
+    def _resolve_mode_id(self, mode: str) -> Optional[int]:
+        """This FC's ``custom_mode`` number for ``mode``, or ``None``.
+
+        The map is fetched at connect; a link that came up before pymavlink
+        could decode it leaves us with an empty map, so one lazy refetch is
+        attempted here. ``None`` -- a name this firmware does not have -- is
+        REFUSED rather than guessed: sending a fabricated mode number is how a
+        failsafe rung silently becomes a different mode.
+        """
+        name = str(mode).upper()
+        if not self._mode_mapping:
+            self._load_mode_mapping()
+        number = self._mode_mapping.get(name)
+        if number is None:
+            log.warning("set_mode(%s) refused: unknown to this FC's mode map", name)
+            return None
+        return int(number)
+
     def _observed_custom_mode(self) -> Optional[int]:
         """The custom_mode from the newest cached HEARTBEAT, or None."""
         hb = self._msgs.get("HEARTBEAT")
@@ -1222,35 +1396,63 @@ class Vehicle:
                 return self._observed_custom_mode() == mode_id
 
     def takeoff(self, alt: float) -> bool:
-        """Ensure GUIDED, then command NAV_TAKEOFF to ``alt`` metres (rel home).
+        """Ensure GUIDED, then NAV_TAKEOFF to ``alt`` metres above home.
 
-        Returns False if GUIDED couldn't be set. The caller is responsible for
-        having armed first; ArduCopter will also refuse takeoff if not armed.
+        Returns False when GUIDED could not be CONFIRMED -- and in that case
+        nothing is sent at all, because a NAV_TAKEOFF issued from an
+        unconfirmed mode is a climb command aimed at a vehicle that may not be
+        listening. Arming is the caller's job; ArduCopter refuses takeoff on a
+        disarmed vehicle anyway.
         """
         if not self.set_mode("GUIDED"):
+            log.warning("takeoff refused: GUIDED was not confirmed")
             return False
         command = mavutil.mavlink.MAV_CMD_NAV_TAKEOFF
-        self._command_long(
-            command,
-            0.0, 0.0, 0.0, 0.0, 0.0, 0.0, float(alt),
-        )
+        # param7 is the only one NAV_TAKEOFF reads for a copter: altitude.
+        self._command_long(command, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, float(alt))
         return self._wait_command_ack(command)
 
+    def _enter_mode(self, mode: str) -> bool:
+        """A discrete mode command, reported as OBSERVED rather than as sent."""
+        if self.set_mode(mode):
+            return True
+        log.warning("%s command failed: the FC never confirmed the mode", mode)
+        return False
+
     def land(self) -> bool:
-        """Switch to LAND mode (descend and disarm where we are)."""
-        return self.set_mode("LAND")
+        """LAND: descend and disarm where we are."""
+        return self._enter_mode("LAND")
 
     def rtl(self) -> bool:
-        """Switch to RTL mode (return to launch)."""
-        return self.set_mode("RTL")
+        """RTL: climb to RTL_ALT, return to launch, land."""
+        return self._enter_mode("RTL")
 
     def brake(self) -> bool:
-        """Switch to BRAKE mode (stop and hold position aggressively)."""
-        return self.set_mode("BRAKE")
+        """BRAKE: stop and hold position aggressively."""
+        return self._enter_mode("BRAKE")
 
     # ----------------------------------------------------------------------
     # Velocity setpoint streaming (the guidance + manual output path)
     # ----------------------------------------------------------------------
+    def _velocity_frame(self, setpoint: VelocitySetpoint) -> tuple:
+        """The SET_POSITION_TARGET_LOCAL_NED argument tuple for one setpoint.
+
+        Built in one place so the commanded frame and the zero-hold fallback
+        below cannot disagree about field order, frame or type mask.
+        """
+        return (
+            0,                                  # time_boot_ms (0 = now)
+            self._target_system,
+            self._target_component,
+            mavutil.mavlink.MAV_FRAME_BODY_NED,
+            _TYPEMASK_VEL_YAWRATE,
+            0.0, 0.0, 0.0,                      # x, y, z position (ignored)
+            setpoint.vx, setpoint.vy, setpoint.vz,        # velocity (m/s)
+            0.0, 0.0, 0.0,                      # ax, ay, az accel (ignored)
+            0.0,                                # yaw angle (ignored)
+            math.radians(setpoint.yaw_rate),    # yaw_rate: deg/s -> rad/s
+        )
+
     def send_body_velocity(
         self,
         vx: "float | VelocitySetpoint" = 0.0,
@@ -1260,71 +1462,50 @@ class Vehicle:
         *,
         valid: bool = True,
     ) -> None:
-        """Send a BODY-frame velocity setpoint via SET_POSITION_TARGET_LOCAL_NED.
+        """Stream one BODY-frame velocity setpoint to the FC.
 
-        Accepts EITHER component args ``(vx, vy, vz, yaw_rate, valid=)`` (the
-        orchestrator's call form) OR a single ``VelocitySetpoint`` as the first
-        positional arg (the internal ``hold()`` call form).
+        Accepts EITHER component arguments ``(vx, vy, vz, yaw_rate, valid=)``
+        -- the orchestrator's call form -- OR a single ``VelocitySetpoint`` as
+        the first positional argument, which is how ``hold()`` calls it.
 
-        Axes are MAV_FRAME_BODY_NED (vx fwd, vy right, vz down, m/s; yaw_rate
-        deg/s clockwise+). ``valid=False`` -> a zero-velocity hold (we still send
-        it so the FC's GUIDED controller actively holds rather than coasting on a
-        stale setpoint).
+        Axes are MAV_FRAME_BODY_NED: vx forward, vy right, vz down, in m/s,
+        with yaw_rate in deg/s clockwise-positive (converted to rad/s on the
+        way out). ``valid=False`` is a zero-velocity HOLD, and it is still
+        SENT: ArduPilot's GUIDED controller holds actively when it keeps
+        receiving zeros, and coasts on the last target when the stream stops.
+        Call it at 10-20 Hz for that reason.
 
-        SAFETY: this method does not clamp to Limits (that is the guidance/manual
-        layer's responsibility and is done upstream). It defends only against
-        non-finite values, defaulting to a zero hold on any anomaly. Call at
-        10-20 Hz from the orchestrator -- ArduPilot expects regular setpoints
-        and will fall back to its own failsafe if they stop.
+        SAFETY -- this is the FC-egress half of "clamped twice". The setpoint
+        is folded through ``mavlink.safety.clamp_body_velocity`` against this
+        Vehicle's ``Limits`` immediately before the wire: bounds can only be
+        tightened, never raised above what guidance/manual already produced,
+        and a non-finite value on ANY axis collapses the whole frame to the
+        zero hold rather than to a bound. A send that raises falls back to one
+        zero-hold frame, because "stop" is the only safe default here.
         """
-        # Normalise to a VelocitySetpoint whether called with components or a sp.
-        if hasattr(vx, "vx"):
-            sp = vx  # type: ignore[assignment]
-        else:
-            sp = VelocitySetpoint(
-                vx=float(vx), vy=float(vy), vz=float(vz),
-                yaw_rate=float(yaw_rate), valid=bool(valid),
-            )
-
         if not self._connected or self._master is None:
             return
 
-        if not sp.valid:
-            vx = vy = vz = 0.0
-            yaw_rate_rad = 0.0
-        else:
-            vx = _finite(sp.vx)
-            vy = _finite(sp.vy)
-            vz = _finite(sp.vz)
-            yaw_rate_rad = math.radians(_finite(sp.yaw_rate))
+        requested = vx if hasattr(vx, "vx") else VelocitySetpoint(
+            vx=float(vx), vy=float(vy), vz=float(vz),
+            yaw_rate=float(yaw_rate), valid=bool(valid),
+        )
+        bounded = clamp_body_velocity(requested, self._limits)
 
+        send = self._master.mav.set_position_target_local_ned_send
         try:
-            self._master.mav.set_position_target_local_ned_send(
-                0,                              # time_boot_ms (0 = now)
-                self._target_system,
-                self._target_component,
-                mavutil.mavlink.MAV_FRAME_BODY_NED,
-                _TYPEMASK_VEL_YAWRATE,
-                0.0, 0.0, 0.0,                  # x, y, z position (ignored)
-                vx, vy, vz,                     # vx, vy, vz velocity (m/s)
-                0.0, 0.0, 0.0,                  # ax, ay, az accel (ignored)
-                0.0,                            # yaw angle (ignored)
-                yaw_rate_rad,                   # yaw_rate (rad/s)
-            )
+            send(*self._velocity_frame(bounded))
         except Exception:
-            # Default to the safe state on error: try a single zero-hold frame.
             try:
-                self._master.mav.set_position_target_local_ned_send(
-                    0, self._target_system, self._target_component,
-                    mavutil.mavlink.MAV_FRAME_BODY_NED,
-                    _TYPEMASK_VEL_YAWRATE,
-                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
-                )
+                send(*self._velocity_frame(VelocitySetpoint.hold()))
             except Exception:
-                pass
+                log.debug(
+                    "velocity setpoint and its zero-hold retry both failed",
+                    exc_info=True,
+                )
 
     def hold(self) -> None:
-        """Convenience: send a single zero-velocity hold frame."""
+        """Send a single zero-velocity hold frame (the canonical safe output)."""
         self.send_body_velocity(VelocitySetpoint.hold())
 
     # ----------------------------------------------------------------------
@@ -1350,19 +1531,25 @@ class Vehicle:
         a feed-forward term, not a cruise-speed cap -- so those stay masked out
         (``_TYPEMASK_POS_ONLY``).
 
-        SAFETY -- this method clamps (the "clamped twice" rule's second clamp
-        for the planner path, which bypasses the orchestrator's body-velocity
-        clamp): ``speed`` to ``[0, Limits.max_speed]`` -- never raised -- and
-        ``rel_alt`` to ``[0, Limits.max_altitude]``.
-        A clamped speed of <= 0 (a profile the config floor degraded to zero
-        means "no motion, safe direction") REFUSES the whole leg: ArduPilot
-        DENIES non-positive DO_CHANGE_SPEED, so sending the position target
-        anyway would fly it at the FC's previous/default guided speed (SITL
-        WPNAV_SPEED 10 m/s > the 8 m/s hard cap) instead of not moving.
-        Nothing goes on the wire; the caller should hold.
-        Non-finite or out-of-range lat/lon are REFUSED (returns False, nothing
-        sent) -- never coerced toward (0, 0). The caller keeps GUIDED mode +
-        preconditions; a repeated target is fine (ArduPilot latches the last).
+        SAFETY -- this is the FC-egress clamp for the planner path, which
+        bypasses the orchestrator's per-tick body-velocity clamp entirely, so
+        for global targets this IS the second stage of "clamped twice".
+        ``mavlink.safety.clamp_goto_target`` folds ``speed`` into
+        ``[0, Limits.max_speed]`` (never raised) and ``rel_alt`` into
+        ``[0, Limits.max_altitude]``.
+
+        A clamped speed of <= 0 REFUSES THE WHOLE LEG rather than sending a
+        "correct" zero: ArduPilot DENIES a non-positive DO_CHANGE_SPEED, so
+        the position target that followed would fly at the FC's previous or
+        default guided speed (SITL's WPNAV_SPEED is 10 m/s, above the 8 m/s
+        hard cap) instead of not moving. Nothing goes on the wire and the
+        caller should hold.
+
+        Bad coordinates -- non-numeric, non-finite or out of range -- are
+        likewise refused with nothing sent, never coerced toward (0, 0).
+
+        Mode and preconditions stay the caller's business, and repeating a
+        target is harmless: ArduPilot latches the last one.
 
         Returns True when the target was sent, False otherwise. Never raises.
         """
@@ -1370,34 +1557,19 @@ class Vehicle:
             log.warning("goto_global refused: not connected")
             return False
 
-        try:
-            lat_f, lon_f = float(lat), float(lon)
-        except (TypeError, ValueError):
-            log.warning("goto_global refused: non-numeric lat/lon %r/%r", lat, lon)
+        fix = _global_coordinates(lat, lon)
+        if fix is None:
+            log.warning("goto_global refused: unusable lat/lon %r/%r", lat, lon)
             return False
-        if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
-            log.warning("goto_global refused: non-finite lat/lon %r/%r", lat, lon)
-            return False
-        if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
-            log.warning("goto_global refused: lat/lon out of range %s/%s", lat_f, lon_f)
-            return False
+        lat_f, lon_f = fix
 
-        lim = limits if limits is not None else self._limits
-        # Second clamp before the wire (rule: every setpoint clamped twice).
-        # NEVER raise a requested speed: clamp to [0, max_speed] only.
-        # Limits.clamp_speed's min_speed floor exists for guidance usability;
-        # flooring here would turn a profile the config floor degraded to 0.0
-        # ("no motion, safe direction") into actual motion at min_speed.
-        speed_c = max(0.0, min(_finite(speed), float(lim.max_speed)))
-        alt_c = max(0.0, min(_finite(rel_alt), float(lim.max_altitude)))
+        envelope = limits if limits is not None else self._limits
+        speed_c, alt_c = clamp_goto_target(speed, rel_alt, envelope)
 
         if speed_c <= 0.0:
-            # ArduPilot DENIES non-positive DO_CHANGE_SPEED: the wire value
-            # would be "correct" but the leg would fly at the FC's previous/
-            # default guided speed instead of NOT MOVING. Refuse outright.
             log.warning(
-                "goto_global refused: leg speed %.3f clamps to %.3f <= 0 "
-                "(no motion) -- position target not sent", float(speed), speed_c,
+                "goto_global refused: leg speed %r clamps to %.3f <= 0 "
+                "(no motion) -- position target not sent", speed, speed_c,
             )
             return False
 
@@ -1432,6 +1604,29 @@ class Vehicle:
     # ----------------------------------------------------------------------
     # Parameter writes (best-effort, never fatal)
     # ----------------------------------------------------------------------
+    def _await_param_echo(self, name: str, timeout: float) -> Any:
+        """Wait for the PARAM_VALUE the FC sends for ``name``; ``None`` on silence.
+
+        The FC streams PARAM_VALUE for parameters nobody asked about, so this
+        keeps reading -- caching everything it consumes, like every other
+        blocking wait in this module (FM-09) -- until the named one arrives or
+        the window closes. It returns the MESSAGE, not a value: the two
+        callers disagree about what an echo without a value means.
+        """
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            msg = self._recv(type="PARAM_VALUE", timeout=timeout)
+            if msg is None:
+                # Nothing arrived. A real link may still deliver until the
+                # deadline; a drained test double never will.
+                if not self._pending_inbox() or time.monotonic() >= deadline:
+                    return None
+                continue
+            if _param_name(msg) == name:
+                return msg
+            if time.monotonic() >= deadline:
+                return None
+
     def set_param(
         self,
         name: str,
@@ -1440,18 +1635,23 @@ class Vehicle:
         retries: int = 3,
         timeout: float = 1.0,
     ) -> bool:
-        """PARAM_SET ``name`` = ``value`` and VERIFY the echoed PARAM_VALUE.
-
-        Best-effort: retries a few times, logs and returns False on silence,
-        error, or a mismatched echo -- NEVER raises (a SITL without some param
-        must not kill the connection).
+        """PARAM_SET ``name`` = ``value``, and VERIFY the echo BY VALUE.
 
         The echo is matched on param_id AND param_value (FM-14). ArduPilot
-        echoes the value it ACTUALLY STORED, so a write it refuses or clamps
-        comes back as the OLD value. Matching on the name alone -- which is
-        what this did -- reported success for a parameter that never changed,
-        which is exactly how a fence could be "enabled" while the firmware
-        still had FENCE_ENABLE=0.
+        echoes the value it ACTUALLY STORED, so a write it refused or clamped
+        comes back carrying the OLD number. Matching on the name alone reports
+        success for a parameter that never changed -- which is exactly how a
+        geofence can read as "enabled" while the firmware still holds
+        FENCE_ENABLE=0.
+
+        The three outcomes are deliberately different:
+          * echo matches      -> True, immediately;
+          * echo DISAGREES    -> False, immediately. The FC has answered; a
+            retry would only ask a settled question again;
+          * silence, or an echo with no value at all -> retry, then False.
+
+        Best-effort and NEVER raises: a SITL build missing some parameter must
+        not take the FC connection down with it.
         """
         if not self._connected or self._master is None:
             log.warning("set_param(%s) skipped: not connected", name)
@@ -1466,33 +1666,25 @@ class Vehicle:
                     want,
                     mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
                 )
-                deadline = time.monotonic() + max(0.0, float(timeout))
-                while True:
-                    msg = self._recv(type="PARAM_VALUE", timeout=timeout)
-                    if msg is None:
-                        if not self._pending_inbox() or time.monotonic() >= deadline:
-                            break
-                        continue
-                    if _param_name(msg) != name:
-                        if time.monotonic() >= deadline:
-                            break
-                        continue
-                    stored = getattr(msg, "param_value", None)
-                    if stored is None:
-                        # No value in the echo: we cannot prove the write, so
-                        # we do not claim it.
-                        log.warning(
-                            "set_param(%s) echo carried no value; treating as "
-                            "unverified", name,
-                        )
-                        break
-                    if _close(float(stored), want):
-                        return True
+                echo = self._await_param_echo(name, timeout)
+                if echo is None:
+                    continue                    # silence: write again
+                stored = getattr(echo, "param_value", None)
+                if stored is None:
+                    # An echo with no value proves nothing, so we claim
+                    # nothing -- and ask again.
                     log.warning(
-                        "set_param(%s=%s) REFUSED/CLAMPED by the FC: it stored "
-                        "%s", name, want, stored,
+                        "set_param(%s) echo carried no value; treating as "
+                        "unverified", name,
                     )
-                    return False
+                    continue
+                if _close(float(stored), want):
+                    return True
+                log.warning(
+                    "set_param(%s=%s) REFUSED/CLAMPED by the FC: it stored %s",
+                    name, want, stored,
+                )
+                return False
         except Exception:
             log.exception("set_param(%s) failed", name)
             return False
@@ -1500,9 +1692,12 @@ class Vehicle:
         return False
 
     def get_param(self, name: str, *, timeout: float = 1.0) -> Optional[float]:
-        """PARAM_REQUEST_READ ``name`` and return the value the FC reports.
+        """PARAM_REQUEST_READ ``name``; return the value the FC reports.
 
-        ``None`` means "the FC did not tell us" -- never a fabricated default.
+        ``None`` means "the FC did not tell us" -- a silence, a malformed
+        echo, or no link. It is never a fabricated default, because a caller
+        that cannot tell those apart will treat an unset parameter as a
+        configured one.
         """
         if not self._connected or self._master is None:
             return None
@@ -1511,25 +1706,18 @@ class Vehicle:
                 self._target_system,
                 self._target_component,
                 name.encode("ascii"),
-                -1,
+                -1,                             # -1 = look the name up, not an index
             )
         except Exception:
             log.exception("get_param(%s) request failed", name)
             return None
-        deadline = time.monotonic() + max(0.0, float(timeout))
-        while True:
-            msg = self._recv(type="PARAM_VALUE", timeout=timeout)
-            if msg is None:
-                if not self._pending_inbox() or time.monotonic() >= deadline:
-                    return None
-                continue
-            if _param_name(msg) == name:
-                try:
-                    return float(getattr(msg, "param_value"))
-                except (AttributeError, TypeError, ValueError):
-                    return None
-            if time.monotonic() >= deadline:
-                return None
+        echo = self._await_param_echo(name, timeout)
+        if echo is None:
+            return None
+        try:
+            return float(getattr(echo, "param_value"))
+        except (AttributeError, TypeError, ValueError):
+            return None
 
     def apply_failsafe_params(
         self,
@@ -1794,31 +1982,56 @@ class Vehicle:
         self._fence_detail = detail
 
 
+# --------------------------------------------------------------------------
+# Wire-level helpers
+# --------------------------------------------------------------------------
+#: MAVLink pads a param_id to 16 bytes with NULs; pymavlink may hand it back
+#: as bytes or as an already-decoded str depending on the dialect build.
+_PARAM_ID_PAD = "\x00"
+
+#: Closed WGS-84 bounds. A coordinate outside them is a bug upstream, not a
+#: place, and is refused rather than wrapped.
+_LAT_RANGE = (-90.0, 90.0)
+_LON_RANGE = (-180.0, 180.0)
+
+
 def _param_name(msg: Any) -> str:
-    """The PARAM_VALUE's param_id as a plain, unpadded string."""
-    got = getattr(msg, "param_id", "")
-    if isinstance(got, bytes):
-        got = got.decode("ascii", errors="replace")
-    return str(got).rstrip("\x00")
+    """A PARAM_VALUE's param_id as a plain, unpadded ``str``."""
+    raw = getattr(msg, "param_id", "")
+    if isinstance(raw, (bytes, bytearray)):
+        raw = bytes(raw).decode("ascii", errors="replace")
+    return str(raw).rstrip(_PARAM_ID_PAD)
 
 
 def _close(a: float, b: float, *, rel: float = 1e-3, abs_tol: float = 1e-3) -> bool:
-    """Float equality for a PARAM_VALUE echo (REAL32 round-trip tolerance)."""
+    """Equality for a PARAM_VALUE echo, at REAL32 round-trip tolerance."""
     try:
         return math.isclose(float(a), float(b), rel_tol=rel, abs_tol=abs_tol)
     except (TypeError, ValueError):
         return False
 
 
-def _finite(v: float) -> float:
-    """Coerce to a finite float; non-finite (nan/inf) -> 0.0 (safe)."""
+def _in_range(value: float, bounds: Tuple[float, float]) -> bool:
+    low, high = bounds
+    return low <= value <= high
+
+
+def _global_coordinates(lat: Any, lon: Any) -> Optional[Tuple[float, float]]:
+    """``(lat, lon)`` as finite, in-range degrees, or ``None`` if unusable.
+
+    ``None`` is the only safe answer for a coordinate we cannot read: the
+    numeric alternative is (0, 0), a real place in the Gulf of Guinea, and
+    "fly to the null island" is not a degraded version of "do not fly".
+    """
     try:
-        f = float(v)
+        lat_f, lon_f = float(lat), float(lon)
     except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(f):
-        return 0.0
-    return f
+        return None
+    if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
+        return None
+    if not (_in_range(lat_f, _LAT_RANGE) and _in_range(lon_f, _LON_RANGE)):
+        return None
+    return lat_f, lon_f
 
 
 __all__ = ["Vehicle"]

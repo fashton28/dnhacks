@@ -1,235 +1,364 @@
-/* Log browser modal — lists recorded flight sessions and lets the operator
-   scrub through them, previewing telemetry readouts + a small position dot
-   + tracking state at the scrubbed time.
-   Props: { open; onClose; sessions?; onLoad?(id): Promise<{meta, frames}> }
-   Falls back to window.eis?.recorder.list() when present, else the in-memory
-   recorder singleton.                                                          */
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
-import { FolderClock, Play, Trash2, Radio } from 'lucide-react';
-import { Modal } from '@/components/Modal';
-import { Button } from '@/components/Button';
-import { recorder } from '@/store/recorder';
-import type { RecordingMeta, RecordedFrame, RecordingSession } from '@/store/recorder';
+/* Log browser — lists recorded flight sessions and scrubs through one.
+   Sessions come from, in order of preference: the `sessions` / `onLoad`
+   props, the Electron recorder bridge (window.eis.recorder), or the
+   in-memory recorder singleton. Whatever the source, a session is folded
+   into the recorder's RecordingSession shape before the timeline reads it —
+   the shell's NDJSON sessions carry raw telemetry/tracking messages and a
+   `{ meta, frames }` envelope, the in-memory recorder carries frames. */
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { FolderClock, Play, Radio, SkipBack, SkipForward, Trash2 } from 'lucide-react';
+import { Modal, Button, IconButton, StatusPill, Badge } from '@/components';
+import type { StatusPillStatus } from '@/components/StatusPill';
+import { recorder, toRecordedFrame } from '@/store/recorder';
+import type { RecordedFrame, RecordingMeta, RecordingSession } from '@/store/recorder';
 import type { TrackingState } from '@/contract';
 
 export interface LogBrowserModalProps {
   open: boolean;
   onClose: () => void;
-  /** Optional pre-loaded session list; if omitted the component queries recorder.list(). */
+  /** Optional pre-loaded session list; if omitted the bridge or recorder.list() is queried. */
   sessions?: RecordingMeta[];
-  /** Optional async loader; if omitted falls back to recorder.load(). */
+  /** Optional async loader; if omitted the bridge or recorder.load() is used. */
   onLoad?: (id: string) => Promise<{ meta: RecordingMeta; frames: RecordedFrame[] }>;
 }
 
-/* ---- helpers --------------------------------------------------------------- */
+/* ---- pure helpers ---------------------------------------------------------- */
 
-function fmtDate(ts: number): string {
-  const d = new Date(ts);
-  return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' })
-    + ' ' + d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+type Dict = Record<string, unknown>;
+
+function asDict(value: unknown): Dict | null {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Dict) : null;
 }
 
-function fmtDuration(ms: number): string {
-  const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${String(s).padStart(2, '0')}`;
+function firstNumber(...candidates: unknown[]): number | undefined {
+  for (const c of candidates) if (typeof c === 'number' && Number.isFinite(c)) return c;
+  return undefined;
 }
 
-/* Lookup the frame closest to a given elapsed-ms position within a session. */
-function frameAt(frames: RecordedFrame[], startedAt: number, elapsedMs: number): RecordedFrame | null {
-  if (!frames.length) return null;
-  const target = startedAt + elapsedMs;
-  let closest = frames[0];
-  let closestDist = Math.abs(closest.ts - target);
-  for (let i = 1; i < frames.length; i++) {
-    const d = Math.abs(frames[i].ts - target);
-    if (d < closestDist) { closestDist = d; closest = frames[i]; }
-    if (d > closestDist) break; // frames are chronological; stop early
+function firstString(...candidates: unknown[]): string | undefined {
+  for (const c of candidates) if (typeof c === 'string' && c !== '') return c;
+  return undefined;
+}
+
+/**
+ * Fold any session-like value into a RecordingSession. Accepts the in-memory
+ * recorder's sessions, the bridge's `{ meta, frames }` envelope (id and
+ * startedAt live inside `meta`, frames are raw wire messages) and the
+ * `onLoad` prop's `{ ...meta, frames }`. `hint` is the list entry the
+ * operator clicked — the fallback for anything the payload lacks.
+ */
+export function normaliseSession(raw: unknown, hint?: Partial<RecordingMeta>): RecordingSession | null {
+  const d = asDict(raw);
+  if (!d) return null;
+  const meta = asDict(d.meta) ?? {};
+  const id = firstString(d.id, meta.id, hint?.id);
+  if (!id) return null;
+
+  const frames = (Array.isArray(d.frames) ? d.frames : [])
+    .map(toRecordedFrame)
+    .filter((f): f is RecordedFrame => f !== null)
+    .sort((a, b) => a.ts - b.ts);
+
+  const startedAt = firstNumber(d.startedAt, meta.startedAt, hint?.startedAt, frames[0]?.ts) ?? 0;
+  const lastTs = frames.length ? frames[frames.length - 1].ts : startedAt;
+  const durationMs = Math.max(firstNumber(d.durationMs, hint?.durationMs) ?? 0, lastTs - startedAt, 0);
+  return { id, startedAt, durationMs, size: frames.length, meta, frames };
+}
+
+/** Index of the frame whose timestamp is nearest `ts` (frames ascending; -1 when empty). */
+export function nearestFrameIndex(frames: readonly { ts: number }[], ts: number): number {
+  if (frames.length === 0) return -1;
+  let lo = 0;
+  let hi = frames.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (frames[mid].ts < ts) lo = mid + 1;
+    else hi = mid;
   }
-  return closest;
+  // `lo` is the first frame at or after ts; the one before may be closer.
+  if (lo > 0 && Math.abs(frames[lo - 1].ts - ts) <= Math.abs(frames[lo].ts - ts)) return lo - 1;
+  return lo;
 }
 
-/* ---- tracking state pill --------------------------------------------------- */
+function fmtClock(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
+}
 
-const TRACK_LABELS: Record<TrackingState, string> = {
-  idle: 'Idle',
-  searching: 'Searching',
-  locked: 'Locked',
-  lost: 'Lost',
-};
-const TRACK_COLORS: Record<TrackingState, { fg: string; bg: string; border: string }> = {
-  idle:      { fg: 'var(--text-tertiary)', bg: 'var(--surface-input)', border: 'var(--border-subtle)' },
-  searching: { fg: 'var(--amber-bright)',  bg: 'var(--caution-bg)',    border: 'var(--amber-line)'   },
-  locked:    { fg: 'var(--green-bright)',  bg: 'var(--nominal-bg)',    border: 'var(--green-line)'   },
-  lost:      { fg: 'var(--red-bright)',    bg: 'var(--danger-bg)',     border: 'var(--red-line)'     },
+function fmtStamp(ts: number): string {
+  const d = new Date(ts);
+  const date = d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
+  const time = d.toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+  return `${date} ${time}`;
+}
+
+/* ---- session sources ------------------------------------------------------- */
+
+interface SessionRow extends RecordingMeta {
+  sizeLabel: string;
+}
+
+interface SessionSource {
+  list(): Promise<SessionRow[]>;
+  load(id: string, hint?: RecordingMeta): Promise<RecordingSession | null>;
+}
+
+const withFrames = (m: RecordingMeta): SessionRow => ({ ...m, sizeLabel: `${m.size} frames` });
+const withBytes = (m: RecordingMeta): SessionRow => ({
+  ...m,
+  sizeLabel: m.size >= 1024 ? `${(m.size / 1024).toFixed(1)} KB` : `${m.size} B`,
+});
+
+function toMeta(raw: unknown): RecordingMeta | null {
+  const d = asDict(raw);
+  const id = d ? firstString(d.id) : undefined;
+  if (!d || !id) return null;
+  return {
+    id,
+    startedAt: firstNumber(d.startedAt) ?? 0,
+    durationMs: firstNumber(d.durationMs) ?? 0,
+    size: firstNumber(d.size) ?? 0,
+  };
+}
+
+function resolveSource(sessionsProp?: RecordingMeta[], onLoadProp?: LogBrowserModalProps['onLoad']): SessionSource {
+  const bridge = typeof window !== 'undefined' ? window.eis?.recorder : undefined;
+
+  const list = async (): Promise<SessionRow[]> => {
+    if (sessionsProp) return sessionsProp.map(withFrames);
+    if (bridge) {
+      const entries = await bridge.list();
+      return entries
+        .map(toMeta)
+        .filter((m): m is RecordingMeta => m !== null)
+        .map(withBytes)
+        .sort((a, b) => b.startedAt - a.startedAt);
+    }
+    return recorder.list().map(withFrames);
+  };
+
+  const load = async (id: string, hint?: RecordingMeta): Promise<RecordingSession | null> => {
+    if (onLoadProp) {
+      const result = await onLoadProp(id);
+      return normaliseSession({ ...result.meta, frames: result.frames }, hint);
+    }
+    if (bridge) return normaliseSession(await bridge.load(id), { ...hint, id });
+    return normaliseSession(recorder.load(id), hint);
+  };
+
+  return { list, load };
+}
+
+/* ---- presentation bits ----------------------------------------------------- */
+
+const HEAD: React.CSSProperties = {
+  fontSize: 10, fontWeight: 600, letterSpacing: '0.06em',
+  textTransform: 'uppercase', color: 'var(--text-tertiary)',
 };
 
-function TrackPill({ state }: { state: TrackingState }): JSX.Element {
-  const c = TRACK_COLORS[state];
+const TRACK_STATUS: Record<TrackingState, StatusPillStatus> = {
+  idle: 'neutral',
+  searching: 'caution',
+  locked: 'nominal',
+  lost: 'danger',
+};
+
+function SessionRowView({ row, active, onSelect }: { row: SessionRow; active: boolean; onSelect: () => void }): JSX.Element {
   return (
-    <span style={{
-      display: 'inline-flex', alignItems: 'center', gap: 5,
-      padding: '2px 8px', borderRadius: 'var(--radius-pill)',
-      background: c.bg, border: `1px solid ${c.border}`,
-      fontSize: 11, fontWeight: 600, color: c.fg,
-    }}>
-      <span style={{ width: 5, height: 5, borderRadius: '50%', background: c.fg, flex: 'none' }} />
-      {TRACK_LABELS[state]}
-    </span>
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onSelect}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 8, width: '100%', textAlign: 'left',
+        padding: '8px 9px', cursor: 'pointer',
+        borderRadius: 'var(--radius-sm)',
+        background: active ? 'var(--info-bg)' : 'var(--surface-input)',
+        border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
+        color: active ? 'var(--accent-text)' : 'var(--text-primary)',
+        fontFamily: 'var(--font-sans)',
+      }}
+    >
+      <Radio size={13} style={{ flex: 'none', color: active ? 'var(--accent-text)' : 'var(--text-tertiary)' }} />
+      <span style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 1 }}>
+        <span style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+          {fmtStamp(row.startedAt)}
+        </span>
+        <span style={{ fontSize: 10, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)' }}>
+          {fmtClock(row.durationMs)} · {row.sizeLabel}
+        </span>
+      </span>
+      <Play size={11} style={{ flex: 'none', color: 'var(--text-tertiary)' }} />
+    </button>
   );
 }
 
-/* ---- mini position map ----------------------------------------------------- */
+interface MiniMapProps {
+  home: { lat: number; lon: number };
+  current: { lat: number; lon: number };
+  trail: { lat: number; lon: number }[];
+}
 
-function MiniMap({ lat, lon, homeLat, homeLon }: {
-  lat: number; lon: number; homeLat: number; homeLon: number;
-}): JSX.Element {
-  // Project a tiny area around home into the 100×100 canvas.
-  const size = 100;
-  const scale = 2000; // px per degree (roughly)
-  const cx = size / 2 + (lon - homeLon) * scale;
-  const cy = size / 2 - (lat - homeLat) * scale;
-  const hx = size / 2;
-  const hy = size / 2;
+/** Home-centred local map: equirectangular metres, auto-scaled to the trail. */
+function MiniMap({ home, current, trail }: MiniMapProps): JSX.Element {
+  const size = 112;
+  const inset = 10;
+  const metresPerDegLat = 110_540;
+  const metresPerDegLon = 111_320 * Math.cos((home.lat * Math.PI) / 180);
+  const local = (p: { lat: number; lon: number }) => ({
+    x: (p.lon - home.lon) * metresPerDegLon,
+    y: (p.lat - home.lat) * metresPerDegLat,
+  });
+  const points = [current, ...trail].map(local);
+  const extent = Math.max(10, ...points.map((p) => Math.max(Math.abs(p.x), Math.abs(p.y))));
+  const scale = (size / 2 - inset) / extent;
+  const toPx = (p: { x: number; y: number }) => ({ x: size / 2 + p.x * scale, y: size / 2 - p.y * scale });
+  const here = toPx(points[0]);
+  const path = trail.map(local).map(toPx).map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
 
   return (
     <svg
-      width={size} height={size}
+      width={size}
+      height={size}
+      viewBox={`0 0 ${size} ${size}`}
+      role="img"
+      aria-label="Position relative to home"
       style={{
+        flex: 'none',
         borderRadius: 'var(--radius-sm)',
         background: 'var(--bg-sunken)',
         border: '1px solid var(--border-subtle)',
-        flex: 'none',
       }}
-      viewBox={`0 0 ${size} ${size}`}
     >
-      {/* home marker */}
-      <circle cx={hx} cy={hy} r={4} fill="var(--text-tertiary)" opacity={0.5} />
-      {/* drone position */}
-      <circle cx={Math.max(4, Math.min(size - 4, cx))} cy={Math.max(4, Math.min(size - 4, cy))} r={5} fill="var(--amber)" />
-      {/* crosshair tick */}
-      <line x1={hx - 6} y1={hy} x2={hx + 6} y2={hy} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
-      <line x1={hx} y1={hy - 6} x2={hx} y2={hy + 6} stroke="rgba(255,255,255,0.15)" strokeWidth={1} />
+      <circle cx={size / 2} cy={size / 2} r={size / 2 - inset} fill="none" stroke="rgba(255,255,255,0.08)" strokeDasharray="2 3" />
+      <line x1={size / 2 - 5} y1={size / 2} x2={size / 2 + 5} y2={size / 2} stroke="rgba(255,255,255,0.25)" />
+      <line x1={size / 2} y1={size / 2 - 5} x2={size / 2} y2={size / 2 + 5} stroke="rgba(255,255,255,0.25)" />
+      {path && <polyline points={path} fill="none" stroke="var(--accent)" strokeWidth={1.2} opacity={0.7} />}
+      <circle cx={here.x} cy={here.y} r={4.5} fill="var(--amber)" />
+      <text x={size - 4} y={size - 4} textAnchor="end" fontSize={8} fill="var(--text-tertiary)" fontFamily="var(--font-mono)">
+        {Math.round(extent)} m
+      </text>
     </svg>
   );
 }
 
-/* ---- session row ----------------------------------------------------------- */
-
-interface SessionRowProps {
-  meta: RecordingMeta;
-  active: boolean;
-  onLoad: () => void;
-}
-
-function SessionRow({ meta, active, onLoad }: SessionRowProps): JSX.Element {
+function Readout({ label, value }: { label: string; value: string }): JSX.Element {
   return (
-    <div
-      onClick={onLoad}
-      style={{
-        display: 'flex', alignItems: 'center', gap: 10,
-        padding: '9px 10px',
-        borderRadius: 'var(--radius-sm)',
-        cursor: 'pointer',
-        background: active ? 'var(--info-bg)' : 'var(--surface-input)',
-        border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border-subtle)'}`,
-        transition: 'all var(--dur-fast)',
-      }}
-    >
-      <Radio size={14} style={{ color: active ? 'var(--accent-text)' : 'var(--text-tertiary)', flex: 'none' }} />
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ fontSize: 12, fontWeight: 600, color: active ? 'var(--accent-text)' : 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-          {fmtDate(meta.startedAt)}
-        </div>
-        <div style={{ fontSize: 11, color: 'var(--text-tertiary)', fontFamily: 'var(--font-mono)', marginTop: 1 }}>
-          {fmtDuration(meta.durationMs)} · {meta.size} frames
-        </div>
-      </div>
-      <Play size={12} style={{ color: 'var(--text-tertiary)', flex: 'none' }} />
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 2, padding: '6px 8px', background: 'var(--bg-sunken)', borderRadius: 'var(--radius-xs)' }}>
+      <span style={{ ...HEAD, fontSize: 9 }}>{label}</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
+        {value}
+      </span>
     </div>
   );
 }
 
 /* ---- main component -------------------------------------------------------- */
 
-export function LogBrowserModal({ open, onClose, sessions: sessionsProp, onLoad: onLoadProp }: LogBrowserModalProps): JSX.Element | null {
-  const [sessions, setSessions] = useState<RecordingMeta[]>([]);
-  const [loadedSession, setLoadedSession] = useState<RecordingSession | null>(null);
-  const [scrubMs, setScrubMs] = useState(0);
-  const [loading, setLoading] = useState(false);
+export function LogBrowserModal({
+  open,
+  onClose,
+  sessions: sessionsProp,
+  onLoad: onLoadProp,
+}: LogBrowserModalProps): JSX.Element | null {
+  const [rows, setRows] = useState<SessionRow[]>([]);
+  const [session, setSession] = useState<RecordingSession | null>(null);
+  const [cursorMs, setCursorMs] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [problem, setProblem] = useState<string | null>(null);
 
-  // Refresh session list when modal opens
+  // Every open starts from a fresh list and no selection.
   useEffect(() => {
     if (!open) return;
-    if (sessionsProp) {
-      setSessions(sessionsProp);
-    } else {
-      // Try the Electron bridge (async) first, else the in-memory recorder (sync).
-      const bridge = window.eis?.recorder;
-      Promise.resolve(bridge ? bridge.list() : recorder.list())
-        .then((list) => setSessions(list as RecordingMeta[]))
-        .catch(() => setSessions([]));
-    }
-    setLoadedSession(null);
-    setScrubMs(0);
-  }, [open, sessionsProp]);
+    let cancelled = false;
+    setSession(null);
+    setCursorMs(0);
+    setProblem(null);
+    resolveSource(sessionsProp, onLoadProp)
+      .list()
+      .then((list) => { if (!cancelled) setRows(list); })
+      .catch(() => {
+        if (cancelled) return;
+        setRows([]);
+        setProblem('The recordings list could not be read.');
+      });
+    return () => { cancelled = true; };
+  }, [open, sessionsProp, onLoadProp]);
 
-  const handleLoad = useCallback(async (id: string) => {
-    setLoading(true);
+  const select = useCallback(async (row: SessionRow) => {
+    setBusy(true);
+    setProblem(null);
     try {
-      let session: RecordingSession | null = null;
-      if (onLoadProp) {
-        const result = await onLoadProp(id);
-        session = { ...result.meta, frames: result.frames, meta: {} };
+      const loaded = await resolveSource(sessionsProp, onLoadProp).load(row.id, row);
+      if (loaded) {
+        setSession(loaded);
+        setCursorMs(0);
       } else {
-        // Electron bridge load() is async; the in-memory recorder load() is sync.
-        const bridge = window.eis?.recorder;
-        const loaded = await Promise.resolve(bridge ? bridge.load(id) : recorder.load(id));
-        session = (loaded as RecordingSession | null) ?? null;
+        setProblem(`Session ${row.id} could not be loaded.`);
       }
-      if (session) {
-        setLoadedSession(session);
-        setScrubMs(0);
-      }
+    } catch (err) {
+      setProblem((err as Error).message || 'The session failed to load.');
     } finally {
-      setLoading(false);
+      setBusy(false);
     }
-  }, [onLoadProp]);
+  }, [sessionsProp, onLoadProp]);
 
-  const currentFrame = useMemo(() => {
-    if (!loadedSession) return null;
-    return frameAt(loadedSession.frames, loadedSession.startedAt, scrubMs);
-  }, [loadedSession, scrubMs]);
+  const frameIndex = useMemo(
+    () => (session ? nearestFrameIndex(session.frames, session.startedAt + cursorMs) : -1),
+    [session, cursorMs],
+  );
+  const frame = session && frameIndex >= 0 ? session.frames[frameIndex] : null;
 
-  const tel = currentFrame?.telemetry ?? null;
-  const trk = currentFrame?.tracking ?? null;
+  const stepFrames = (delta: number): void => {
+    if (!session || frameIndex < 0) return;
+    const next = Math.min(session.frames.length - 1, Math.max(0, frameIndex + delta));
+    setCursorMs(Math.max(0, session.frames[next].ts - session.startedAt));
+  };
+
+  // Breadcrumb up to the scrub position, thinned so long flights stay cheap.
+  const trail = useMemo(() => {
+    if (!session || frameIndex < 0) return [];
+    const stride = Math.max(1, Math.ceil((frameIndex + 1) / 240));
+    const points: { lat: number; lon: number }[] = [];
+    for (let i = 0; i <= frameIndex; i += stride) {
+      const t = session.frames[i].telemetry;
+      if (t) points.push({ lat: t.position.lat, lon: t.position.lon });
+    }
+    return points;
+  }, [session, frameIndex]);
+
+  const clearAll = (): void => {
+    recorder.clear();
+    setRows([]);
+    setSession(null);
+    setCursorMs(0);
+  };
+
+  const tel = frame?.telemetry ?? null;
+  const trk = frame?.tracking ?? null;
 
   return (
     <Modal
       open={open}
       onClose={onClose}
-      width={560}
+      width={640}
       icon={<FolderClock size={16} />}
       title="Log browser"
       subtitle="Select a recorded session, then scrub through the flight timeline."
       footer={<Button variant="ghost" onClick={onClose}>Close</Button>}
     >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14, padding: '4px 0 12px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '220px minmax(0, 1fr)', gap: 14, padding: '4px 0 12px', minHeight: 250 }}>
 
-        {/* Session list */}
-        <div>
-          <div style={{
-            fontSize: 10, fontWeight: 600,
-            letterSpacing: '0.06em', textTransform: 'uppercase',
-            color: 'var(--text-tertiary)', marginBottom: 6,
-          }}>
-            Recorded sessions
+        {/* Sessions */}
+        <aside style={{ display: 'flex', flexDirection: 'column', gap: 6, minWidth: 0 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <span style={HEAD}>Recorded sessions</span>
+            <Badge tone="neutral" mono>{rows.length}</Badge>
           </div>
-          {sessions.length === 0 ? (
+          {rows.length === 0 ? (
             <div style={{
-              padding: '20px 0', textAlign: 'center',
-              fontSize: 12, color: 'var(--text-tertiary)',
+              padding: '20px 8px', textAlign: 'center',
+              fontSize: 12, color: 'var(--text-tertiary)', lineHeight: 1.45,
               background: 'var(--surface-input)',
               borderRadius: 'var(--radius-sm)',
               border: '1px solid var(--border-subtle)',
@@ -237,171 +366,121 @@ export function LogBrowserModal({ open, onClose, sessions: sessionsProp, onLoad:
               No sessions recorded yet. Start a flight to begin recording.
             </div>
           ) : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 180, overflow: 'auto' }}>
-              {sessions.map(s => (
-                <SessionRow
-                  key={s.id}
-                  meta={s}
-                  active={loadedSession?.id === s.id}
-                  onLoad={() => { void handleLoad(s.id); }}
-                />
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 260, overflow: 'auto' }}>
+              {rows.map((row) => (
+                <SessionRowView key={row.id} row={row} active={session?.id === row.id} onSelect={() => { void select(row); }} />
               ))}
             </div>
           )}
-        </div>
+          {rows.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<Trash2 size={11} />}
+              onClick={clearAll}
+              style={{ alignSelf: 'flex-start', marginTop: 'auto' }}
+            >
+              Clear all sessions
+            </Button>
+          )}
+        </aside>
 
-        {/* Timeline scrubber + preview — only shown once a session is loaded */}
-        {loadedSession && (
-          <>
-            {/* Scrubber */}
-            <div>
-              <div style={{
-                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                marginBottom: 6,
-              }}>
-                <span style={{
-                  fontSize: 10, fontWeight: 600,
-                  letterSpacing: '0.06em', textTransform: 'uppercase',
-                  color: 'var(--text-tertiary)',
-                }}>
-                  Timeline
-                </span>
-                <span style={{
-                  fontFamily: 'var(--font-mono)', fontSize: 11,
-                  color: 'var(--text-secondary)',
-                }}>
-                  {fmtDuration(scrubMs)} / {fmtDuration(loadedSession.durationMs)}
-                </span>
-              </div>
-              <input
-                type="range"
-                min={0}
-                max={loadedSession.durationMs || 1}
-                step={100}
-                value={scrubMs}
-                onChange={e => setScrubMs(Number(e.target.value))}
-                style={{ width: '100%', accentColor: 'var(--accent)' }}
-              />
+        {/* Player */}
+        <section style={{ display: 'flex', flexDirection: 'column', gap: 12, minWidth: 0 }}>
+          {!session && (
+            <div style={{
+              flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center',
+              fontSize: 12, color: 'var(--text-tertiary)', textAlign: 'center', padding: 16,
+              border: '1px dashed var(--border-subtle)', borderRadius: 'var(--radius-sm)',
+            }}>
+              {busy ? 'Loading…' : 'Select a session to scrub its timeline.'}
             </div>
+          )}
 
-            {/* Telemetry preview */}
-            {loading && (
-              <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--text-tertiary)' }}>
-                Loading…
-              </div>
-            )}
-
-            {!loading && currentFrame && (
-              <div style={{
-                display: 'flex', gap: 12, alignItems: 'flex-start',
-                padding: '12px',
-                background: 'var(--surface-input)',
-                borderRadius: 'var(--radius-sm)',
-                border: '1px solid var(--border-subtle)',
-              }}>
-                {/* Mini map */}
-                {tel && (
-                  <MiniMap
-                    lat={tel.position.lat}
-                    lon={tel.position.lon}
-                    homeLat={tel.home.lat}
-                    homeLon={tel.home.lon}
+          {session && (
+            <>
+              <div>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+                  <span style={HEAD}>Timeline</span>
+                  <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
+                    {fmtClock(cursorMs)} / {fmtClock(session.durationMs)}
+                    {frameIndex >= 0 && ` · frame ${frameIndex + 1}/${session.frames.length}`}
+                  </span>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <IconButton size="sm" title="Previous frame" icon={<SkipBack size={12} />} disabled={frameIndex <= 0} onClick={() => stepFrames(-1)} />
+                  <input
+                    type="range"
+                    aria-label="Timeline"
+                    min={0}
+                    max={Math.max(1, session.durationMs)}
+                    step={100}
+                    value={cursorMs}
+                    onChange={(e) => setCursorMs(Number(e.target.value))}
+                    style={{ flex: 1, accentColor: 'var(--accent)' }}
                   />
-                )}
-
-                {/* Readouts */}
-                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {tel && (
-                    <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
-                      {[
-                        { label: 'Alt', value: `${tel.position.relAlt.toFixed(1)} m` },
-                        { label: 'Spd', value: `${tel.velocity.groundspeed.toFixed(1)} m/s` },
-                        { label: 'Bat', value: `${Math.round(tel.battery.remaining)}%` },
-                        { label: 'Hdg', value: `${Math.round(tel.heading)}°` },
-                        { label: 'Sats', value: String(tel.gps.satellites) },
-                        { label: 'Mode', value: tel.mode },
-                      ].map(({ label, value }) => (
-                        <div key={label} style={{
-                          display: 'flex', flexDirection: 'column', gap: 2,
-                          padding: '6px 8px',
-                          background: 'var(--bg-sunken)',
-                          borderRadius: 'var(--radius-xs)',
-                        }}>
-                          <span style={{
-                            fontSize: 9, fontWeight: 600,
-                            letterSpacing: '0.06em', textTransform: 'uppercase',
-                            color: 'var(--text-tertiary)',
-                          }}>
-                            {label}
-                          </span>
-                          <span style={{
-                            fontFamily: 'var(--font-mono)', fontSize: 13,
-                            color: 'var(--text-primary)',
-                            fontVariantNumeric: 'tabular-nums',
-                          }}>
-                            {value}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {/* Tracking state */}
-                  {trk && (
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span style={{ fontSize: 11, color: 'var(--text-tertiary)' }}>Tracking</span>
-                      <TrackPill state={trk.state} />
-                      {trk.state === 'locked' && trk.estimatedDistance != null && (
-                        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {trk.estimatedDistance.toFixed(1)} m
-                        </span>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Armed / mode indicators */}
-                  {tel && (
-                    <div style={{ display: 'flex', gap: 6 }}>
-                      <span style={{
-                        display: 'inline-flex', alignItems: 'center', gap: 4,
-                        padding: '2px 8px', borderRadius: 'var(--radius-pill)',
-                        background: tel.armed ? 'var(--nominal-bg)' : 'var(--surface-input)',
-                        border: `1px solid ${tel.armed ? 'var(--green-line)' : 'var(--border-subtle)'}`,
-                        fontSize: 11, fontWeight: 600,
-                        color: tel.armed ? 'var(--green-bright)' : 'var(--text-tertiary)',
-                      }}>
-                        {tel.armed ? 'ARMED' : 'DISARMED'}
-                      </span>
-                    </div>
-                  )}
+                  <IconButton size="sm" title="Next frame" icon={<SkipForward size={12} />} disabled={frameIndex < 0 || frameIndex >= session.frames.length - 1} onClick={() => stepFrames(1)} />
                 </div>
               </div>
-            )}
 
-            {/* Delete session */}
-            <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
-              <button
-                onClick={() => {
-                  recorder.clear();
-                  setSessions([]);
-                  setLoadedSession(null);
-                  setScrubMs(0);
-                }}
-                style={{
-                  display: 'inline-flex', alignItems: 'center', gap: 6,
-                  height: 28, padding: '0 10px',
-                  background: 'transparent',
-                  border: '1px solid var(--border-subtle)',
+              {busy && <div style={{ textAlign: 'center', fontSize: 12, color: 'var(--text-tertiary)' }}>Loading…</div>}
+
+              {!busy && !frame && (
+                <div style={{ fontSize: 12, color: 'var(--text-tertiary)' }}>This session holds no telemetry or tracking frames.</div>
+              )}
+
+              {!busy && frame && (
+                <div style={{
+                  display: 'flex', gap: 12, alignItems: 'flex-start', padding: 12,
+                  background: 'var(--surface-input)',
                   borderRadius: 'var(--radius-sm)',
-                  color: 'var(--text-tertiary)', fontSize: 11, cursor: 'pointer',
-                }}
-              >
-                <Trash2 size={11} />
-                Clear all sessions
-              </button>
-            </div>
-          </>
-        )}
+                  border: '1px solid var(--border-subtle)',
+                }}>
+                  {tel && (
+                    <MiniMap
+                      home={{ lat: tel.home.lat, lon: tel.home.lon }}
+                      current={{ lat: tel.position.lat, lon: tel.position.lon }}
+                      trail={trail}
+                    />
+                  )}
+                  <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {tel && (
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 6 }}>
+                        <Readout label="Alt" value={`${tel.position.relAlt.toFixed(1)} m`} />
+                        <Readout label="Spd" value={`${tel.velocity.groundspeed.toFixed(1)} m/s`} />
+                        <Readout label="Bat" value={`${Math.round(tel.battery.remaining)}%`} />
+                        <Readout label="Hdg" value={`${Math.round(tel.heading)}°`} />
+                        <Readout label="Sats" value={String(tel.gps.satellites)} />
+                        <Readout label="Mode" value={tel.mode} />
+                      </div>
+                    )}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                      {tel && (
+                        <StatusPill status={tel.armed ? 'nominal' : 'neutral'} size="sm">
+                          {tel.armed ? 'Armed' : 'Disarmed'}
+                        </StatusPill>
+                      )}
+                      {trk && (
+                        <>
+                          <StatusPill status={TRACK_STATUS[trk.state]} size="sm">{trk.state}</StatusPill>
+                          {trk.state === 'locked' && trk.estimatedDistance != null && (
+                            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
+                              {trk.estimatedDistance.toFixed(1)} m
+                            </span>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+
+          {problem && (
+            <div role="alert" style={{ fontSize: 11, color: 'var(--red-bright)' }}>{problem}</div>
+          )}
+        </section>
       </div>
     </Modal>
   );

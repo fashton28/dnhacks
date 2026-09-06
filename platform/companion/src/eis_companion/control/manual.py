@@ -1,70 +1,171 @@
 """
-Manual piloting: map high-rate normalised stick frames to BODY-frame velocity
-setpoints, reusing the same setpoint path (and the same hard limits) as
+Manual piloting: high-rate normalised stick frames -> BODY-frame velocity
+setpoints, through the same setpoint path and the same hard limits as
 autonomous guidance.
 
-Axis mapping (contract ManualInput, each axis -1..1):
-  throttle -> vz  (climb/descend)   : throttle>0 = climb  -> vz<0 (NED up)
-  yaw      -> yaw_rate              : yaw>0      = turn right (clockwise) >0
-  pitch    -> vx  (forward/back)    : pitch>0    = forward -> vx>0
-  roll     -> vy  (left/right)      : roll>0     = right   -> vy>0
+Mapping
+-------
+A stick frame is the contract ``ManualInput`` quadruple, each axis in -1..1:
 
-Each axis is scaled to the SAME configured limit as guidance:
-  vx,vy -> max_speed ; vz -> max_climb_rate ; yaw_rate -> max_yaw_rate.
+    (throttle, yaw, pitch, roll)
 
-Safety (PRD 11):
-  * deadzone + output smoothing on every axis.
-  * Input watchdog: if no stick frame arrives within manual_watchdog_ms, OR the
-    ground link is reported down, feed() returns VelocitySetpoint.hold()
-    (zeroed, valid=False) -- never continue the last commanded velocity.
-  * engage() requires armed+airborne (the CALLER enforces this precondition and
-    passes the result); engaging is mutually exclusive with tracking and the
-    caller is responsible for disengaging tracking + setting controlSource.
-  * release() zeroes and reverts to auto-hold.
-  * emergencyStop / disarm are handled above this class and always supersede it.
+It becomes a body setpoint ``(vx, vy, vz, yaw_rate)`` through one fixed
+matrix (``_STICK_TO_BODY``) and one per-axis scale taken from ``Limits``:
 
-NOTE on standoff: manual piloting does NOT enforce standoff -- a human pilot may
-deliberately fly anywhere. Standoff is an autonomous-guidance guarantee. (Manual
-is still clamped to all speed/rate limits.)
+    vx       = +pitch    * max_speed        pitch>0    = forward
+    vy       = +roll     * max_speed        roll>0     = right
+    vz       = -throttle * max_climb_rate   throttle>0 = climb = NED up (< 0)
+    yaw_rate = +yaw      * max_yaw_rate     yaw>0      = clockwise / right
 
-numpy + stdlib only. Time is injected via ``now`` so the watchdog is testable.
+Per-tick pipeline
+-----------------
+    admit -> [gates: engaged, link, deadman] -> saturate -> deadzone
+          -> map & scale -> smooth -> clamp
+
+Safety (PRD 11)
+---------------
+* A frame is admitted only when all four axes are finite; anything else is
+  rejected WHOLE and does not refresh the deadman, so a stream of NaN sticks
+  ages out into the zero-and-hold exactly like a dead link (FM-05).
+* Deadman: only an admitted stick frame refreshes it. When no frame has
+  arrived within ``manual_watchdog_ms`` -- whether the caller is feeding
+  frames or merely ticking ``update()`` -- the output is
+  ``VelocitySetpoint.hold()`` (zero, valid=False) and the smoothing memory
+  is dropped, so the last command is never continued or coasted.
+* Ground-link deadman: ``link_ok=False`` zeroes-and-holds immediately.
+* ``engage()`` re-arms the deadman; the CALLER guarantees armed + airborne
+  and mutual exclusion with tracking. ``release()`` zeroes and forgets the
+  stored frame. Emergency stop / disarm live above this class.
+* Manual piloting does NOT enforce the standoff -- a human pilot may fly
+  anywhere -- but every axis is clamped to the shared speed / rate limits.
+
+numpy + stdlib only. Time is injected through ``clock`` so the deadman is
+deterministic under test.
 """
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
 from typing import Callable, Optional
+
+import numpy as np
 
 from ..types import Limits, VelocitySetpoint
 from .. import types as _types
 
+# Stick frame order (the contract ManualInput field order).
+_STICK_ATTRS = ("throttle", "yaw", "pitch", "roll")
 
-# A ManualInput is anything with throttle/yaw/pitch/roll floats. We duck-type to
-# avoid importing the contract dataclass into a pure-logic module; the API layer
-# hands us shared.ManualInput which matches.
-class _HasAxes:
-    throttle: float
-    yaw: float
-    pitch: float
-    roll: float
+# Body setpoint <- stick frame.  Rows: vx, vy, vz, yaw_rate.
+# Columns: throttle, yaw, pitch, roll.
+_STICK_TO_BODY = np.array(
+    [
+        [0.0, 0.0, 1.0, 0.0],    # vx       <- pitch
+        [0.0, 0.0, 0.0, 1.0],    # vy       <- roll
+        [-1.0, 0.0, 0.0, 0.0],   # vz       <- -throttle (climb is NED up)
+        [0.0, 1.0, 0.0, 0.0],    # yaw_rate <- yaw
+    ]
+)
 
 
-@dataclass
-class _Axes:
-    """Concrete stick frame stored by set_input() and replayed by update()."""
-    throttle: float = 0.0
-    yaw: float = 0.0
-    pitch: float = 0.0
-    roll: float = 0.0
+def _clamp01(v: float) -> float:
+    """Saturate one stick axis to [-1, 1]. A non-finite axis reads as CENTRED.
+
+    Saturating NaN to 1.0 -- what ``max(-1, min(1, nan))`` does under CPython
+    -- is full deflection on that axis (FM-05).
+    """
+    try:
+        value = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    return -1.0 if value < -1.0 else 1.0 if value > 1.0 else value
+
+
+def _admit_frame(values) -> Optional[np.ndarray]:
+    """Four finite axes -> saturated stick vector; anything else -> None."""
+    try:
+        axes = [float(v) for v in values]
+    except (TypeError, ValueError):
+        return None
+    if len(axes) != len(_STICK_ATTRS) or not all(math.isfinite(a) for a in axes):
+        return None
+    return np.array([_clamp01(a) for a in axes])
+
+
+def _frame_from_object(manual_input) -> Optional[np.ndarray]:
+    """Read throttle/yaw/pitch/roll off a ManualInput-shaped object."""
+    try:
+        values = [getattr(manual_input, name) for name in _STICK_ATTRS]
+    except AttributeError:
+        return None
+    return _admit_frame(values)
+
+
+def _apply_deadzone(frame: np.ndarray, deadzone: float) -> np.ndarray:
+    """Centred deadzone with the live band rescaled to start at zero.
+
+    Deflections at or inside ``deadzone`` read as centred; beyond it the
+    remaining travel [dz, 1] is stretched onto [0, 1] so there is no jump at
+    the edge. ``deadzone <= 0`` is a pass-through; a deadzone that swallows
+    the whole travel (>= 1, or non-finite) reads every axis as centred.
+    """
+    try:
+        dz = float(deadzone)
+    except (TypeError, ValueError):
+        dz = float("nan")
+    if not math.isfinite(dz) or dz >= 1.0:
+        return np.zeros_like(frame)
+    if dz <= 0.0:
+        return frame
+    magnitude = np.abs(frame)
+    live = np.where(magnitude > dz, (magnitude - dz) / (1.0 - dz), 0.0)
+    return np.sign(frame) * live
+
+
+def _body_bounds(limits: Limits) -> np.ndarray:
+    """|bound| per body axis; a non-finite limit grants zero authority."""
+    raw = np.array(
+        [limits.max_speed, limits.max_speed, limits.max_climb_rate, limits.max_yaw_rate],
+        dtype=float,
+    )
+    return np.where(np.isfinite(raw), np.abs(raw), 0.0)
+
+
+def _clamp_vector(vector: np.ndarray, bounds: np.ndarray) -> np.ndarray:
+    """Per-axis clamp to [-bound, bound]; a non-finite axis becomes 0.0 (FM-06)."""
+    safe = np.where(np.isfinite(vector), vector, 0.0)
+    return np.clip(safe, -bounds, bounds)
+
+
+class _Deadman:
+    """Remembers when the last admitted stick frame arrived."""
+
+    def __init__(self, clock: Callable[[], float]) -> None:
+        self._clock = clock
+        self._last_frame_t: Optional[float] = None
+
+    def arm(self) -> None:
+        """Start a fresh window now (engage / a new frame)."""
+        self._last_frame_t = float(self._clock())
+
+    def disarm(self) -> None:
+        self._last_frame_t = None
+
+    def expired(self, timeout_ms: float) -> bool:
+        """True when no frame has been seen, or the last one is too old."""
+        if self._last_frame_t is None:
+            return True
+        age_ms = (float(self._clock()) - self._last_frame_t) * 1000.0
+        return age_ms > float(timeout_ms)
 
 
 class ManualPilot:
-    """Stateful manual-piloting mapper with deadzone, smoothing and a watchdog.
+    """Stateful stick-to-setpoint mapper with deadzone, smoothing and a deadman.
 
     Args:
-      smoothing: low-pass alpha in (0,1]; 1.0 = no smoothing.
-      clock: callable returning seconds (injectable for tests). Defaults to
-        ``eis_companion.types.now``.
+      smoothing: low-pass alpha in (0, 1]; 1.0 disables smoothing.
+      clock: seconds source (injectable). Defaults to ``eis_companion.types.now``.
     """
 
     def __init__(
@@ -74,38 +175,37 @@ class ManualPilot:
         clock: Optional[Callable[[], float]] = None,
     ) -> None:
         self._alpha = float(smoothing)
-        self._clock = clock or _types.now
-        self._engaged: bool = False
-        self._last_input_t: Optional[float] = None
-        self._prev = VelocitySetpoint.hold()
-        self._pending: Optional[_Axes] = None   # latest stick frame for update()
+        self._deadman = _Deadman(clock or _types.now)
+        self._engaged = False
+        self._frame: Optional[np.ndarray] = None       # latest admitted sticks
+        self._filtered = np.zeros(4)                   # smoothing memory (body)
+        self._emitted = VelocitySetpoint.hold()        # last setpoint handed out
 
-    # ---- engage / release ------------------------------------------------
+    # ---- engage / release ---------------------------------------------------
     @property
     def engaged(self) -> bool:
         return self._engaged
 
     def engage(self) -> None:
-        """Engage manual control. Caller MUST have verified armed+airborne and
-        disengaged any active tracking first (mutual exclusion). Resets the
-        watchdog clock so we don't immediately trip it."""
+        """Take manual control. The caller has verified armed + airborne and
+        released tracking. Starts a fresh deadman window and rests the output."""
         self._engaged = True
-        self._last_input_t = self._clock()
-        self._prev = VelocitySetpoint.hold()
+        self._deadman.arm()
+        self._rest()
 
     def release(self) -> VelocitySetpoint:
-        """Release manual control -> zero setpoint + hold (auto-hold). Returns
-        the safe hold setpoint the caller should emit."""
+        """Give manual control back: zero, forget the stored frame, return the
+        safe hold setpoint the caller should emit."""
         self._engaged = False
-        self._last_input_t = None
-        self._prev = VelocitySetpoint.hold()
-        return VelocitySetpoint.hold()
+        self._frame = None
+        self._deadman.disarm()
+        return self._rest()
 
-    # ---- orchestrator-facing adapter (high-rate set_input + per-tick update)
-    # The orchestrator separates the high-rate stick path (set_input, called from
-    # the fire-and-forget manualInput handler) from the control-loop step
-    # (update, called every tick). These wrap engage()/feed()/release() so the
-    # app never has to thread a ManualInput object through the control loop.
+    def reset(self) -> None:
+        """Release and clear everything (the orchestrator's watchdog path)."""
+        self.release()
+
+    # ---- orchestrator adapter: high-rate set_input + per-tick update ------
     def set_input(
         self,
         throttle: float = 0.0,
@@ -113,42 +213,30 @@ class ManualPilot:
         pitch: float = 0.0,
         roll: float = 0.0,
     ) -> bool:
-        """Store the latest stick frame (high-rate, fire-and-forget). Engages the
-        pilot on first input and refreshes the watchdog clock. The orchestrator
-        only calls this while manual control is the active source.
+        """Store the newest stick frame (fire-and-forget path).
 
-        A frame carrying a NON-FINITE axis is REJECTED whole: it is not stored
-        and it does NOT refresh the watchdog, so a stream of NaN sticks ages out
-        into the zero-and-hold exactly like a dead link. Accepting it would put
-        the axis at full deflection (``_clamp01(nan) == 1.0``), which is FM-05.
-
-        Returns True when the frame was accepted.
+        Engages on the first frame and refreshes the deadman. A frame with any
+        non-finite axis is rejected whole: not stored, deadman NOT refreshed.
+        Returns True when the frame was admitted.
         """
-        axes = (throttle, yaw, pitch, roll)
-        try:
-            values = tuple(float(v) for v in axes)
-        except (TypeError, ValueError):
+        frame = _admit_frame((throttle, yaw, pitch, roll))
+        if frame is None:
             return False
-        if not all(math.isfinite(v) for v in values):
-            return False
-        self._pending = _Axes(*values)
+        self._frame = frame
         if not self._engaged:
             self.engage()
-        self._last_input_t = self._clock()
+        self._deadman.arm()
         return True
 
     def update(self, limits: Limits, dt: float, *, link_ok: bool = True) -> VelocitySetpoint:
-        """Per-tick step: map the latest stored stick frame to a clamped BODY
-        setpoint. Watchdog-gated inside feed(); returns hold() until the first
-        set_input or after a release/reset."""
-        return self.feed(self._pending, limits, dt, link_ok=link_ok)
+        """Per-tick step: replay the stored frame through the pipeline.
 
-    def reset(self) -> None:
-        """Release manual control and clear any pending stick frame (-> hold)."""
-        self._pending = None
-        self.release()
+        Does NOT refresh the deadman -- only a real frame does -- so a silent
+        ground station ages out into the zero-and-hold on schedule.
+        """
+        return self._step(self._frame, limits, link_ok=link_ok, fresh=False)
 
-    # ---- main step -------------------------------------------------------
+    # ---- direct step ----------------------------------------------------------
     def feed(
         self,
         manual_input,
@@ -157,126 +245,56 @@ class ManualPilot:
         *,
         link_ok: bool = True,
     ) -> VelocitySetpoint:
-        """Map one stick frame to a clamped BODY-frame velocity setpoint.
-
-        Pass ``manual_input=None`` to "tick" the watchdog without new input
-        (e.g. on a periodic loop) -- this will return hold() once the timeout
-        elapses. Any non-None input refreshes the watchdog.
+        """Map one stick frame (or None to just tick the deadman) to a setpoint.
 
         Args:
           manual_input: object with throttle/yaw/pitch/roll in -1..1, or None.
-          limits: active hard limits (clamps + deadzone + watchdog timeout).
-          dt: seconds since last call (>=0), for smoothing.
-          link_ok: ground-link health (deadman). False -> immediate hold.
+            An admitted frame refreshes the deadman; ``None`` inside the window
+            re-issues the previous setpoint, after it -> hold.
+          limits: live limits (clamps, deadzone, watchdog timeout).
+          dt: seconds since the previous call (kept for signature parity).
+          link_ok: ground-link health. False -> immediate zero-and-hold.
         """
+        frame = None if manual_input is None else _frame_from_object(manual_input)
+        return self._step(frame, limits, link_ok=link_ok, fresh=frame is not None)
+
+    # ---- pipeline ---------------------------------------------------------------
+    def _rest(self) -> VelocitySetpoint:
+        """Drop the smoothing memory and emit the canonical hold."""
+        self._filtered = np.zeros(4)
+        self._emitted = VelocitySetpoint.hold()
+        return self._emitted
+
+    def _step(
+        self,
+        frame: Optional[np.ndarray],
+        limits: Limits,
+        *,
+        link_ok: bool,
+        fresh: bool,
+    ) -> VelocitySetpoint:
         if not self._engaged:
             return VelocitySetpoint.hold()
+        if fresh:
+            self._deadman.arm()
+        if not link_ok or self._deadman.expired(limits.manual_watchdog_ms):
+            return self._rest()
+        if frame is None:
+            return self._emitted            # inside the window, nothing new
 
-        t = self._clock()
-
-        if manual_input is not None:
-            self._last_input_t = t
-
-        # --- watchdog + deadman: zero & hold on input or link loss --------
-        if not link_ok:
-            self._prev = VelocitySetpoint.hold()
-            return VelocitySetpoint.hold()
-
-        if self._last_input_t is None:
-            self._prev = VelocitySetpoint.hold()
-            return VelocitySetpoint.hold()
-
-        age_ms = (t - self._last_input_t) * 1000.0
-        if age_ms > limits.manual_watchdog_ms:
-            self._prev = VelocitySetpoint.hold()
-            return VelocitySetpoint.hold()
-
-        if manual_input is None:
-            # No new frame but still inside the watchdog window: keep holding
-            # the last *smoothed* command would be unsafe per spec ("never
-            # continue the last commanded velocity"), but we are within the
-            # window so we re-emit the last command. To stay strictly safe we
-            # decay toward zero via smoothing against a zero target is wrong;
-            # instead we simply re-issue the previous valid command unchanged.
-            return self._prev
-
-        # --- deadzone per axis --------------------------------------------
-        thr = _deadzone(_clamp01(manual_input.throttle), limits.deadzone)
-        yaw = _deadzone(_clamp01(manual_input.yaw), limits.deadzone)
-        pitch = _deadzone(_clamp01(manual_input.pitch), limits.deadzone)
-        roll = _deadzone(_clamp01(manual_input.roll), limits.deadzone)
-
-        # --- scale to the SAME limits as guidance -------------------------
-        # throttle>0 = climb -> vz negative (NED up)
-        vz = -thr * limits.max_climb_rate
-        yaw_rate = yaw * limits.max_yaw_rate
-        vx = pitch * limits.max_speed
-        vy = roll * limits.max_speed
-
-        target = VelocitySetpoint(vx=vx, vy=vy, vz=vz, yaw_rate=yaw_rate, valid=True)
-
-        # --- smoothing ----------------------------------------------------
-        out = self._smooth(target)
-
-        # --- final hard clamp (belt-and-braces) ---------------------------
-        out.vx = _clamp(out.vx, -limits.max_speed, limits.max_speed)
-        out.vy = _clamp(out.vy, -limits.max_speed, limits.max_speed)
-        out.vz = _clamp(out.vz, -limits.max_climb_rate, limits.max_climb_rate)
-        out.yaw_rate = _clamp(out.yaw_rate, -limits.max_yaw_rate, limits.max_yaw_rate)
-
-        self._prev = out
-        return out
-
-    # ---- helpers ---------------------------------------------------------
-    def _smooth(self, target: VelocitySetpoint) -> VelocitySetpoint:
-        a = self._alpha
-        p = self._prev
-        return VelocitySetpoint(
-            vx=a * target.vx + (1.0 - a) * p.vx,
-            vy=a * target.vy + (1.0 - a) * p.vy,
-            vz=a * target.vz + (1.0 - a) * p.vz,
-            yaw_rate=a * target.yaw_rate + (1.0 - a) * p.yaw_rate,
+        shaped = _apply_deadzone(frame, limits.deadzone)
+        bounds = _body_bounds(limits)
+        target = (_STICK_TO_BODY @ shaped) * bounds
+        self._filtered = self._alpha * target + (1.0 - self._alpha) * self._filtered
+        body = _clamp_vector(self._filtered, bounds)
+        self._emitted = VelocitySetpoint(
+            vx=float(body[0]),
+            vy=float(body[1]),
+            vz=float(body[2]),
+            yaw_rate=float(body[3]),
             valid=True,
         )
-
-
-def _clamp(v: float, lo: float, hi: float) -> float:
-    """Clamp to [lo, hi]; a NON-FINITE input collapses to 0.0, never to ``hi``.
-
-    ``min(hi, NaN)`` returns ``hi`` under CPython, so the naive clamp turns a
-    non-finite axis into the positive maximum (FM-06).
-    """
-    if not math.isfinite(v):
-        return 0.0
-    if lo > hi:
-        lo, hi = hi, lo
-    return max(lo, min(hi, v))
-
-
-def _clamp01(v: float) -> float:
-    """Clamp a stick axis to [-1, 1]. A non-finite axis reads as CENTRED (0.0).
-
-    Saturating a NaN to 1.0 -- which is what the naive ``max(-1, min(1, nan))``
-    does -- is full deflection: full climb, full forward, max yaw rate (FM-05).
-    """
-    try:
-        value = float(v)
-    except (TypeError, ValueError):
-        return 0.0
-    if not math.isfinite(value):
-        return 0.0
-    return max(-1.0, min(1.0, value))
-
-
-def _deadzone(v: float, dz: float) -> float:
-    """Apply a centred deadzone and rescale so output is continuous past dz."""
-    if dz <= 0.0:
-        return v
-    if abs(v) <= dz:
-        return 0.0
-    # rescale remaining range [dz,1] -> [0,1] so there's no jump at the edge
-    sign = 1.0 if v > 0 else -1.0
-    return sign * (abs(v) - dz) / (1.0 - dz)
+        return self._emitted
 
 
 __all__ = ["ManualPilot"]

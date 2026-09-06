@@ -14,7 +14,7 @@ The stable product label is **DNHacks**. Existing `eis_companion`, `EIS_*`, and
 `eis-1` identifiers remain compatibility interfaces on disk and on the wire.
 ### Phase 0: site and policy foundation
 
-- Komati site geometry, geofence, buffered and ceiling-aware no-fly zones,
+- Meridian Station site geometry, geofence, buffered and ceiling-aware no-fly zones,
   clutter polygons, altitude band, clear altitude, staged RGB and thermal
   observations, and baked satellite tiles.
 - Failure catalogue with one explicit response and authority per failure.
@@ -22,11 +22,11 @@ The stable product label is **DNHacks**. Existing `eis_companion`, `EIS_*`, and
   switching, sensor fusion, short sorties, and charge readiness.
 - Scripted inputs remain the default and require no network.
 
-Relevant history begins at `01faa5d`; `178bf0a` records the Komati and
+Relevant history begins at `01faa5d`; `178bf0a` records the site-geometry and
 deterministic-failure documentation update. Inspect the exact lineage with:
 
 ```bash
-git log --oneline -- site docs verifier_fixtures data/tiles/komati
+git log --oneline -- site docs verifier_fixtures data/tiles/meridian
 ```
 ### Phase 1: shared contract and readiness
 - The authoritative TypeScript contract and Python/TypeScript mirrors carry

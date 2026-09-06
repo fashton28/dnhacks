@@ -2,46 +2,50 @@
 ============================================================================
 Drone Safety Platform -- COMPANION configuration loader
 ----------------------------------------------------------------------------
-Loads a layered, typed configuration for the companion:
+Resolves one typed ``AppConfig`` from three layers, in this order:
 
-    1. hard-coded safe defaults (mirrors shared DEFAULTS / PRD 9), then
-    2. a YAML file (``EIS_CONFIG`` or ``config/default.yaml``), then
-    3. environment overrides (the ``EIS_*`` keys documented in ``.env.example``;
-       a ``.env`` file is loaded first if present, via python-dotenv when
-       available -- otherwise we fall back to a tiny built-in parser so the
-       companion still configures on a box without python-dotenv).
+    1. the dataclass defaults below (the conservative fallback envelope),
+    2. a YAML file (``EIS_CONFIG`` or ``config/default.yaml``),
+    3. ``EIS_*`` environment overrides (a nearby ``.env`` is folded into the
+       environment first, without ever overwriting an exported variable).
 
-The result is a single immutable-ish ``AppConfig`` the orchestrator reads. The
-safety envelope is surfaced as an ``eis_companion.types.Limits`` so guidance /
-manual / safety all clamp to the same numbers, and the FC geofence params
-(``mavlink.failsafe_param_map``) derive from it too.
+Rather than three hand-written passes that each repeat every field name, this
+module is TABLE DRIVEN. ``SETTINGS`` declares each scalar once -- where it
+lives (a dotted path that is simultaneously the YAML location and the
+``AppConfig`` attribute), how to coerce it, and which environment variable may
+override it -- and one loop applies the whole table to a default-constructed
+``AppConfig``. Adding a knob is one row, and a knob can no longer be readable
+from YAML but silently un-overridable from the environment.
 
-Pure stdlib + pyyaml (+ optional python-dotenv). No hardware imports, so config
-loading is unit-testable on any box.
+The safety envelope is re-asserted afterwards by a second table, ``BOUNDS``.
+Each row is a floor / ceiling pair (either may be another field's resolved
+value, which is how bands such as ``min_standoff <= standoff <= max_standoff``
+stay ordered), plus the value a non-numeric or non-finite entry degrades to.
+Because the bounds run LAST, over values already written into the config, no
+YAML file and no environment variable can relax a safety limit: a layer may
+only ever move a number toward the conservative end of its band. Values that
+are not scalars -- the standoff/altitude bands, the unattended profile list,
+the per-profile cruise speeds, the bind-vs-authentication pairing -- are
+reconciled by the named guards that run alongside the table.
 
-LAYERING RULE: later layers override earlier ones, but the *safe* defaults are
-the floor -- anything missing everywhere falls back to the conservative value.
-We NEVER silently relax a safety limit below its hard floor (standoff floor,
-speed cap), even if a YAML/env value asks to: ``Limits`` clamping + the
-``max_speed_cap`` ceiling are re-asserted after loading.
+Pure stdlib + pyyaml (+ optional python-dotenv), no hardware imports, so
+loading configuration is unit-testable on any box.
 ============================================================================
 """
 from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, Optional, Tuple
 
 from .types import Limits
 
 try:  # pyyaml is a pinned dependency, but degrade gracefully if absent.
     import yaml  # type: ignore
-    _HAVE_YAML = True
 except Exception:  # pragma: no cover - exercised only on a broken install
     yaml = None  # type: ignore
-    _HAVE_YAML = False
 
 
 # ==========================================================================
@@ -67,6 +71,7 @@ MAX_STANDOFF_CEIL_M: float = 50.0
 # --------------------------------------------------------------------------
 DEFAULT_CONTROL_HOST: str = "127.0.0.1"
 LOOPBACK_HOSTS: Tuple[str, ...] = ("127.0.0.1", "::1", "localhost")
+BIND_ALL_HOST: str = "0.0.0.0"
 MAX_SORTIE_CAP_S: float = 480.0
 MIN_DISPATCH_SOC_PCT: float = 80.0
 MAX_CELL_IMBALANCE_V: float = 0.10
@@ -119,6 +124,11 @@ GIMBAL_PITCH_MIN_DEG: float = -30.0
 GIMBAL_PITCH_MAX_DEG: float = 90.0
 GIMBAL_SLEW_RATE_CAP_DPS: float = 90.0
 
+# Camera sources that synthesise their own frames: there is no encoder behind
+# them, so there is no RTSP URL to advertise and the UI draws its mock canvas.
+SYNTHETIC_CAMERA_SOURCES: Tuple[str, ...] = ("sim", "mock")
+RTSP_ADVERTISE_HOST: str = "0.0.0.0"
+
 # Fallback mirror of the shared contract's PROFILE_SPEED_MPS (shared/shared.py /
 # shared/shared.ts). The authoritative copy is loaded from shared/shared.py at
 # config time when the monorepo checkout is present (_shared_profile_speeds);
@@ -134,40 +144,58 @@ PROFILE_SPEED_FALLBACK: Dict[str, float] = {
     "fast": 6.0,
 }
 
-_shared_profile_cache: Optional[Dict[str, float]] = None
+_PROFILE_SPEED_CACHE: Dict[str, Dict[str, float]] = {}
+
+
+def _import_shared_contract() -> Any:
+    """Import ``shared/shared.py`` by path, or return None.
+
+    ``shared/`` is not an installed package (it is a monorepo sibling of
+    ``companion/``), so there is nothing to import by name. Any failure --
+    partial checkout, packaged install, a syntax error in a file this module
+    is not responsible for -- is a None, never an exception: configuration
+    must still load on a box that has only the companion.
+    """
+    contract = Path(__file__).resolve().parents[3] / "shared" / "shared.py"
+    try:
+        import importlib.util
+        import sys
+
+        spec = importlib.util.spec_from_file_location("_eis_shared_contract", contract)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception:
+        return None
 
 
 def _shared_profile_speeds() -> Dict[str, float]:
-    """PROFILE_SPEED_MPS from the shared contract file (shared/shared.py).
+    """PROFILE_SPEED_MPS from the shared contract, else the literal mirror.
 
-    ``shared/`` is not an installed package, so it is loaded by path from the
-    monorepo root (the same ``parents[N]`` idiom ``site.py`` uses). Any failure
-    (partial checkout, packaged install) falls back to the literal mirror.
-    Values are still safety-clamped afterwards in ``_enforce_safety_floor``.
+    Resolved once and memoised; every caller gets its own copy so a mutated
+    ``PlannerConfig.profile_speed_mps`` cannot leak into the next load. The
+    values are still safety-clamped in ``_enforce_safety_floor``.
     """
-    global _shared_profile_cache
-    if _shared_profile_cache is None:
-        speeds = dict(PROFILE_SPEED_FALLBACK)
-        try:
-            import importlib.util
-            shared_py = Path(__file__).resolve().parents[3] / "shared" / "shared.py"
-            spec = importlib.util.spec_from_file_location("_eis_shared_contract", shared_py)
-            if spec is not None and spec.loader is not None:
-                import sys
-                mod = importlib.util.module_from_spec(spec)
-                sys.modules[spec.name] = mod
-                spec.loader.exec_module(mod)
-                loaded = getattr(mod, "PROFILE_SPEED_MPS", None)
-                if isinstance(loaded, dict) and loaded:
-                    speeds = {str(k): float(v) for k, v in loaded.items()}
-        except Exception:
-            pass  # fall back to the mirror; the floor clamp still applies
-        _shared_profile_cache = speeds
-    return dict(_shared_profile_cache)
+    resolved = _PROFILE_SPEED_CACHE.get("speeds")
+    if resolved is None:
+        resolved = dict(PROFILE_SPEED_FALLBACK)
+        published = getattr(_import_shared_contract(), "PROFILE_SPEED_MPS", None)
+        if isinstance(published, dict) and published:
+            try:
+                resolved = {str(k): float(v) for k, v in published.items()}
+            except (TypeError, ValueError):
+                resolved = dict(PROFILE_SPEED_FALLBACK)
+        _PROFILE_SPEED_CACHE["speeds"] = resolved
+    return dict(resolved)
 
 
 # ==========================================================================
-# Typed sub-configs
+# Typed sub-configs. These are DECLARATIONS: the field names are the YAML
+# keys and the defaults are layer 1 of the resolution above, so SETTINGS
+# never has to repeat a default value.
 # ==========================================================================
 @dataclass
 class GainTriple:
@@ -381,104 +409,478 @@ class AppConfig:
     def video_url(self) -> str:
         """The video URL to advertise to the ground UI.
 
-        Honours an explicit override; otherwise builds an RTSP URL from the
-        configured host/port. In SITL with no camera this may be empty (the UI
-        then renders its mock canvas).
+        An explicitly configured URL wins outright. Otherwise a synthetic
+        camera advertises nothing (there is no encoder, so the UI falls back
+        to its mock canvas) and a real camera advertises the RTSP endpoint
+        the stream sub-package publishes.
         """
         if self.network.video_url:
             return self.network.video_url
-        if self.camera.source in ("sim", "mock"):
+        if self.camera.source in SYNTHETIC_CAMERA_SOURCES:
             return ""
-        return f"rtsp://0.0.0.0:{self.network.video_port}/stream"
+        return f"rtsp://{RTSP_ADVERTISE_HOST}:{self.network.video_port}/stream"
 
 
 # ==========================================================================
-# .env loading (python-dotenv if available, else a tiny built-in parser)
+# Layer 3a: fold a nearby .env into the process environment
 # ==========================================================================
-def _load_dotenv(start: Optional[Path] = None) -> None:
-    """Populate ``os.environ`` from a ``.env`` file if one exists.
+def _discover_dotenv(start: Optional[Path]) -> Optional[Path]:
+    """Nearest ``.env`` walking upward from ``start`` (or the cwd)."""
+    try:
+        origin = (start or Path.cwd()).resolve()
+    except Exception:
+        return None
+    for directory in (origin, *origin.parents):
+        candidate = directory / ".env"
+        if candidate.is_file():
+            return candidate
+    return None
 
-    Existing environment variables WIN over the file (so an explicitly exported
-    ``EIS_*`` always overrides ``.env``). Walks up from ``start`` (or cwd) to
-    find the nearest ``.env``. Never raises.
+
+def _dotenv_pairs(path: Path) -> Dict[str, str]:
+    """Parse ``path`` into KEY -> VALUE. Never raises; {} on any trouble.
+
+    python-dotenv is used when installed (it understands ``export`` prefixes
+    and quoting rules this project does not want to re-litigate); otherwise a
+    minimal KEY=VALUE reader keeps the companion configurable on a box that
+    has no dotenv.
     """
     try:
-        from dotenv import load_dotenv, find_dotenv  # type: ignore
-        path = find_dotenv(usecwd=True)
-        if path:
-            load_dotenv(path, override=False)
-        return
-    except Exception:
-        pass  # fall through to the built-in parser
+        from dotenv import dotenv_values  # type: ignore
 
-    # Built-in fallback: find the nearest .env walking upward.
-    here = (start or Path.cwd()).resolve()
-    for d in [here, *here.parents]:
-        candidate = d / ".env"
-        if candidate.is_file():
-            _parse_env_file(candidate)
-            return
-
-
-def _parse_env_file(path: Path) -> None:
-    """Minimal KEY=VALUE .env parser (no shell interpolation). Never raises."""
-    try:
-        for raw in path.read_text(encoding="utf-8").splitlines():
-            line = raw.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            # strip an inline comment and surrounding quotes
-            val = val.split("#", 1)[0].strip().strip('"').strip("'")
-            if key and key not in os.environ:
-                os.environ[key] = val
+        parsed = dotenv_values(str(path))
+        return {k: v for k, v in parsed.items() if k and v is not None}
     except Exception:
         pass
 
-
-# ==========================================================================
-# Env coercion helpers
-# ==========================================================================
-def _env(name: str) -> Optional[str]:
-    v = os.environ.get(name)
-    if v is None:
-        return None
-    v = v.strip()
-    return v if v != "" else None
-
-
-def _env_float(name: str) -> Optional[float]:
-    v = _env(name)
-    if v is None:
-        return None
+    pairs: Dict[str, str] = {}
     try:
-        return float(v)
+        for raw in path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            if key:
+                # drop an inline comment, then the surrounding quotes
+                pairs[key] = value.split("#", 1)[0].strip().strip('"').strip("'")
+    except Exception:
+        return {}
+    return pairs
+
+
+def _load_dotenv(start: Optional[Path] = None) -> None:
+    """Populate ``os.environ`` from the nearest ``.env``, never overriding.
+
+    An exported ``EIS_*`` always beats the file, which is what makes a
+    one-off ``EIS_CONFIG=... python -m eis_companion.app`` reliable on a box
+    that also has a checked-out ``.env``.
+    """
+    path = _discover_dotenv(start)
+    if path is None:
+        return
+    for key, value in _dotenv_pairs(path).items():
+        os.environ.setdefault(key, value)
+
+
+# ==========================================================================
+# Coercion. Each kind knows how to read a YAML node and an environment string;
+# an environment coercer returns None to mean "unusable, leave the layer
+# below in place" so a typo never silently zeroes a limit.
+# ==========================================================================
+def _env_text(name: str) -> Optional[str]:
+    """The stripped value of ``name``, or None when unset/blank."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return None
+    stripped = raw.strip()
+    return stripped or None
+
+
+def _text_from_env(text: str) -> Optional[str]:
+    return text
+
+
+def _real_from_env(text: str) -> Optional[float]:
+    try:
+        return float(text)
     except ValueError:
         return None
 
 
-def _env_int(name: str) -> Optional[int]:
-    v = _env_float(name)
-    return None if v is None else int(v)
+def _whole_from_env(text: str) -> Optional[int]:
+    number = _real_from_env(text)
+    return None if number is None else int(number)
 
 
-def _env_bool(name: str) -> Optional[bool]:
-    v = _env(name)
-    if v is None:
-        return None
-    return v.lower() in ("1", "true", "yes", "on")
+TRUE_TOKENS: Tuple[str, ...] = ("1", "true", "yes", "on")
+
+
+def _bool_from_env(text: str) -> Optional[bool]:
+    return text.lower() in TRUE_TOKENS
+
+
+@dataclass(frozen=True)
+class Kind:
+    """How one scalar is read out of each layer."""
+    from_yaml: Callable[[Any], Any]
+    from_env: Callable[[str], Any]
+
+
+TEXT = Kind(str, _text_from_env)
+REAL = Kind(float, _real_from_env)
+WHOLE = Kind(int, _whole_from_env)
+BOOL = Kind(bool, _bool_from_env)
+
+
+@dataclass(frozen=True)
+class Setting:
+    """One scalar knob.
+
+    ``path`` is dotted and doubles as the YAML location (``limits.max_speed``
+    -> ``{limits: {max_speed: ...}}``) and the attribute chain on AppConfig,
+    so the two can never drift apart. ``env`` is the documented override name
+    from .env.example, or None for a YAML-only knob.
+    """
+    path: str
+    kind: Kind
+    env: Optional[str] = None
+
+
+SETTINGS: Tuple[Setting, ...] = (
+    # ---- identity / mode -------------------------------------------------
+    Setting("sitl", BOOL, "EIS_SITL"),
+    Setting("vehicle_id", TEXT, "EIS_VEHICLE_ID"),
+
+    # ---- hard safety + tuning envelope -----------------------------------
+    Setting("limits.max_speed", REAL, "EIS_MAX_SPEED_MPS"),
+    Setting("limits.min_speed", REAL),
+    Setting("limits.max_climb_rate", REAL),
+    Setting("limits.max_yaw_rate", REAL),
+    Setting("limits.max_altitude", REAL, "EIS_MAX_ALT_M"),
+    Setting("limits.standoff", REAL, "EIS_STANDOFF_M"),
+    Setting("limits.min_standoff", REAL),
+    Setting("limits.max_standoff", REAL),
+    Setting("limits.deadzone", REAL),
+    Setting("limits.manual_watchdog_ms", WHOLE),
+    Setting("limits.ground_link_timeout_ms", WHOLE),
+
+    # ---- camera / detector -----------------------------------------------
+    Setting("camera.source", TEXT, "EIS_CAMERA_SOURCE"),
+    Setting("camera.device", TEXT, "EIS_CAMERA_DEVICE"),
+    Setting("camera.file", TEXT),
+    Setting("camera.width", WHOLE, "EIS_CAMERA_WIDTH"),
+    Setting("camera.height", WHOLE, "EIS_CAMERA_HEIGHT"),
+    Setting("camera.fps", WHOLE, "EIS_CAMERA_FPS"),
+    Setting("camera.vfov_deg", REAL),
+    Setting("detector.model_path", TEXT, "EIS_MODEL_PATH"),
+    Setting("detector.engine_path", TEXT, "EIS_ENGINE_PATH"),
+    Setting("detector.conf", REAL, "EIS_DETECT_CONF"),
+    Setting("detector.person_height_m", REAL),
+
+    # ---- network ---------------------------------------------------------
+    Setting("network.host", TEXT, "EIS_CONTROL_HOST"),
+    Setting("network.control_port", WHOLE, "EIS_CONTROL_PORT"),
+    Setting("network.video_port", WHOLE, "EIS_VIDEO_PORT"),
+    Setting("network.webrtc_port", WHOLE, "EIS_WEBRTC_PORT"),
+    Setting("network.video_bitrate_kbps", WHOLE, "EIS_VIDEO_BITRATE"),
+    Setting("network.video_url", TEXT, "EIS_VIDEO_URL"),
+
+    # ---- flight-controller link ------------------------------------------
+    Setting("fc.connection", TEXT, "EIS_FC_CONNECTION"),
+    Setting("fc.baud", WHOLE, "EIS_FC_BAUD"),
+    Setting("fc.sysid", WHOLE, "EIS_MAVLINK_SYSID"),
+    Setting("fc.gcs_sysid", WHOLE, "EIS_GCS_SYSID"),
+
+    # ---- tracker ---------------------------------------------------------
+    Setting("tracking.lost_timeout", REAL),
+    Setting("tracking.max_age", REAL),
+    Setting("tracking.iou_threshold", REAL),
+    Setting("tracking.min_hits", WHOLE),
+
+    # ---- failsafe actions + geofence -------------------------------------
+    Setting("safety.geofence_radius_m", REAL, "EIS_GEOFENCE_RADIUS_M"),
+    Setting("safety.low_battery_action", TEXT),
+    Setting("safety.critical_battery_action", TEXT),
+    Setting("safety.min_battery_remaining", REAL),
+    Setting("safety.rc_override_primacy", BOOL),
+
+    # ---- battery / sortie policy -----------------------------------------
+    Setting("battery.nominal_endurance_s", REAL),
+    Setting("battery.reserve_pct", REAL),
+    Setting("battery.max_sortie_s", REAL, "EIS_MAX_SORTIE_S"),
+    Setting("battery.dispatch_min_soc_pct", REAL, "EIS_DISPATCH_MIN_SOC_PCT"),
+    Setting("battery.cell_imbalance_max_v", REAL, "EIS_CELL_IMBALANCE_MAX_V"),
+    Setting("battery.batt_temp_max_c", REAL, "EIS_BATT_TEMP_MAX_C"),
+    Setting("battery.capacity_mah", REAL),
+    Setting("battery.cell_count", WHOLE),
+    Setting("battery.demo_charge_scale_s", REAL, "DEMO_CHARGE_SCALE"),
+    Setting("battery.estimated_return_s", REAL),
+
+    # ---- mission planner --------------------------------------------------
+    Setting("planner.site_file", TEXT, "EIS_SITE_FILE"),
+    Setting("planner.arrival_radius_m", REAL),
+    Setting("planner.staging_arrival_radius_m", REAL, "EIS_STAGING_RADIUS_M"),
+    Setting("planner.heartbeat_timeout_ms", WHOLE, "EIS_PLANNER_HEARTBEAT_TIMEOUT_MS"),
+
+    # ---- runtime envelope monitor ----------------------------------------
+    Setting("envelope.hz", REAL),
+    Setting("envelope.publish_hz", REAL),
+    Setting("envelope.geofence_margin_m", REAL, "EIS_ENVELOPE_GEOFENCE_MARGIN_M"),
+    Setting("envelope.nfz_buffer_m", REAL, "EIS_ENVELOPE_NFZ_BUFFER_M"),
+    Setting("envelope.separation_m", REAL, "EIS_ENVELOPE_SEPARATION_M"),
+    Setting("envelope.separation_stale_m", REAL, "EIS_ENVELOPE_SEPARATION_STALE_M"),
+    Setting("envelope.peer_stale_s", REAL, "EIS_ENVELOPE_PEER_STALE_S"),
+    Setting("envelope.peer_hold_s", REAL, "EIS_ENVELOPE_PEER_HOLD_S"),
+    Setting("envelope.escalate_after_s", REAL, "EIS_ENVELOPE_ESCALATE_AFTER_S"),
+    Setting("envelope.breach_multiple", REAL),
+    Setting("envelope.hysteresis_m", REAL),
+    Setting("envelope.recovery_s", REAL),
+
+    # ---- UNATTENDED_ENVELOPE ---------------------------------------------
+    Setting("unattended.min_alt_m", REAL, "EIS_UNATTENDED_MIN_ALT_M"),
+    Setting("unattended.max_alt_m", REAL, "EIS_UNATTENDED_MAX_ALT_M"),
+    Setting("unattended.max_laps", REAL),
+    Setting("unattended.max_hold_s", REAL, "EIS_UNATTENDED_MAX_HOLD_S"),
+    Setting(
+        "unattended.max_sorties_per_hour",
+        WHOLE,
+        "EIS_UNATTENDED_MAX_SORTIES_PER_HOUR",
+    ),
+    Setting("unattended.max_wind_mps", REAL, "EIS_UNATTENDED_MAX_WIND_MPS"),
+
+    # ---- gimbal ----------------------------------------------------------
+    Setting("gimbal.enabled", BOOL, "EIS_GIMBAL_ENABLED"),
+    Setting("gimbal.pitch_min_deg", REAL, "EIS_GIMBAL_PITCH_MIN_DEG"),
+    Setting("gimbal.pitch_max_deg", REAL, "EIS_GIMBAL_PITCH_MAX_DEG"),
+    Setting("gimbal.slew_rate_dps", REAL, "EIS_GIMBAL_SLEW_RATE_DPS"),
+    Setting("gimbal.use_gimbal_manager", BOOL, "EIS_GIMBAL_MANAGER"),
+
+    # ---- command signing / audit -----------------------------------------
+    Setting("security.session_key_env", TEXT, "EIS_SESSION_KEY_ENV"),
+    Setting("security.max_command_age_ms", WHOLE, "EIS_COMMAND_MAX_AGE_MS"),
+    Setting("security.require_signed_commands", BOOL, "EIS_REQUIRE_SIGNED_COMMANDS"),
+    Setting("security.audit_path", TEXT, "EIS_AUDIT_PATH"),
+)
+
+
+# ==========================================================================
+# The safety envelope, re-asserted over whatever the layers produced
+# ==========================================================================
+@dataclass(frozen=True)
+class Bound:
+    """The band one resolved number is forced into.
+
+    ``lo`` / ``hi`` are the hard literals. ``lo_ref`` / ``hi_ref`` name
+    another already-bounded field whose value tightens this one further --
+    that is how ``min_standoff <= standoff <= max_standoff`` and
+    ``peer_stale_s <= peer_hold_s`` stay ordered no matter what a YAML file
+    asks for. ``bad`` is the conservative value a non-numeric or non-finite
+    entry degrades to; None means "the resulting floor".
+    """
+    path: str
+    lo: Optional[float] = None
+    hi: Optional[float] = None
+    lo_ref: str = ""
+    hi_ref: str = ""
+    bad: Optional[float] = None
+    whole: bool = False
+
+
+# Order matters: a row whose floor/ceiling references another row must come
+# after it, so the reference has already been forced into its own band.
+BOUNDS: Tuple[Bound, ...] = (
+    # standoff BAND -- closed at BOTH ends (FM-11)
+    Bound("limits.min_standoff", lo=MIN_STANDOFF_FLOOR),
+    Bound(
+        "limits.max_standoff",
+        hi=MAX_STANDOFF_CEIL_M,
+        lo_ref="limits.min_standoff",
+        bad=MAX_STANDOFF_CEIL_M,
+    ),
+    Bound("limits.standoff", lo_ref="limits.min_standoff", hi_ref="limits.max_standoff"),
+    # speed band -- the configurable cap can never clear the hard ceiling
+    Bound("limits.max_speed", lo=0.1, hi=MAX_SPEED_CAP),
+    Bound("limits.min_speed", lo=0.0, hi_ref="limits.max_speed"),
+    # climb / yaw / altitude must stay positive
+    Bound("limits.max_climb_rate", lo=0.1),
+    Bound("limits.max_yaw_rate", lo=1.0),
+    Bound("limits.max_altitude", lo=1.0),
+    # watchdogs must stay positive -- a zero watchdog is a disabled watchdog
+    Bound("limits.manual_watchdog_ms", lo=50, whole=True),
+    Bound("limits.ground_link_timeout_ms", lo=200, whole=True),
+    # geofence radius floor
+    Bound("safety.geofence_radius_m", lo=10.0),
+    # battery / dispatch gates: overrides may only tighten them
+    Bound("battery.max_sortie_s", lo=1.0, hi=MAX_SORTIE_CAP_S),
+    Bound(
+        "battery.dispatch_min_soc_pct",
+        lo=MIN_DISPATCH_SOC_PCT,
+        hi=100.0,
+        bad=100.0,   # an unreadable dispatch gate refuses, it does not dispatch
+    ),
+    Bound("battery.cell_imbalance_max_v", lo=0.001, hi=MAX_CELL_IMBALANCE_V),
+    Bound("battery.batt_temp_max_c", lo=1.0, hi=MAX_BATT_TEMP_C),
+    Bound("battery.nominal_endurance_s", lo=1.0),
+    Bound("battery.reserve_pct", lo=0.0, hi=99.0, bad=99.0),
+    Bound("battery.capacity_mah", lo=1.0),
+    Bound("battery.cell_count", lo=1, whole=True),
+    Bound("battery.demo_charge_scale_s", lo=1.0),
+    Bound("battery.estimated_return_s", lo=0.0),
+    # planner thresholds must stay sane (arrival radii can't collapse to 0)
+    Bound("planner.arrival_radius_m", lo=0.5),
+    Bound("planner.staging_arrival_radius_m", lo=1.0),
+    Bound("planner.heartbeat_timeout_ms", lo=200, whole=True),
+    # envelope monitor: protective distances may only grow, timers only shrink
+    Bound("envelope.separation_m", lo=ENVELOPE_SEPARATION_FLOOR_M),
+    Bound(
+        "envelope.separation_stale_m",
+        lo=ENVELOPE_SEPARATION_STALE_FLOOR_M,
+        lo_ref="envelope.separation_m",
+        bad=ENVELOPE_SEPARATION_STALE_FLOOR_M,
+    ),
+    Bound(
+        "envelope.peer_stale_s",
+        lo=0.1,
+        hi=ENVELOPE_PEER_STALE_CAP_S,
+        bad=ENVELOPE_PEER_STALE_CAP_S,
+    ),
+    Bound(
+        "envelope.peer_hold_s",
+        hi=ENVELOPE_PEER_HOLD_CAP_S,
+        lo_ref="envelope.peer_stale_s",
+        bad=ENVELOPE_PEER_HOLD_CAP_S,
+    ),
+    Bound(
+        "envelope.escalate_after_s",
+        lo=0.1,
+        hi=ENVELOPE_ESCALATE_CAP_S,
+        bad=ENVELOPE_ESCALATE_CAP_S,
+    ),
+    Bound(
+        "envelope.breach_multiple",
+        lo=1.0,
+        hi=ENVELOPE_BREACH_MULTIPLE_CAP,
+        bad=ENVELOPE_BREACH_MULTIPLE_CAP,
+    ),
+    Bound("envelope.geofence_margin_m", lo=ENVELOPE_GEOFENCE_MARGIN_FLOOR_M),
+    Bound("envelope.nfz_buffer_m", lo=ENVELOPE_NFZ_BUFFER_FLOOR_M),
+    Bound("envelope.hysteresis_m", lo=0.0, bad=2.0),
+    Bound("envelope.recovery_s", lo=0.0, bad=2.0),
+    # rates: the monitor runs at the control rate and publishes no faster than
+    # it ticks. Neither can be configured to zero (that would be an off switch).
+    Bound("envelope.hz", lo=1.0, hi=50.0, bad=ENVELOPE_HZ),
+    Bound("envelope.publish_hz", lo=0.5, hi_ref="envelope.hz", bad=ENVELOPE_PUBLISH_HZ),
+    # UNATTENDED_ENVELOPE: config may only TIGHTEN (ADR D23)
+    Bound("unattended.min_alt_m", lo=UNATTENDED_MIN_ALT_FLOOR_M),
+    Bound("unattended.max_alt_m", hi=UNATTENDED_MAX_ALT_CEIL_M, bad=UNATTENDED_MAX_ALT_CEIL_M),
+    Bound("unattended.max_laps", lo=0.0, hi=UNATTENDED_MAX_LAPS_CAP, bad=UNATTENDED_MAX_LAPS_CAP),
+    Bound(
+        "unattended.max_hold_s",
+        lo=0.0,
+        hi=UNATTENDED_MAX_HOLD_CAP_S,
+        bad=UNATTENDED_MAX_HOLD_CAP_S,
+    ),
+    Bound(
+        "unattended.max_sorties_per_hour",
+        lo=0,
+        hi=UNATTENDED_MAX_SORTIES_PER_HOUR_CAP,
+        bad=UNATTENDED_MAX_SORTIES_PER_HOUR_CAP,
+        whole=True,
+    ),
+    Bound(
+        "unattended.max_wind_mps",
+        lo=0.0,
+        hi=UNATTENDED_MAX_WIND_CAP_MPS,
+        bad=UNATTENDED_MAX_WIND_CAP_MPS,
+    ),
+    # gimbal travel: config may narrow it, never widen past -30..90 deg
+    Bound("gimbal.pitch_min_deg", lo=GIMBAL_PITCH_MIN_DEG),
+    Bound("gimbal.pitch_max_deg", hi=GIMBAL_PITCH_MAX_DEG, bad=GIMBAL_PITCH_MAX_DEG),
+    Bound("gimbal.slew_rate_dps", lo=1.0, hi=GIMBAL_SLEW_RATE_CAP_DPS, bad=30.0),
+    # a replay window can be shortened but never opened indefinitely
+    Bound("security.max_command_age_ms", lo=1_000, hi=300_000, bad=30_000, whole=True),
+)
+
+# Bands that collapse to their hard endpoints when a config layer inverts them.
+# An empty band would silently ground the vehicle; the hard band at least
+# flies the documented envelope.
+_INVERTIBLE_BANDS: Tuple[Tuple[str, str, float, float], ...] = (
+    (
+        "unattended.min_alt_m",
+        "unattended.max_alt_m",
+        UNATTENDED_MIN_ALT_FLOOR_M,
+        UNATTENDED_MAX_ALT_CEIL_M,
+    ),
+    ("gimbal.pitch_min_deg", "gimbal.pitch_max_deg", GIMBAL_PITCH_MIN_DEG, GIMBAL_PITCH_MAX_DEG),
+)
+
+# Free-text fields that must never resolve to an empty string.
+_NON_EMPTY_TEXT: Tuple[Tuple[str, str], ...] = (
+    ("vehicle_id", "eis-1"),
+    ("security.session_key_env", "EIS_SESSION_KEY"),
+    ("network.host", DEFAULT_CONTROL_HOST),
+)
+
+_GAIN_CHANNELS: Tuple[str, ...] = ("yaw", "altitude", "forward")
+
+
+# ==========================================================================
+# Dotted-path plumbing shared by the two tables
+# ==========================================================================
+def _read_attr(cfg: AppConfig, path: str) -> Any:
+    node: Any = cfg
+    for part in path.split("."):
+        node = getattr(node, part)
+    return node
+
+
+def _write_attr(cfg: AppConfig, path: str, value: Any) -> None:
+    node: Any = cfg
+    parts = path.split(".")
+    for part in parts[:-1]:
+        node = getattr(node, part)
+    setattr(node, parts[-1], value)
+
+
+def _yaml_at(raw: Dict[str, Any], path: str) -> Any:
+    """The YAML node at a dotted path, or None when absent/not a mapping."""
+    node: Any = raw
+    for part in path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
 
 
 # ==========================================================================
 # YAML loading
 # ==========================================================================
-def _read_yaml(path: Path) -> Dict[str, Any]:
-    """Read a YAML mapping. Returns {} for a missing/empty file. Raises on bad YAML."""
-    if not path.is_file():
+DEFAULT_CONFIG_REL = "config/default.yaml"
+
+
+def _config_candidates(explicit: Optional[str]) -> Iterator[Path]:
+    """Where a config file named ``explicit`` (or EIS_CONFIG) could live."""
+    requested = Path(explicit or _env_text("EIS_CONFIG") or DEFAULT_CONFIG_REL)
+    package_root = Path(__file__).resolve().parents[2]   # .../companion
+    yield requested                                       # as given / cwd-relative
+    yield package_root / requested                        # companion/<as given>
+    yield package_root / "config" / requested.name        # companion/config/<name>
+
+
+def _resolve_config_path(explicit: Optional[str]) -> Optional[Path]:
+    """The first candidate that exists, or None when no YAML is available."""
+    return next((p for p in _config_candidates(explicit) if p.is_file()), None)
+
+
+def _read_yaml(path: Optional[Path]) -> Dict[str, Any]:
+    """Read a YAML mapping. {} for a missing/empty file. Raises on bad YAML."""
+    if path is None or not path.is_file():
         return {}
     text = path.read_text(encoding="utf-8")
-    if not _HAVE_YAML:
+    if yaml is None:
         raise RuntimeError(
             "pyyaml is required to load YAML config but is not installed; "
             "install it (it is a pinned dependency) or set EIS_* env vars only."
@@ -491,41 +893,9 @@ def _read_yaml(path: Path) -> Dict[str, Any]:
     return data
 
 
-def _section(d: Dict[str, Any], key: str) -> Dict[str, Any]:
-    v = d.get(key)
-    return v if isinstance(v, dict) else {}
-
-
-def _g(d: Dict[str, Any], key: str, default: Any) -> Any:
-    """Get d[key] if present and not None, else default."""
-    v = d.get(key, None)
-    return default if v is None else v
-
-
 # ==========================================================================
 # The public entry point
 # ==========================================================================
-DEFAULT_CONFIG_REL = "config/default.yaml"
-
-
-def _resolve_config_path(explicit: Optional[str]) -> Optional[Path]:
-    """Resolve which YAML to load: explicit arg, then EIS_CONFIG, then default."""
-    candidate = explicit or _env("EIS_CONFIG") or DEFAULT_CONFIG_REL
-    p = Path(candidate)
-    if p.is_file():
-        return p
-    # try resolving relative to the package's companion root (src/.. -> companion/)
-    pkg_root = Path(__file__).resolve().parents[2]  # .../companion
-    alt = pkg_root / candidate
-    if alt.is_file():
-        return alt
-    # last resort: the conventional companion/config/<name>
-    alt2 = pkg_root / "config" / Path(candidate).name
-    if alt2.is_file():
-        return alt2
-    return None
-
-
 def load_config(
     path: Optional[str] = None,
     *,
@@ -546,497 +916,186 @@ def load_config(
         _load_dotenv()
 
     cfg_path = _resolve_config_path(path)
-    raw: Dict[str, Any] = _read_yaml(cfg_path) if cfg_path is not None else {}
+    raw = _read_yaml(cfg_path)
 
-    cfg = _from_yaml(raw)
+    cfg = AppConfig()                 # layer 1: the conservative defaults
+    _overlay_yaml(cfg, raw)           # layer 2
     cfg.source_path = str(cfg_path) if cfg_path is not None else None
-
     if use_env:
-        _apply_env_overrides(cfg)
+        _overlay_env(cfg)             # layer 3
 
-    _enforce_safety_floor(cfg)
+    _enforce_safety_floor(cfg)        # and the envelope always wins
     return cfg
 
 
-def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
-    """Build an AppConfig from a parsed YAML mapping (missing keys -> defaults)."""
-    lim_d = _section(raw, "limits")
-    limits = Limits(
-        max_speed=float(_g(lim_d, "max_speed", 2.0)),
-        min_speed=float(_g(lim_d, "min_speed", 0.5)),
-        max_climb_rate=float(_g(lim_d, "max_climb_rate", 1.5)),
-        max_yaw_rate=float(_g(lim_d, "max_yaw_rate", 45.0)),
-        max_altitude=float(_g(lim_d, "max_altitude", 30.0)),
-        standoff=float(_g(lim_d, "standoff", 5.0)),
-        min_standoff=float(_g(lim_d, "min_standoff", 3.0)),
-        max_standoff=float(_g(lim_d, "max_standoff", MAX_STANDOFF_CEIL_M)),
-        deadzone=float(_g(lim_d, "deadzone", 0.09)),
-        manual_watchdog_ms=int(_g(lim_d, "manual_watchdog_ms", 500)),
-        ground_link_timeout_ms=int(_g(lim_d, "ground_link_timeout_ms", 2000)),
-    )
+def _overlay_yaml(cfg: AppConfig, raw: Dict[str, Any]) -> None:
+    """Write every YAML-provided value over the defaults already in ``cfg``."""
+    for setting in SETTINGS:
+        node = _yaml_at(raw, setting.path)
+        if node is not None:
+            _write_attr(cfg, setting.path, setting.kind.from_yaml(node))
 
-    g_d = _section(raw, "guidance")
-    gains_d = _section(g_d, "gains")
-    gains = GuidanceGains(
-        yaw=_gain(gains_d.get("yaw"), GainTriple(90.0, 0.0, 4.0)),
-        altitude=_gain(gains_d.get("altitude"), GainTriple(2.0, 0.0, 0.1)),
-        forward=_gain(gains_d.get("forward"), GainTriple(0.6, 0.0, 0.05)),
-    )
-
-    cam_d = _section(raw, "camera")
-    camera = CameraConfig(
-        source=str(_g(cam_d, "source", "csi")),
-        device=str(_g(cam_d, "device", "/dev/video0")),
-        file=str(_g(cam_d, "file", "")),
-        width=int(_g(cam_d, "width", 1280)),
-        height=int(_g(cam_d, "height", 720)),
-        fps=int(_g(cam_d, "fps", 30)),
-        vfov_deg=float(_g(cam_d, "vfov_deg", 41.0)),
-    )
-
-    det_d = _section(raw, "detector")
-    detector = DetectorConfig(
-        model_path=str(_g(det_d, "model_path", "weights/yolo11n.pt")),
-        engine_path=str(_g(det_d, "engine_path", "weights/yolo11n.engine")),
-        conf=float(_g(det_d, "conf", 0.4)),
-        person_height_m=float(_g(det_d, "person_height_m", 1.7)),
-    )
-
-    net_d = _section(raw, "network")
-    network = NetworkConfig(
-        host=str(_g(net_d, "host", DEFAULT_CONTROL_HOST)),
-        control_port=int(_g(net_d, "control_port", 8765)),
-        video_port=int(_g(net_d, "video_port", 8554)),
-        webrtc_port=int(_g(net_d, "webrtc_port", 8889)),
-        video_bitrate_kbps=int(_g(net_d, "video_bitrate_kbps", 2500)),
-        video_url=str(_g(net_d, "video_url", "")),
-    )
-
-    fc_d = _section(raw, "fc")
-    fc = FcConfig(
-        connection=str(_g(fc_d, "connection", "udp:127.0.0.1:14550")),
-        baud=int(_g(fc_d, "baud", 921600)),
-        sysid=int(_g(fc_d, "sysid", 1)),
-        gcs_sysid=int(_g(fc_d, "gcs_sysid", 255)),
-    )
-
-    trk_d = _section(raw, "tracking")
-    tracking = TrackingConfig(
-        lost_timeout=float(_g(trk_d, "lost_timeout", 1.0)),
-        max_age=float(_g(trk_d, "max_age", 1.5)),
-        iou_threshold=float(_g(trk_d, "iou_threshold", 0.3)),
-        min_hits=int(_g(trk_d, "min_hits", 2)),
-    )
-
-    saf_d = _section(raw, "safety")
-    safety = SafetyConfig(
-        geofence_radius_m=float(_g(saf_d, "geofence_radius_m", GEOFENCE_RADIUS_DEFAULT)),
-        low_battery_action=str(_g(saf_d, "low_battery_action", "rtl")),
-        critical_battery_action=str(_g(saf_d, "critical_battery_action", "land")),
-        min_battery_remaining=float(_g(saf_d, "min_battery_remaining", 20.0)),
-        rc_override_primacy=bool(_g(saf_d, "rc_override_primacy", True)),
-    )
-
-    bat_d = _section(raw, "battery")
-    battery = BatteryConfig(
-        nominal_endurance_s=float(_g(bat_d, "nominal_endurance_s", 1500.0)),
-        reserve_pct=float(_g(bat_d, "reserve_pct", 25.0)),
-        max_sortie_s=float(_g(bat_d, "max_sortie_s", MAX_SORTIE_CAP_S)),
-        dispatch_min_soc_pct=float(
-            _g(bat_d, "dispatch_min_soc_pct", MIN_DISPATCH_SOC_PCT)
-        ),
-        cell_imbalance_max_v=float(
-            _g(bat_d, "cell_imbalance_max_v", MAX_CELL_IMBALANCE_V)
-        ),
-        batt_temp_max_c=float(_g(bat_d, "batt_temp_max_c", MAX_BATT_TEMP_C)),
-        capacity_mah=float(_g(bat_d, "capacity_mah", 5000.0)),
-        cell_count=int(_g(bat_d, "cell_count", 4)),
-        demo_charge_scale_s=float(_g(bat_d, "demo_charge_scale_s", 30.0)),
-        estimated_return_s=float(_g(bat_d, "estimated_return_s", 30.0)),
-    )
-
-    pl_d = _section(raw, "planner")
-    speeds = _shared_profile_speeds()
-    speeds_raw = pl_d.get("profile_speed_mps")
-    if isinstance(speeds_raw, dict):
-        for k, v in speeds_raw.items():
-            try:
-                speeds[str(k)] = float(v)
-            except (TypeError, ValueError):
-                pass  # bad YAML value -> keep the shared default for this profile
-    planner = PlannerConfig(
-        profile_speed_mps=speeds,
-        site_file=str(_g(pl_d, "site_file", "")),
-        arrival_radius_m=float(_g(pl_d, "arrival_radius_m", 2.0)),
-        staging_arrival_radius_m=float(_g(pl_d, "staging_arrival_radius_m", 15.0)),
-        heartbeat_timeout_ms=int(_g(pl_d, "heartbeat_timeout_ms", 2000)),
-    )
-
-    env_d = _section(raw, "envelope")
-    envelope = EnvelopeConfig(
-        hz=float(_g(env_d, "hz", ENVELOPE_HZ)),
-        publish_hz=float(_g(env_d, "publish_hz", ENVELOPE_PUBLISH_HZ)),
-        geofence_margin_m=float(
-            _g(env_d, "geofence_margin_m", ENVELOPE_GEOFENCE_MARGIN_FLOOR_M)
-        ),
-        nfz_buffer_m=float(_g(env_d, "nfz_buffer_m", ENVELOPE_NFZ_BUFFER_FLOOR_M)),
-        separation_m=float(_g(env_d, "separation_m", ENVELOPE_SEPARATION_FLOOR_M)),
-        separation_stale_m=float(
-            _g(env_d, "separation_stale_m", ENVELOPE_SEPARATION_STALE_FLOOR_M)
-        ),
-        peer_stale_s=float(_g(env_d, "peer_stale_s", ENVELOPE_PEER_STALE_CAP_S)),
-        peer_hold_s=float(_g(env_d, "peer_hold_s", ENVELOPE_PEER_HOLD_CAP_S)),
-        escalate_after_s=float(
-            _g(env_d, "escalate_after_s", ENVELOPE_ESCALATE_CAP_S)
-        ),
-        breach_multiple=float(
-            _g(env_d, "breach_multiple", ENVELOPE_BREACH_MULTIPLE_CAP)
-        ),
-        hysteresis_m=float(_g(env_d, "hysteresis_m", 2.0)),
-        recovery_s=float(_g(env_d, "recovery_s", 2.0)),
-    )
-
-    un_d = _section(raw, "unattended")
-    profiles_raw = un_d.get("profiles")
-    profiles = UNATTENDED_PROFILES_ALLOWED
-    if isinstance(profiles_raw, (list, tuple)) and profiles_raw:
-        profiles = tuple(str(p).strip().lower() for p in profiles_raw if str(p).strip())
-    unattended = UnattendedConfig(
-        min_alt_m=float(_g(un_d, "min_alt_m", UNATTENDED_MIN_ALT_FLOOR_M)),
-        max_alt_m=float(_g(un_d, "max_alt_m", UNATTENDED_MAX_ALT_CEIL_M)),
-        max_laps=float(_g(un_d, "max_laps", UNATTENDED_MAX_LAPS_CAP)),
-        max_hold_s=float(_g(un_d, "max_hold_s", UNATTENDED_MAX_HOLD_CAP_S)),
-        max_sorties_per_hour=int(
-            _g(un_d, "max_sorties_per_hour", UNATTENDED_MAX_SORTIES_PER_HOUR_CAP)
-        ),
-        max_wind_mps=float(_g(un_d, "max_wind_mps", UNATTENDED_MAX_WIND_CAP_MPS)),
-        profiles=profiles,
-    )
-
-    gim_d = _section(raw, "gimbal")
-    gimbal = GimbalConfig(
-        enabled=bool(_g(gim_d, "enabled", True)),
-        pitch_min_deg=float(_g(gim_d, "pitch_min_deg", GIMBAL_PITCH_MIN_DEG)),
-        pitch_max_deg=float(_g(gim_d, "pitch_max_deg", GIMBAL_PITCH_MAX_DEG)),
-        slew_rate_dps=float(_g(gim_d, "slew_rate_dps", 30.0)),
-        use_gimbal_manager=bool(_g(gim_d, "use_gimbal_manager", False)),
-    )
-
-    sec_d = _section(raw, "security")
-    security = SecurityConfig(
-        session_key_env=str(_g(sec_d, "session_key_env", "EIS_SESSION_KEY")),
-        max_command_age_ms=int(_g(sec_d, "max_command_age_ms", 30_000)),
-        require_signed_commands=bool(_g(sec_d, "require_signed_commands", False)),
-        audit_path=str(_g(sec_d, "audit_path", "")),
-    )
-
-    return AppConfig(
-        sitl=bool(_g(raw, "sitl", True)),
-        limits=limits,
-        gains=gains,
-        camera=camera,
-        detector=detector,
-        network=network,
-        fc=fc,
-        tracking=tracking,
-        safety=safety,
-        battery=battery,
-        planner=planner,
-        envelope=envelope,
-        unattended=unattended,
-        gimbal=gimbal,
-        security=security,
-        vehicle_id=str(_g(raw, "vehicle_id", "eis-1")),
-    )
+    _overlay_gains(cfg.gains, _yaml_at(raw, "guidance.gains"))
+    _overlay_profile_speeds(cfg.planner, _yaml_at(raw, "planner.profile_speed_mps"))
+    _overlay_profiles(cfg.unattended, _yaml_at(raw, "unattended.profiles"))
 
 
-def _gain(raw: Any, default: GainTriple) -> GainTriple:
-    """Parse a gain triple from a YAML mapping {kp,ki,kd} or a [kp,ki,kd] list."""
-    if isinstance(raw, dict):
-        return GainTriple(
-            kp=float(_g(raw, "kp", default.kp)),
-            ki=float(_g(raw, "ki", default.ki)),
-            kd=float(_g(raw, "kd", default.kd)),
-        )
-    if isinstance(raw, (list, tuple)) and len(raw) >= 3:
-        return GainTriple(float(raw[0]), float(raw[1]), float(raw[2]))
-    return replace(default)
+def _overlay_env(cfg: AppConfig) -> None:
+    """Apply the ``EIS_*`` overrides documented in .env.example."""
+    for setting in SETTINGS:
+        if setting.env is None:
+            continue
+        text = _env_text(setting.env)
+        if text is None:
+            continue
+        value = setting.kind.from_env(text)
+        if value is not None:
+            _write_attr(cfg, setting.path, value)
+
+    # EIS_BIND_ALL is deliberately applied AFTER EIS_CONTROL_HOST: it is the
+    # blunt, single, explicit opt-in that opens the control socket beyond
+    # loopback, so it decides the bind whichever order they were exported in.
+    # _enforce_bind_policy then forces signed commands on.
+    bind_all = _env_text("EIS_BIND_ALL")
+    if bind_all is not None:
+        opened = _bool_from_env(bind_all)
+        cfg.network.host = BIND_ALL_HOST if opened else DEFAULT_CONTROL_HOST
 
 
-def _apply_env_overrides(cfg: AppConfig) -> None:
-    """Apply ``EIS_*`` environment overrides documented in .env.example."""
-    # link / sitl
-    b = _env_bool("EIS_SITL")
-    if b is not None:
-        cfg.sitl = b
-
-    # network
-    s = _env("EIS_CONTROL_HOST")
-    if s is not None:
-        cfg.network.host = s
-    b = _env_bool("EIS_BIND_ALL")
-    if b is not None:
-        # The single, explicit opt-in that opens the control socket beyond
-        # loopback. _enforce_bind_policy then forces signed commands on.
-        cfg.network.host = "0.0.0.0" if b else DEFAULT_CONTROL_HOST
-    p = _env_int("EIS_CONTROL_PORT")
-    if p is not None:
-        cfg.network.control_port = p
-    p = _env_int("EIS_VIDEO_PORT")
-    if p is not None:
-        cfg.network.video_port = p
-    p = _env_int("EIS_WEBRTC_PORT")
-    if p is not None:
-        cfg.network.webrtc_port = p
-    p = _env_int("EIS_VIDEO_BITRATE")
-    if p is not None:
-        cfg.network.video_bitrate_kbps = p
-    u = _env("EIS_VIDEO_URL")
-    if u is not None:
-        cfg.network.video_url = u
-
-    # fc link
-    c = _env("EIS_FC_CONNECTION")
-    if c is not None:
-        cfg.fc.connection = c
-    i = _env_int("EIS_FC_BAUD")
-    if i is not None:
-        cfg.fc.baud = i
-    i = _env_int("EIS_MAVLINK_SYSID")
-    if i is not None:
-        cfg.fc.sysid = i
-    i = _env_int("EIS_GCS_SYSID")
-    if i is not None:
-        cfg.fc.gcs_sysid = i
-
-    # camera / detector
-    s = _env("EIS_CAMERA_SOURCE")
-    if s is not None:
-        cfg.camera.source = s
-    s = _env("EIS_CAMERA_DEVICE")
-    if s is not None:
-        cfg.camera.device = s
-    i = _env_int("EIS_CAMERA_WIDTH")
-    if i is not None:
-        cfg.camera.width = i
-    i = _env_int("EIS_CAMERA_HEIGHT")
-    if i is not None:
-        cfg.camera.height = i
-    i = _env_int("EIS_CAMERA_FPS")
-    if i is not None:
-        cfg.camera.fps = i
-    s = _env("EIS_MODEL_PATH")
-    if s is not None:
-        cfg.detector.model_path = s
-    s = _env("EIS_ENGINE_PATH")
-    if s is not None:
-        cfg.detector.engine_path = s
-    f = _env_float("EIS_DETECT_CONF")
-    if f is not None:
-        cfg.detector.conf = f
-
-    # limits / safety
-    f = _env_float("EIS_STANDOFF_M")
-    if f is not None:
-        cfg.limits.standoff = f
-    f = _env_float("EIS_MAX_SPEED_MPS")
-    if f is not None:
-        cfg.limits.max_speed = f
-    f = _env_float("EIS_MAX_ALT_M")
-    if f is not None:
-        cfg.limits.max_altitude = f
-    f = _env_float("EIS_GEOFENCE_RADIUS_M")
-    if f is not None:
-        cfg.safety.geofence_radius_m = f
-    f = _env_float("EIS_MAX_SORTIE_S")
-    if f is not None:
-        cfg.battery.max_sortie_s = f
-    f = _env_float("EIS_DISPATCH_MIN_SOC_PCT")
-    if f is not None:
-        cfg.battery.dispatch_min_soc_pct = f
-    f = _env_float("EIS_CELL_IMBALANCE_MAX_V")
-    if f is not None:
-        cfg.battery.cell_imbalance_max_v = f
-    f = _env_float("EIS_BATT_TEMP_MAX_C")
-    if f is not None:
-        cfg.battery.batt_temp_max_c = f
-    f = _env_float("DEMO_CHARGE_SCALE")
-    if f is not None:
-        cfg.battery.demo_charge_scale_s = f
-    s = _env("EIS_VEHICLE_ID")
-    if s is not None:
-        cfg.vehicle_id = s
-
-    # runtime envelope monitor (may only tighten -- see _enforce_safety_floor)
-    f = _env_float("EIS_ENVELOPE_SEPARATION_M")
-    if f is not None:
-        cfg.envelope.separation_m = f
-    f = _env_float("EIS_ENVELOPE_SEPARATION_STALE_M")
-    if f is not None:
-        cfg.envelope.separation_stale_m = f
-    f = _env_float("EIS_ENVELOPE_PEER_STALE_S")
-    if f is not None:
-        cfg.envelope.peer_stale_s = f
-    f = _env_float("EIS_ENVELOPE_PEER_HOLD_S")
-    if f is not None:
-        cfg.envelope.peer_hold_s = f
-    f = _env_float("EIS_ENVELOPE_ESCALATE_AFTER_S")
-    if f is not None:
-        cfg.envelope.escalate_after_s = f
-    f = _env_float("EIS_ENVELOPE_GEOFENCE_MARGIN_M")
-    if f is not None:
-        cfg.envelope.geofence_margin_m = f
-    f = _env_float("EIS_ENVELOPE_NFZ_BUFFER_M")
-    if f is not None:
-        cfg.envelope.nfz_buffer_m = f
-
-    # UNATTENDED_ENVELOPE (may only tighten)
-    f = _env_float("EIS_UNATTENDED_MIN_ALT_M")
-    if f is not None:
-        cfg.unattended.min_alt_m = f
-    f = _env_float("EIS_UNATTENDED_MAX_ALT_M")
-    if f is not None:
-        cfg.unattended.max_alt_m = f
-    f = _env_float("EIS_UNATTENDED_MAX_HOLD_S")
-    if f is not None:
-        cfg.unattended.max_hold_s = f
-    i = _env_int("EIS_UNATTENDED_MAX_SORTIES_PER_HOUR")
-    if i is not None:
-        cfg.unattended.max_sorties_per_hour = i
-    f = _env_float("EIS_UNATTENDED_MAX_WIND_MPS")
-    if f is not None:
-        cfg.unattended.max_wind_mps = f
-
-    # gimbal
-    b = _env_bool("EIS_GIMBAL_ENABLED")
-    if b is not None:
-        cfg.gimbal.enabled = b
-    f = _env_float("EIS_GIMBAL_PITCH_MIN_DEG")
-    if f is not None:
-        cfg.gimbal.pitch_min_deg = f
-    f = _env_float("EIS_GIMBAL_PITCH_MAX_DEG")
-    if f is not None:
-        cfg.gimbal.pitch_max_deg = f
-    f = _env_float("EIS_GIMBAL_SLEW_RATE_DPS")
-    if f is not None:
-        cfg.gimbal.slew_rate_dps = f
-    b = _env_bool("EIS_GIMBAL_MANAGER")
-    if b is not None:
-        cfg.gimbal.use_gimbal_manager = b
-
-    # command signing / audit
-    s = _env("EIS_SESSION_KEY_ENV")
-    if s is not None:
-        cfg.security.session_key_env = s
-    i = _env_int("EIS_COMMAND_MAX_AGE_MS")
-    if i is not None:
-        cfg.security.max_command_age_ms = i
-    b = _env_bool("EIS_REQUIRE_SIGNED_COMMANDS")
-    if b is not None:
-        cfg.security.require_signed_commands = b
-    s = _env("EIS_AUDIT_PATH")
-    if s is not None:
-        cfg.security.audit_path = s
-
-    # planner / site model
-    s = _env("EIS_SITE_FILE")
-    if s is not None:
-        cfg.planner.site_file = s
-    f = _env_float("EIS_STAGING_RADIUS_M")
-    if f is not None:
-        cfg.planner.staging_arrival_radius_m = f
-    i = _env_int("EIS_PLANNER_HEARTBEAT_TIMEOUT_MS")
-    if i is not None:
-        cfg.planner.heartbeat_timeout_ms = i
+def _overlay_gains(gains: GuidanceGains, raw: Any) -> None:
+    """Overlay ``guidance.gains`` -- per channel, per term, over the defaults."""
+    for channel in _GAIN_CHANNELS:
+        spec = raw.get(channel) if isinstance(raw, dict) else None
+        setattr(gains, channel, _gain_triple(spec, getattr(gains, channel)))
 
 
+def _gain_triple(spec: Any, current: GainTriple) -> GainTriple:
+    """One gain triple from a {kp,ki,kd} mapping or a [kp,ki,kd] sequence."""
+    if isinstance(spec, dict):
+        terms = []
+        for name, fallback in zip(("kp", "ki", "kd"), current.as_tuple()):
+            given = spec.get(name)
+            terms.append(fallback if given is None else float(given))
+        return GainTriple(*terms)
+    if isinstance(spec, (list, tuple)) and len(spec) >= 3:
+        return GainTriple(*(float(term) for term in spec[:3]))
+    return GainTriple(*current.as_tuple())
+
+
+def _overlay_profile_speeds(planner: PlannerConfig, raw: Any) -> None:
+    """Merge per-profile cruise speeds over the shared-contract defaults.
+
+    A profile the YAML does not mention keeps the shared value, and a value
+    that will not parse keeps it too: a malformed line must not silently
+    delete a profile the planner is about to be asked to fly.
+    """
+    if not isinstance(raw, dict):
+        return
+    for name, value in raw.items():
+        try:
+            planner.profile_speed_mps[str(name)] = float(value)
+        except (TypeError, ValueError):
+            continue
+
+
+def _overlay_profiles(unattended: UnattendedConfig, raw: Any) -> None:
+    """Overlay the unattended profile allow-list (still filtered later)."""
+    if not isinstance(raw, (list, tuple)):
+        return
+    named = tuple(str(p).strip().lower() for p in raw if str(p).strip())
+    if named:
+        unattended.profiles = named
+
+
+# ==========================================================================
+# The safety floor -- runs last, over everything the layers produced
+# ==========================================================================
 def _enforce_safety_floor(cfg: AppConfig) -> None:
     """Re-assert the hard safety envelope after all layering (PRD 9 / 11).
 
-    No config layer may set max_speed above the cap, push standoff below its
-    floor, or invert the speed band. This runs last so neither YAML nor env can
-    relax a safety limit below its hard bound.
+    Every scalar in BOUNDS is forced back into its band, the bands that can
+    invert are reconciled, the free-text fields are made non-empty, the
+    per-profile speeds are capped, and the bind/authentication pair is
+    resolved together. Because this runs after YAML and env, no layer can
+    relax a safety limit: it can only tighten one.
     """
-    L = cfg.limits
+    for bound in BOUNDS:
+        _apply_bound(cfg, bound)
 
-    # standoff BAND (never below the hard min, and the floor itself never below
-    # the system-wide MIN_STANDOFF_FLOOR; never above the hard ceiling)
-    L.min_standoff = max(MIN_STANDOFF_FLOOR, _safe(L.min_standoff, MIN_STANDOFF_FLOOR))
-    L.max_standoff = max(
-        L.min_standoff,
-        min(MAX_STANDOFF_CEIL_M, _safe(L.max_standoff, MAX_STANDOFF_CEIL_M)),
-    )
-    L.standoff = max(L.min_standoff, min(L.max_standoff, _safe(L.standoff, L.min_standoff)))
+    for lo_path, hi_path, hard_lo, hard_hi in _INVERTIBLE_BANDS:
+        if _read_attr(cfg, lo_path) > _read_attr(cfg, hi_path):
+            _write_attr(cfg, lo_path, hard_lo)
+            _write_attr(cfg, hi_path, hard_hi)
 
-    # speed band: clamp the configurable cap to the hard ceiling, keep min sane
-    L.max_speed = max(0.1, min(float(L.max_speed), MAX_SPEED_CAP))
-    L.min_speed = max(0.0, min(float(L.min_speed), L.max_speed))
+    for path, fallback in _NON_EMPTY_TEXT:
+        _write_attr(cfg, path, str(_read_attr(cfg, path)).strip() or fallback)
 
-    # climb / yaw / altitude must be positive
-    L.max_climb_rate = max(0.1, float(L.max_climb_rate))
-    L.max_yaw_rate = max(1.0, float(L.max_yaw_rate))
-    L.max_altitude = max(1.0, float(L.max_altitude))
-
-    # watchdogs must be positive
-    L.manual_watchdog_ms = max(50, int(L.manual_watchdog_ms))
-    L.ground_link_timeout_ms = max(200, int(L.ground_link_timeout_ms))
-
-    # geofence radius floor
-    cfg.safety.geofence_radius_m = max(10.0, float(cfg.safety.geofence_radius_m))
-
-    # These are hard safety bounds: overrides may only tighten them.
-    cfg.battery.max_sortie_s = max(
-        1.0, min(float(cfg.battery.max_sortie_s), MAX_SORTIE_CAP_S)
-    )
-    cfg.battery.dispatch_min_soc_pct = min(
-        100.0, max(float(cfg.battery.dispatch_min_soc_pct), MIN_DISPATCH_SOC_PCT)
-    )
-    cfg.battery.cell_imbalance_max_v = max(
-        0.001,
-        min(float(cfg.battery.cell_imbalance_max_v), MAX_CELL_IMBALANCE_V),
-    )
-    cfg.battery.batt_temp_max_c = max(
-        1.0, min(float(cfg.battery.batt_temp_max_c), MAX_BATT_TEMP_C)
-    )
-    cfg.battery.nominal_endurance_s = max(1.0, float(cfg.battery.nominal_endurance_s))
-    cfg.battery.reserve_pct = min(99.0, max(0.0, float(cfg.battery.reserve_pct)))
-    cfg.battery.capacity_mah = max(1.0, float(cfg.battery.capacity_mah))
-    cfg.battery.cell_count = max(1, int(cfg.battery.cell_count))
-    cfg.battery.demo_charge_scale_s = max(1.0, float(cfg.battery.demo_charge_scale_s))
-    cfg.battery.estimated_return_s = max(0.0, float(cfg.battery.estimated_return_s))
-    cfg.planner.heartbeat_timeout_ms = max(200, int(cfg.planner.heartbeat_timeout_ms))
-    cfg.vehicle_id = str(cfg.vehicle_id).strip() or "eis-1"
-
-    # planner profile speeds: every profile is clamped UNDER the hard speed cap
-    # (profiles may only tighten the envelope). A malformed/non-finite value
-    # degrades to 0.0 = no motion, the safe direction; negative -> 0.0. The
-    # PlannerExecutor re-clamps to limits.max_speed at every emitted setpoint.
-    speeds = cfg.planner.profile_speed_mps
-    for name in list(speeds.keys()):
-        try:
-            v = float(speeds[name])
-        except (TypeError, ValueError):
-            v = 0.0
-        if not math.isfinite(v):
-            v = 0.0
-        speeds[name] = max(0.0, min(v, MAX_SPEED_CAP))
-
-    # planner thresholds must stay sane (arrival radii can't collapse to 0)
-    cfg.planner.arrival_radius_m = max(0.5, float(cfg.planner.arrival_radius_m))
-    cfg.planner.staging_arrival_radius_m = max(
-        1.0, float(cfg.planner.staging_arrival_radius_m)
-    )
-
-    _enforce_envelope_floor(cfg)
-    _enforce_unattended_floor(cfg)
-    _enforce_gimbal_floor(cfg)
-    cfg.security.max_command_age_ms = max(
-        1_000, min(300_000, int(cfg.security.max_command_age_ms))
-    )
-    cfg.security.session_key_env = (
-        str(cfg.security.session_key_env).strip() or "EIS_SESSION_KEY"
-    )
+    _clamp_profile_speeds(cfg.planner)
+    _restrict_unattended_profiles(cfg.unattended)
     _enforce_bind_policy(cfg)
+
+
+def _edge(
+    cfg: AppConfig, literal: Optional[float], ref: str, tighten: Callable[[float, float], float]
+) -> Optional[float]:
+    """One edge of a band: the literal, tightened by a referenced field."""
+    if not ref:
+        return literal
+    referenced = float(_read_attr(cfg, ref))
+    return referenced if literal is None else tighten(literal, referenced)
+
+
+def _apply_bound(cfg: AppConfig, bound: Bound) -> None:
+    """Force one resolved field back inside its band."""
+    lo = _edge(cfg, bound.lo, bound.lo_ref, max)
+    hi = _edge(cfg, bound.hi, bound.hi_ref, min)
+
+    try:
+        value = float(_read_attr(cfg, bound.path))
+    except (TypeError, ValueError):
+        value = math.nan
+    if not math.isfinite(value):
+        # Degrade to the conservative end, never to the permissive one: an
+        # unreadable or infinite limit is a broken config, not a licence.
+        fallback = bound.bad
+        if fallback is None:
+            fallback = lo if lo is not None else hi
+        value = float(fallback if fallback is not None else 0.0)
+
+    if hi is not None:
+        value = min(value, hi)
+    if lo is not None:
+        value = max(lo, value)
+
+    _write_attr(cfg, bound.path, int(value) if bound.whole else float(value))
+
+
+def _clamp_profile_speeds(planner: PlannerConfig) -> None:
+    """Every mission profile is capped UNDER the hard speed cap.
+
+    A malformed or non-finite value degrades to 0.0 -- no motion, the safe
+    direction -- and negatives collapse to 0.0 as well. The PlannerExecutor
+    re-clamps to limits.max_speed at every emitted setpoint, so a profile can
+    only ever tighten the envelope.
+    """
+    for name, raw in list(planner.profile_speed_mps.items()):
+        try:
+            speed = float(raw)
+        except (TypeError, ValueError):
+            speed = 0.0
+        if not math.isfinite(speed):
+            speed = 0.0
+        planner.profile_speed_mps[name] = max(0.0, min(speed, MAX_SPEED_CAP))
+
+
+def _restrict_unattended_profiles(unattended: UnattendedConfig) -> None:
+    """Profiles are a SUBSET of the allowed set, never an extension.
+
+    An unknown or wider list falls back to the hard-allowed set rather than
+    admitting it, so nothing unattended flies a profile ADR D23 never cleared.
+    """
+    admitted = tuple(p for p in unattended.profiles if p in UNATTENDED_PROFILES_ALLOWED)
+    unattended.profiles = admitted or UNATTENDED_PROFILES_ALLOWED
 
 
 def is_loopback_host(host: str) -> bool:
@@ -1052,99 +1111,8 @@ def _enforce_bind_policy(cfg: AppConfig) -> None:
     -- some deployments genuinely need it -- but it can only be done together
     with authentication, and it can never silently arm the SITL test hooks.
     """
-    host = str(cfg.network.host).strip() or DEFAULT_CONTROL_HOST
-    cfg.network.host = host
-    if not is_loopback_host(host):
+    if not is_loopback_host(cfg.network.host):
         cfg.security.require_signed_commands = True
-
-
-def _safe(value: Any, fallback: float) -> float:
-    """Coerce to a finite float, degrading to ``fallback`` (the safe value)."""
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return float(fallback)
-    return result if math.isfinite(result) else float(fallback)
-
-
-def _enforce_envelope_floor(cfg: AppConfig) -> None:
-    """Envelope-monitor thresholds: config may only make the monitor STRICTER.
-
-    Distances that protect (separation, geofence margin, NFZ buffer) may only
-    grow; timers that delay a response (staleness tolerance, escalation dwell)
-    may only shrink; the drift multiple that decides hold may only tighten.
-    """
-    e = cfg.envelope
-    e.separation_m = max(ENVELOPE_SEPARATION_FLOOR_M, _safe(
-        e.separation_m, ENVELOPE_SEPARATION_FLOOR_M))
-    e.separation_stale_m = max(
-        ENVELOPE_SEPARATION_STALE_FLOOR_M,
-        e.separation_m,
-        _safe(e.separation_stale_m, ENVELOPE_SEPARATION_STALE_FLOOR_M),
-    )
-    e.peer_stale_s = max(0.1, min(
-        ENVELOPE_PEER_STALE_CAP_S, _safe(e.peer_stale_s, ENVELOPE_PEER_STALE_CAP_S)))
-    e.peer_hold_s = max(e.peer_stale_s, min(
-        ENVELOPE_PEER_HOLD_CAP_S, _safe(e.peer_hold_s, ENVELOPE_PEER_HOLD_CAP_S)))
-    e.escalate_after_s = max(0.1, min(
-        ENVELOPE_ESCALATE_CAP_S, _safe(e.escalate_after_s, ENVELOPE_ESCALATE_CAP_S)))
-    e.breach_multiple = max(1.0, min(
-        ENVELOPE_BREACH_MULTIPLE_CAP,
-        _safe(e.breach_multiple, ENVELOPE_BREACH_MULTIPLE_CAP),
-    ))
-    e.geofence_margin_m = max(ENVELOPE_GEOFENCE_MARGIN_FLOOR_M, _safe(
-        e.geofence_margin_m, ENVELOPE_GEOFENCE_MARGIN_FLOOR_M))
-    e.nfz_buffer_m = max(ENVELOPE_NFZ_BUFFER_FLOOR_M, _safe(
-        e.nfz_buffer_m, ENVELOPE_NFZ_BUFFER_FLOOR_M))
-    e.hysteresis_m = max(0.0, _safe(e.hysteresis_m, 2.0))
-    e.recovery_s = max(0.0, _safe(e.recovery_s, 2.0))
-    # Rates: the monitor runs at the control rate and publishes no faster than
-    # it ticks. Neither can be configured to zero (that would be an off switch).
-    e.hz = max(1.0, min(50.0, _safe(e.hz, ENVELOPE_HZ)))
-    e.publish_hz = max(0.5, min(e.hz, _safe(e.publish_hz, ENVELOPE_PUBLISH_HZ)))
-
-
-def _enforce_unattended_floor(cfg: AppConfig) -> None:
-    """UNATTENDED_ENVELOPE (ADR D23): config may only TIGHTEN, never widen.
-
-    A band that inverts under tightening (min pushed above max) collapses to
-    the hard band rather than becoming empty-and-silent: a refusal the
-    operator can read beats a configuration that quietly grounds the vehicle.
-    """
-    u = cfg.unattended
-    u.min_alt_m = max(UNATTENDED_MIN_ALT_FLOOR_M, _safe(
-        u.min_alt_m, UNATTENDED_MIN_ALT_FLOOR_M))
-    u.max_alt_m = min(UNATTENDED_MAX_ALT_CEIL_M, _safe(
-        u.max_alt_m, UNATTENDED_MAX_ALT_CEIL_M))
-    if u.min_alt_m > u.max_alt_m:
-        u.min_alt_m, u.max_alt_m = UNATTENDED_MIN_ALT_FLOOR_M, UNATTENDED_MAX_ALT_CEIL_M
-    u.max_laps = max(0.0, min(
-        UNATTENDED_MAX_LAPS_CAP, _safe(u.max_laps, UNATTENDED_MAX_LAPS_CAP)))
-    u.max_hold_s = max(0.0, min(
-        UNATTENDED_MAX_HOLD_CAP_S, _safe(u.max_hold_s, UNATTENDED_MAX_HOLD_CAP_S)))
-    try:
-        sorties = int(u.max_sorties_per_hour)
-    except (TypeError, ValueError):
-        sorties = UNATTENDED_MAX_SORTIES_PER_HOUR_CAP
-    u.max_sorties_per_hour = max(0, min(UNATTENDED_MAX_SORTIES_PER_HOUR_CAP, sorties))
-    u.max_wind_mps = max(0.0, min(
-        UNATTENDED_MAX_WIND_CAP_MPS, _safe(u.max_wind_mps, UNATTENDED_MAX_WIND_CAP_MPS)))
-    # Profiles are a subset, never an extension: an unknown or wider profile
-    # list falls back to the hard-allowed set rather than admitting it.
-    allowed = tuple(p for p in u.profiles if p in UNATTENDED_PROFILES_ALLOWED)
-    u.profiles = allowed or UNATTENDED_PROFILES_ALLOWED
-
-
-def _enforce_gimbal_floor(cfg: AppConfig) -> None:
-    """Gimbal travel: config may narrow it, never widen past -30..90 deg."""
-    g = cfg.gimbal
-    lo = max(GIMBAL_PITCH_MIN_DEG, _safe(g.pitch_min_deg, GIMBAL_PITCH_MIN_DEG))
-    hi = min(GIMBAL_PITCH_MAX_DEG, _safe(g.pitch_max_deg, GIMBAL_PITCH_MAX_DEG))
-    if lo > hi:
-        lo, hi = GIMBAL_PITCH_MIN_DEG, GIMBAL_PITCH_MAX_DEG
-    g.pitch_min_deg, g.pitch_max_deg = lo, hi
-    g.slew_rate_dps = max(1.0, min(
-        GIMBAL_SLEW_RATE_CAP_DPS, _safe(g.slew_rate_dps, 30.0)))
 
 
 __all__ = [

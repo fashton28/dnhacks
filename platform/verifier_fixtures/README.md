@@ -245,10 +245,12 @@ leg between two contained targets can still leave containment.
 
 ## Provenance
 
-`site.fixture.json` is **synthetic**. Home is Komati Power Station; every other
-coordinate is generated from metre offsets chosen to sit on a check boundary.
-It is not a survey, it is not the plant, and it never substitutes for
-`site/site.json` — see `docs/SITE_CONTRACT.md` for the real cutover.
+`site.fixture.json` is **synthetic**. It is a generic fixture site: home is an
+arbitrary anchor and every other coordinate is generated from metre offsets
+chosen to sit on a check boundary. It models no real place, it is not a survey,
+and it never substitutes for `site/site.json` — see `docs/SITE_CONTRACT.md` for
+the real cutover. Its geometry is frozen: the `V01`–`V25` verdicts are pinned to
+these exact edges, so it does NOT track `site/site.stub.json`.
 
 The `V01`–`V25` identifiers replace the placeholder stubs committed in the
 Phase 0 slice. Scenario slugs are unchanged except where a placeholder was

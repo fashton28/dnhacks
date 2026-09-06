@@ -18,6 +18,12 @@ Frame conventions (match the MAVLink BODY-NED setpoint path, PRD 6.1):
     yaw_rate                        [deg/s], positive = turn right (clockwise)
   ``valid=False`` means "hold position / zero setpoint" -- the consumer must
   send a zero-velocity hold, never re-use the last commanded velocity.
+
+Every clamp in this module routes through one helper, ``_bounded``, so the
+degradation rule is written once: a value that is not a finite number is not
+argued with, it becomes the caller's stated safe value. Guidance, manual,
+the planner and the MAVLink layer all clamp through these methods, so that
+one rule is the one the aircraft flies.
 ============================================================================
 """
 from __future__ import annotations
@@ -26,6 +32,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Any, Tuple
 
 
 # --------------------------------------------------------------------------
@@ -50,6 +57,25 @@ class TrackingState(str, Enum):
 def now() -> float:
     """Monotonic-ish wall clock in *seconds* (float). Used as the default ts."""
     return time.time()
+
+
+def _bounded(value: Any, low: float, high: float, safe: float) -> float:
+    """``value`` forced into [low, high], degrading to ``safe``.
+
+    Anything that is not a finite number -- a string, None, NaN, and the
+    ``inf`` a spec-legal JSON literal like ``1e400`` parses into (FM-11) --
+    resolves to ``safe`` untouched, because the caller has already decided
+    what its conservative answer is. An inverted band (low above high) is
+    read as "the floor wins": a band that cannot be satisfied must not
+    silently authorise the ceiling.
+    """
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return float(safe)
+    if not math.isfinite(number):
+        return float(safe)
+    return min(max(number, low), max(low, high))
 
 
 # --------------------------------------------------------------------------
@@ -87,6 +113,10 @@ class VelocitySetpoint:
     vx = forward(+)/back(-) m/s, vy = right(+)/left(-) m/s,
     vz = down(+)/up(-) m/s, yaw_rate deg/s (positive = clockwise / turn right).
     valid=False  ==>  hold position / zero setpoint (do NOT reuse last command).
+
+    The field defaults ARE the hold setpoint, deliberately: the cheapest thing
+    to construct is the safe thing, so a partially-built setpoint is a hold
+    rather than a stale command.
     """
     vx: float = 0.0
     vy: float = 0.0
@@ -96,12 +126,16 @@ class VelocitySetpoint:
 
     @classmethod
     def hold(cls) -> "VelocitySetpoint":
-        """The canonical safe setpoint: all-zero, valid=False (hold position)."""
-        return cls(0.0, 0.0, 0.0, 0.0, False)
+        """The canonical safe setpoint: all-zero, valid=False (hold position).
+
+        A fresh instance every call -- consumers mutate what they are handed,
+        and a shared singleton would let one caller's edit reach every other.
+        """
+        return cls()
 
     def zeroed(self) -> "VelocitySetpoint":
         """Return an all-zero copy preserving nothing -- a hard stop / hold."""
-        return VelocitySetpoint.hold()
+        return type(self).hold()
 
 
 # --------------------------------------------------------------------------
@@ -126,6 +160,11 @@ class Limits:
     manual_watchdog_ms: int = 500     # zero+hold if no stick frame within this
     ground_link_timeout_ms: int = 2000  # deadman on the ground link
 
+    def standoff_band(self) -> Tuple[float, float]:
+        """The closed band a requested standoff must land in, (min, max)."""
+        floor = float(self.min_standoff)
+        return floor, max(floor, float(self.max_standoff))
+
     def clamp_standoff(self, meters: float) -> float:
         """Clamp a requested standoff to [min_standoff, max_standoff].
 
@@ -136,25 +175,16 @@ class Limits:
         leaks into the advertised ``capabilities.max_standoff_m`` (FM-11).
         A non-finite request degrades to the configured value, never to inf.
         """
-        try:
-            value = float(meters)
-        except (TypeError, ValueError):
-            return self.standoff
-        if not math.isfinite(value):
-            return self.standoff
-        lo = float(self.min_standoff)
-        hi = max(lo, float(self.max_standoff))
-        return max(lo, min(hi, value))
+        floor, ceiling = self.standoff_band()
+        return _bounded(meters, floor, ceiling, self.standoff)
 
     def clamp_speed(self, mps: float) -> float:
-        """Clamp a requested max-speed to [min_speed, max_speed]."""
-        try:
-            value = float(mps)
-        except (TypeError, ValueError):
-            return self.max_speed
-        if not math.isfinite(value):
-            return self.max_speed
-        return max(self.min_speed, min(self.max_speed, value))
+        """Clamp a requested max-speed to [min_speed, max_speed].
+
+        An unreadable request degrades to the configured cap, which is the
+        value already sitting in the envelope -- never to a faster one.
+        """
+        return _bounded(mps, float(self.min_speed), float(self.max_speed), self.max_speed)
 
 
 # --------------------------------------------------------------------------
@@ -179,25 +209,28 @@ class TargetObservation:
     cls: str = "person"
 
     # --- convenience geometry (all normalised 0..1) -----------------------
+    # Derived from bbox on every read rather than cached: the tracker mutates
+    # nothing here, and a cached centroid that drifts from its box is the kind
+    # of disagreement guidance would servo on.
     @property
-    def cx(self) -> float:
-        """Centre x of the bbox (normalised)."""
-        return self.bbox[0] + self.bbox[2] / 2.0
-
-    @property
-    def cy(self) -> float:
-        """Centre y of the bbox (normalised)."""
-        return self.bbox[1] + self.bbox[3] / 2.0
+    def width(self) -> float:
+        """bbox width (normalised)."""
+        return float(self.bbox[2])
 
     @property
     def height(self) -> float:
         """bbox height (normalised)."""
-        return self.bbox[3]
+        return float(self.bbox[3])
 
     @property
-    def width(self) -> float:
-        """bbox width (normalised)."""
-        return self.bbox[2]
+    def cx(self) -> float:
+        """Centre x of the bbox (normalised)."""
+        return float(self.bbox[0]) + self.width / 2.0
+
+    @property
+    def cy(self) -> float:
+        """Centre y of the bbox (normalised)."""
+        return float(self.bbox[1]) + self.height / 2.0
 
 
 __all__ = [

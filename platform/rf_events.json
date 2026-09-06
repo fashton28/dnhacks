@@ -17,10 +17,10 @@
       "kind": "hostile_drone",
       "band": "2.4GHz",
       "power_delta_db": 18.0,
-      "lat": -26.0903,
-      "lon": 29.4724,
-      "pilot_lat": -26.091,
-      "pilot_lon": 29.469,
+      "lat": 41.1994161,
+      "lon": -98.3993195,
+      "pilot_lat": 41.1996407,
+      "pilot_lon": -98.402746,
       "confidence": 0.9
     }
   ]
