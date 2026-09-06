@@ -8,7 +8,7 @@
  * ========================================================================== */
 import { create } from 'zustand';
 import type { ConnectionState, StatusText, Telemetry } from '@/contract';
-import type { HubDetection, HubDroneState, HubMission, AgentPlan } from '@/dataSource/HubDataProvider';
+import type { HubDetection, HubDroneState, HubMission, HubIncidentReport, AgentPlan } from '@/dataSource/HubDataProvider';
 
 export interface MissionSpecView { objective: string; rationale: string; max_altitude_m: number; standoff_m: number; attempt: number; mission_id: string }
 export interface ValidationView { verdict: 'accept' | 'reject'; violations: { rule: string; detail: string; severity: string }[]; attempt?: number; abandoned?: boolean; checks_passed?: number; mission_id: string }
@@ -24,7 +24,19 @@ export interface AgentActionView { ts: number; mission_id: string | null; tool: 
 /** The envelope the agent declared and the Safety Validator checked: the agent flies only inside it. */
 export interface EnvelopeView { mission_id: string; attempt: number; verdict: 'accept' | 'reject'; center: { lat: number; lon: number }; radius_m: number; ceiling_m: number; standoff_m: number; time_budget_s: number; objective: string; rationale: string; polygon: { lat: number; lon: number }[] }
 export interface InspectionView { mission_id: string; waypoint_index: number; summary: string; threat_assessment: string; actions: number }
-export interface SceneProp { id: string; kind: string; x: number; y: number; yaw_deg: number }
+/** One plain-language line of the agent's decision trail: what happened, in the order it happened, for the Operator. */
+export interface DecisionEntry { ts: number; kind: 'detection' | 'triage' | 'drone' | 'envelope' | 'validation' | 'repair' | 'action' | 'note' | 'stop' | 'inspection' | 'verdict' | 'report' | 'outcome' | 'clamp'; text: string; tone: 'info' | 'good' | 'warn' | 'bad'; mission_id: string | null; detail?: string }
+/** Why this Drone flew: the Hub's pick with the alternatives it passed over. */
+export interface DroneChoiceView { mission_id: string | null; drone_id: string; reason: string; candidates: { drone_id: string; status: string; battery_pct: number; eligible: boolean; reason: string }[]; source: 'hub' | 'derived' }
+/** One thing the vision model saw in a frame: a box in frame pixels, a label, and for thermal frames a temperature. */
+export interface Sighting { id: string; label: string; confidence: number; bbox: [number, number, number, number]; camera_mode?: string; lat?: number; lon?: number; range_m?: number; temp_max_c?: number; frame_ref?: string }
+export interface SightingsView { ts: number; drone_id: string; mission_id: string | null; frame_ref: string | null; width: number; height: number; sightings: Sighting[] }
+/** A reading from the plant's own instrumentation, alongside what the Drones see. */
+export interface PlantSignal { id: string; ts: number; sensor_id: string; kind: string; value: number | string; unit: string; threshold: number | string | null; asset: { name: string; lat?: number; lon?: number }; severity: 'info' | 'warning' | 'alarm'; note: string }
+/** A dispatch the system will make by itself unless the Operator holds it within the veto window. */
+export interface DecisionView { id: string; detection_id: string; action: 'dispatch' | 'held' | 'released'; rationale: string; deadline_ts: number | null; mode: string; ts: number }
+export type AutonomyMode = 'manual' | 'supervised' | 'autonomous';
+export interface SceneProp { id: string; kind: string; x: number; y: number; yaw_deg: number; z?: number }
 export type CameraMode = 'rgb' | 'thermal' | 'lidar';
 export interface CameraView { mode: CameraMode; fov_deg: number }
 export const CAMERA_MODES: CameraMode[] = ['rgb', 'thermal', 'lidar'];
@@ -70,6 +82,27 @@ export interface ArgusState {
   gimbalPending: number | null;
   /** Detections the Operator chose not to fly: logged for the record, or ignored. */
   dismissed: Record<string, 'logged' | 'ignored'>;
+  /** The current dispatch, narrated: every decision the autonomy stack made, in order. Reset by a new pretriage. */
+  decisions: DecisionEntry[];
+  /** Every Safety Validator verdict of the current dispatch, oldest first (the latest is `validation`). */
+  validations: ValidationView[];
+  droneChoice: DroneChoiceView | null;
+  /** Stored findings by Mission id (GET /incidents plus live incident_report events). */
+  reports: Record<string, HubIncidentReport>;
+  /** Mission id of the Findings document open over the stage, or null. */
+  findingsOpen: string | null;
+  /** The autopilot's stage of the manual session (arming, taking off, live); null when no session. */
+  manualPhase: string | null;
+  /** The latest vision result for the selected Drone, drawn over the camera for a few seconds. */
+  sightings: SightingsView | null;
+  /** Every vision result of the current dispatch by frame ref, for the findings document. */
+  sightingsByFrame: Record<string, Sighting[]>;
+  /** Latest reading per plant sensor, newest first. */
+  plantSignals: PlantSignal[];
+  /** Pending and recent automatic dispatch decisions by id. */
+  pendingDecisions: Record<string, DecisionView>;
+  autonomyMode: AutonomyMode | null;
+  autonomyPolicy: string | null;
 
   setConn(c: ConnectionState): void;
   setFleet(states: HubDroneState[]): void;
@@ -103,6 +136,16 @@ export interface ArgusState {
   setCamera(droneId: string, c: CameraView): void;
   setGimbalPending(v: number | null): void;
   dismissDetection(id: string, how: 'logged' | 'ignored'): void;
+  addDecision(d: Omit<DecisionEntry, 'ts'> & { ts?: number }): void;
+  setDroneChoice(c: DroneChoiceView | null): void;
+  setReport(r: HubIncidentReport): void;
+  setReports(rs: HubIncidentReport[]): void;
+  openFindings(missionId: string | null): void;
+  setManualPhase(p: string | null): void;
+  setSightings(v: SightingsView | null): void;
+  addPlantSignal(p: PlantSignal): void;
+  setDecision(d: DecisionView): void;
+  setAutonomy(mode: AutonomyMode | null, policy: string | null): void;
 }
 
 export const useArgus = create<ArgusState>((set, get) => ({
@@ -136,6 +179,18 @@ export const useArgus = create<ArgusState>((set, get) => ({
   camera: {},
   gimbalPending: null,
   dismissed: {},
+  decisions: [],
+  validations: [],
+  droneChoice: null,
+  reports: {},
+  findingsOpen: null,
+  manualPhase: null,
+  sightings: null,
+  sightingsByFrame: {},
+  plantSignals: [],
+  pendingDecisions: {},
+  autonomyMode: null,
+  autonomyPolicy: null,
 
   setConn: (conn) => set({ conn }),
   setFleet: (states) => {
@@ -163,13 +218,13 @@ export const useArgus = create<ArgusState>((set, get) => ({
   setDetections: (detections) => set({ detections }),
   setMission: (m) => set((st) => ({ missions: { ...st.missions, [m.mission_id]: m } })),
   setMissionSpec: (missionSpec) => set({ missionSpec }),
-  setValidation: (validation) => set({ validation }),
+  setValidation: (validation) => set((st) => ({ validation, validations: [...st.validations.slice(-19), validation] })),
   setTriage: (triage) => set({ triage }),
   setIncident: (incident) => set({ incident }),
   resolveIncident: (resolution) => set((st) => ({ incident: st.incident ? { ...st.incident, resolution } : null })),
   setAgentPlan: (agentPlan) => set({ agentPlan }),
   // a new dispatch starts here: the previous flight's agent trace, plan and verdicts are cleared
-  setPretriage: (pretriage) => set({ pretriage, agentActions: [], inspection: null, missionSpec: null, validation: null, agentPlan: null, incident: null, triage: null, envelope: null, flownRoute: [], hardStop: null }),
+  setPretriage: (pretriage) => set({ pretriage, agentActions: [], inspection: null, missionSpec: null, validation: null, agentPlan: null, incident: null, triage: null, envelope: null, flownRoute: [], hardStop: null, decisions: [], validations: [], droneChoice: null, sightingsByFrame: {} }),
   addAgentAction: (a) => set((st) => ({ agentActions: [...st.agentActions.slice(-39), a] })),
   setInspection: (inspection) => set({ inspection }),
   setEnvelope: (envelope) => set({ envelope }),
@@ -185,6 +240,16 @@ export const useArgus = create<ArgusState>((set, get) => ({
   setCamera: (droneId, c) => set((st) => ({ camera: { ...st.camera, [droneId]: c } })),
   setGimbalPending: (gimbalPending) => set({ gimbalPending }),
   dismissDetection: (id, how) => set((st) => ({ dismissed: { ...st.dismissed, [id]: how } })),
+  addDecision: (d) => set((st) => ({ decisions: [...st.decisions.slice(-199), { ts: d.ts ?? Date.now(), ...d }] })),
+  setDroneChoice: (droneChoice) => set({ droneChoice }),
+  setReport: (r) => set((st) => ({ reports: { ...st.reports, [r.mission_id]: r } })),
+  setReports: (rs) => set((st) => { const reports = { ...st.reports }; for (const r of rs) reports[r.mission_id] = r; return { reports }; }),
+  openFindings: (findingsOpen) => set({ findingsOpen }),
+  setManualPhase: (manualPhase) => set({ manualPhase }),
+  setSightings: (v) => set((st) => ({ sightings: v, sightingsByFrame: v && v.frame_ref ? { ...st.sightingsByFrame, [v.frame_ref]: v.sightings } : st.sightingsByFrame })),
+  addPlantSignal: (p) => set((st) => ({ plantSignals: [p, ...st.plantSignals.filter((x) => x.sensor_id !== p.sensor_id)].slice(0, 20) })),
+  setDecision: (d) => set((st) => ({ pendingDecisions: { ...st.pendingDecisions, [d.id]: d } })),
+  setAutonomy: (autonomyMode, autonomyPolicy) => set({ autonomyMode, autonomyPolicy }),
 }));
 
 /** The Drone the console follows, or the first known one. */
@@ -211,6 +276,11 @@ export const STATUS_LABEL: Record<HubDroneState['status'], string> = {
   idle: 'IDLE', on_mission: 'ON MISSION', manual_control: 'MANUAL', returning: 'RETURNING', offline: 'OFFLINE',
 };
 
+/** The pending automatic decision for a Detection, if the system announced one and it has not been released. */
+export function decisionFor(st: ArgusState, detectionId: string): DecisionView | null {
+  return Object.values(st.pendingDecisions).filter((d) => d.detection_id === detectionId && d.action !== 'released').sort((a, b) => b.ts - a.ts)[0] ?? null;
+}
+
 /** The newest Detection the Operator has not acted on yet: not dismissed, not being dispatched, not already triaged. */
 export function liveDetection(st: ArgusState): HubDetection | null {
   for (let i = st.detections.length - 1; i >= 0; i--) {
@@ -221,4 +291,23 @@ export function liveDetection(st: ArgusState): HubDetection | null {
     return d;
   }
   return null;
+}
+
+/** Where an evidence ref is served: refs already under `evidence/` sit at the root, everything else under /evidence/. */
+export function evidenceUrl(base: string, ref: string): string {
+  return ref.startsWith('evidence/') ? `${base}/${ref}` : `${base}/evidence/${ref}`;
+}
+
+/** The Hub's Drone choice, reproduced from a fleet snapshot: the idle Drone with the most battery. Used until the Hub reports its own pick. */
+export function deriveDroneChoice(fleet: Record<string, HubDroneState>, chosen: string, missionId: string | null): DroneChoiceView {
+  const all = Object.values(fleet).sort((a, b) => a.drone_id.localeCompare(b.drone_id));
+  const candidates = all.map((d) => {
+    const eligible = d.drone_id === chosen || d.status === 'idle';
+    const reason = d.drone_id === chosen ? 'chosen' : d.status === 'offline' ? 'offline' : d.status === 'on_mission' ? 'already on a Mission' : d.status === 'returning' ? 'returning to its pad' : d.status === 'manual_control' ? 'under manual control' : `idle, ${d.battery_pct.toFixed(0)}% battery`;
+    return { drone_id: d.drone_id, status: d.status, battery_pct: d.battery_pct, eligible, reason };
+  });
+  const me = fleet[chosen];
+  const others = candidates.filter((c) => c.drone_id !== chosen && c.eligible);
+  const reason = !me ? 'the Hub chose it' : others.length === 0 ? `the only idle Drone (${me.battery_pct.toFixed(0)}% battery)` : `idle with the most battery (${me.battery_pct.toFixed(0)}%; ${others.map((o) => `${o.drone_id} ${o.battery_pct.toFixed(0)}%`).join(', ')})`;
+  return { mission_id: missionId, drone_id: chosen, reason, candidates, source: 'derived' };
 }

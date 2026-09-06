@@ -1,5 +1,5 @@
 import React from 'react';
-import { SlidersHorizontal, Camera, ScanSearch, Send, Home, Route, Pause, Play, Square, Hand, HandMetal, Car, Package, PackageCheck, Wrench, DoorOpen, RotateCcw, Minus, Plus, Video, ZoomIn, ZoomOut } from 'lucide-react';
+import { SlidersHorizontal, Camera, ScanSearch, Send, Home, Route, Pause, Play, Square, Hand, HandMetal, Car, Package, PackageCheck, Wrench, DoorOpen, RotateCcw, Minus, Plus, Video, ZoomIn, ZoomOut, Flame, CloudFog } from 'lucide-react';
 import { Panel, Button } from '@/components';
 import { useArgus, activeMission, CAMERA_MODES, FOV_MAX, FOV_MIN, fovToZoom, zoomToFov, type CameraMode } from '../store';
 
@@ -33,6 +33,8 @@ const SCENARIOS: { kind: string; label: string; hint: string; icon: React.ReactN
   { kind: 'unattended_object_benign', label: 'Benign object', hint: 'The same crate in the service yard', icon: <PackageCheck size={13} /> },
   { kind: 'authorized_activity', label: 'Authorized activity', hint: 'Marked maintenance vehicle during a declared window', icon: <Wrench size={13} /> },
   { kind: 'perimeter_opening', label: 'Perimeter opening', hint: 'A fence section is opened', icon: <DoorOpen size={13} /> },
+  { kind: 'transformer_fire', label: 'Transformer fire', hint: 'Switchyard transformer bay on fire: smoke and heat; dispatch and escalate', icon: <Flame size={13} /> },
+  { kind: 'steam_release', label: 'Steam release', hint: 'Relief vent lifts: from above it looks like smoke; thermal shows cool water vapour, log only', icon: <CloudFog size={13} /> },
 ];
 
 const Section = ({ children }: { children: React.ReactNode }) => (
@@ -45,6 +47,7 @@ export function OpsPanel({ act }: { act: OpsActions }): React.ReactElement {
   const baselineRef = useArgus((s) => s.baselineRef);
   const dispatching = useArgus((s) => s.dispatching);
   const manualActive = useArgus((s) => s.manualActive);
+  const manualPhase = useArgus((s) => s.manualPhase);
   const mission = useArgus((s) => activeMission(s, selected));
   const drone = useArgus((s) => (s.selected ? s.fleet[s.selected] : undefined));
   const gimbalPending = useArgus((s) => s.gimbalPending);
@@ -53,7 +56,7 @@ export function OpsPanel({ act }: { act: OpsActions }): React.ReactElement {
   const latest = detections[detections.length - 1];
   const dispatchReason = !latest ? 'Detect change first' : dispatching ? `Dispatching ${dispatching}` : `Dispatch ${latest.id} to the Triage Agent`;
   const airborne = (drone?.alt ?? 0) > 0.5;
-  const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 45;
+  const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 8;
   const cam = useArgus((s) => (s.selected ? s.camera[s.selected] : undefined)) ?? { mode: 'rgb' as CameraMode, fov_deg: 70 };
   const zoom = fovToZoom(cam.fov_deg);
   const sz = 'sm' as const;
@@ -117,7 +120,7 @@ export function OpsPanel({ act }: { act: OpsActions }): React.ReactElement {
         ? <Button size={sz} variant="danger-soft" block icon={<HandMetal size={13} />} onClick={run('release', act.manualRelease)} pending={busy === 'release'} title="Hand control back (H): the paused Mission resumes">Release control · H</Button>
         : <Button size={sz} variant="secondary" block icon={<Hand size={13} />} onClick={run('take', act.manualTake)} pending={busy === 'take'} disabled={!selected} title={airborne ? 'Fly the selected Drone yourself' : 'Take control (the Drone lifts to 3 m)'}>Take control</Button>}
       <div className="a-body argus-hint" style={{ fontSize: 11, color: 'var(--text-tertiary)', marginTop: 4 }}>
-        W S forward · A D strafe · Q E down up · ◄ ► yaw. The Safety Validator stops you at the fence and ceiling.
+        {manualActive && manualPhase && manualPhase !== 'live' ? <b style={{ color: 'var(--amber-bright)' }}>{manualPhase[0].toUpperCase() + manualPhase.slice(1)}: sticks are live once airborne. </b> : null}W S forward · back · A D turn · Q E down · up. Arrows aim the camera: ▲ ▼ tilt, ◄ ► zoom. The Safety Validator stops you at the fence and ceiling.
       </div>
 
       <Section>Scenario</Section>

@@ -47,6 +47,14 @@ export class VisionModes {
     this.renderer.setRenderTarget(null);
   }
 
+  /** Build and compile the thermal and lidar pipelines now, so the first mode switch during a flight is not a shader-compile
+   *  stall (about 200 ms on a laptop GPU). Draws one frame of each into `target`; the caller redraws the live mode after. */
+  warmUp(camera: THREE.PerspectiveCamera, target: THREE.WebGLRenderTarget | null): void {
+    const t = performance.now() / 1000;
+    this.thermalPass().render(this.world.scene, camera, target, t);
+    this.lidarPass().render(this.world.scene, camera, target, t);
+  }
+
   /** Thermal mode only: the calibrated per-pixel temperature map of the last render (see ThermalPass.readTemperature). */
   readTemperature(): { width: number; height: number; data: Uint8Array } | null {
     return this._mode === "thermal" && this.thermal ? this.thermal.readTemperature() : null;

@@ -123,7 +123,7 @@ export function SiteMap({ hubBase, onSelect, compact = false, bare = false, anch
       map.addLayer({ id: 'det-fill', type: 'fill', source: 'detections', paint: { 'fill-color': '#f0c04a', 'fill-opacity': 0.25 } });
       map.addLayer({ id: 'det-line', type: 'line', source: 'detections', paint: { 'line-color': '#ffd166', 'line-width': 1.6 } });
       map.addLayer({ id: 'det-label', type: 'symbol', source: 'detections', filter: ['==', ['geometry-type'], 'Point'], layout: { 'text-field': ['get', 'label'], 'text-size': 10, 'text-offset': [0, -1.1], 'text-anchor': 'bottom', 'text-font': ['Open Sans Semibold'] }, paint: { 'text-color': '#ffe08a', 'text-halo-color': '#0b0e12', 'text-halo-width': 1.2 } });
-      map.addLayer({ id: 'props-circle', type: 'circle', source: 'props', paint: { 'circle-radius': 6, 'circle-color': ['match', ['get', 'kind'], 'vehicle', '#ff2d55', 'crate', '#d29922', 'person', '#bc8cff', '#e6edf3'], 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.4 } });
+      map.addLayer({ id: 'props-circle', type: 'circle', source: 'props', paint: { 'circle-radius': 6, 'circle-color': ['match', ['get', 'kind'], 'vehicle', '#ff2d55', 'crate', '#d29922', 'person', '#bc8cff', 'fire', '#ff5a1f', 'steam', '#9fd3ff', '#e6edf3'], 'circle-stroke-color': '#ffffff', 'circle-stroke-width': 1.4 } });
       map.addLayer({ id: 'props-label', type: 'symbol', source: 'props', layout: { 'text-field': ['get', 'label'], 'text-size': 9.5, 'text-offset': [0, 1.2], 'text-anchor': 'top', 'text-font': ['Open Sans Semibold'] }, paint: { 'text-color': '#ffd7dd', 'text-halo-color': '#0b0e12', 'text-halo-width': 1.2 } });
       map.addLayer({ id: 'tracks-line', type: 'line', source: 'tracks', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['get', 'color'], 'line-width': ['case', ['boolean', ['get', 'selected'], false], 3, 1.6], 'line-opacity': 0.85 } });
       map.addLayer({ id: 'zone-labels', type: 'symbol', source: 'labels', layout: { 'text-field': ['get', 'label'], 'text-size': 10, 'text-letter-spacing': 0.12, 'text-transform': 'uppercase', 'text-font': ['Open Sans Semibold'], 'text-anchor': ['get', 'anchor'], 'text-offset': ['get', 'offset'] }, paint: { 'text-color': ['get', 'color'], 'text-halo-color': '#0b0e12', 'text-halo-width': 1.3, 'text-opacity': 0.9 } });
@@ -198,7 +198,7 @@ export function SiteMap({ hubBase, onSelect, compact = false, bare = false, anch
   useEffect(() => { if (ready.current) applyFences(openFences); }, [openFences]);   // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     const a = anchorRef.current; if (!ready.current || !a) return;
-    src('props')?.setData({ type: 'FeatureCollection', features: props.map((p) => ({ type: 'Feature', properties: { id: p.id, kind: p.kind, label: p.kind === 'vehicle' ? 'vehicle' : p.kind }, geometry: { type: 'Point', coordinates: enuToLonLat(a, p.x, p.y) } })) } as any);
+    src('props')?.setData({ type: 'FeatureCollection', features: props.map((p) => ({ type: 'Feature', properties: { id: p.id, kind: p.kind, label: p.kind === 'steam' ? 'steam release' : p.kind }, geometry: { type: 'Point', coordinates: enuToLonLat(a, p.x, p.y) } })) } as any);
   }, [props]);
   useEffect(() => {
     if (!ready.current) return;

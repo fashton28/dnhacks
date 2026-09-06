@@ -98,7 +98,6 @@ export class SiteScene {
   private models = new Map<string, Promise<THREE.Group>>();
   private animated: { update(t: number): void }[] = [];
   private composer: EffectComposer | null = null;
-  private frameCounter = 0;
   private composerSize = new THREE.Vector2();
   private woodOpts!: WoodlandOptions;
 
@@ -430,8 +429,7 @@ export class SiteScene {
     // Shadows are static: the sun does not move and Drones do not cast them (see droneModel). Refreshing the map every other
     // frame made frame cost alternate, which reads as judder; now it refreshes every few seconds or when the Scene changes.
     renderer.shadowMap.autoUpdate = false;
-    renderer.shadowMap.needsUpdate = this.shadowsDirty || (this.frameCounter++ % 240) === 0;
-    this.shadowsDirty = false;
+    renderer.shadowMap.needsUpdate = this.shadowMapNeedsUpdate(renderer);
     this.composer.render();
   }
 
@@ -441,6 +439,7 @@ export class SiteScene {
       this.models.set(id, new Promise((resolve, reject) => {
         gltfLoader.load(`${ASSETS}/models/${id}/${id}_1k.gltf`, (g) => {
           g.scene.traverse((o) => { if ((o as THREE.Mesh).isMesh) { o.castShadow = o.receiveShadow = true; } });
+          this.shadowsDirty = true;
           resolve(g.scene);
         }, undefined, reject);
       }));
@@ -535,8 +534,17 @@ export class SiteScene {
    *  aircraft and its camera jump once per sample, which reads as lag however fast the page renders. */
   smoothing = true;
   private lastAnimMs = 0;
-  /** Set when static geometry changed (Scene props, fences) so the next frame refreshes the shadow map. */
-  shadowsDirty = true;
+  /** Static geometry changed (Scene props, fences, a model finished loading): every renderer refreshes its shadow map once. */
+  set shadowsDirty(v: boolean) { if (v) this.shadowEpoch++; }
+  private shadowEpoch = 1;
+  private shadowSeen = new WeakMap<THREE.WebGLRenderer, number>();
+  /** True once per renderer per Scene change. The sun is fixed and Drones cast no shadows, so nothing else can move a shadow;
+   *  a periodic refresh only added a 2048^2 depth pass (and a long frame) every few seconds. */
+  shadowMapNeedsUpdate(renderer: THREE.WebGLRenderer): boolean {
+    if (this.shadowSeen.get(renderer) === this.shadowEpoch) return false;
+    this.shadowSeen.set(renderer, this.shadowEpoch);
+    return true;
+  }
   private sizeScratch = new THREE.Vector2();
 
   updateDrone(s: DroneState): void {
@@ -579,7 +587,7 @@ export class SiteScene {
     const dt = this.lastAnimMs ? Math.min(0.1, (nowMs - this.lastAnimMs) / 1000) : 0;
     this.lastAnimMs = nowMs;
     if (!this.smoothing || dt <= 0) return;
-    const kPos = 1 - Math.exp(-dt / 0.12), kHdg = 1 - Math.exp(-dt / 0.15), kGim = 1 - Math.exp(-dt / 0.2), kAtt = 1 - Math.exp(-dt / 0.1);
+    const kPos = 1 - Math.exp(-dt / 0.12), kHdg = 1 - Math.exp(-dt / 0.06), kGim = 1 - Math.exp(-dt / 0.2), kAtt = 1 - Math.exp(-dt / 0.1);  // heading follows fast so a turn under manual control shows without lag
     for (const g of this.drones.values()) {
       const p = (g.userData as any).track as PoseTrack | undefined;
       if (!p) continue;

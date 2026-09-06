@@ -53,10 +53,10 @@ controls.update();
 
 // ---- Drone view (offscreen renderer with a sensor post-pass; also serves Renderer-role captures) ----
 const droneCanvas = $<HTMLCanvasElement>("drone-canvas");
-const droneRenderer = new THREE.WebGLRenderer({ canvas: droneCanvas, antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
+// No preserveDrawingBuffer: evidence frames and the stream read the canvas in the same task that rendered it, so the buffer is still intact.
+const droneRenderer = new THREE.WebGLRenderer({ canvas: droneCanvas, antialias: true, preserveDrawingBuffer: false, powerPreference: "high-performance" });
 droneRenderer.shadowMap.enabled = true;
-droneRenderer.shadowMap.autoUpdate = false;  // static sun: refreshed on a slow cadence in renderDroneView, never per frame
-let droneShadowFrame = 0;
+droneRenderer.shadowMap.autoUpdate = false;  // static sun: the map is refreshed once per Scene change (see SiteScene.shadowMapNeedsUpdate), never per frame
 droneRenderer.toneMapping = THREE.ACESFilmicToneMapping;
 droneRenderer.outputColorSpace = THREE.SRGBColorSpace;
 droneRenderer.setPixelRatio(1);
@@ -133,9 +133,12 @@ function applyCamera(droneId: string): void {
   if (vision.mode !== st.mode) vision.mode = st.mode;
   if (Math.abs(droneCam.fov - st.fov_deg) > 0.01) { droneCam.fov = st.fov_deg; droneCam.updateProjectionMatrix(); }
 }
+let visionWarm = false;
 function renderDroneView(s: DroneState): void {
   applyCamera(s.drone_id);
-  droneRenderer.shadowMap.needsUpdate = world.shadowsDirty || (droneShadowFrame++ % 240) === 0;
+  if (!visionWarm) { visionWarm = true; vision.warmUp(droneCam, droneTarget); }  // once, at the first frame: compile every vision mode now, not mid-flight
+  droneRenderer.shadowMap.needsUpdate = world.shadowMapNeedsUpdate(droneRenderer);
+  applyGimbalGoal(s);
   world.aimDroneCamera(droneCam, s);
   const g = world.drones.get(s.drone_id);
   if (g) g.visible = false;
@@ -401,7 +404,8 @@ function sendGimbal(pitch: number): void {
     gimbalTimer = null;
     const p = gimbalPending; gimbalPending = null;
     if (p !== null && selected) api(`/drones/${selected}/command`, { type: "look_at", pitch_deg: p }).catch((err) => log(String(err), "bad"));
-  }, 100);
+  }, 50);  // 20 Hz while a key is held
+  gimbalGoal = { id: selected, deg: pitch, until: performance.now() + 1500 };
 }
 gimbalInput.addEventListener("pointerdown", () => { gimbalDragging = true; });
 gimbalInput.addEventListener("pointerup", () => { gimbalDragging = false; });
@@ -414,6 +418,32 @@ function syncGimbal(s: DroneState): void {
 function nudgeGimbal(delta: number): void {
   const v = Math.max(-30, Math.min(90, Number(gimbalInput.value) + delta));
   gimbalInput.value = String(v); $("gimbal-value").textContent = `${v}°`; sendGimbal(v);
+}
+// ---- Optimistic camera targets: the dashboard posts argus-gimbal / argus-camera on the key press (its own keys set the same
+// goal), so the picture moves this frame; telemetry and the Hub's camera event take over once they catch up. ----
+let gimbalGoal: { id: string; deg: number; until: number } | null = null;
+let gimbalGoalLast = 0;
+window.addEventListener("message", (e) => {
+  const m = e.data;
+  if (!m || typeof m.drone_id !== "string") return;
+  if (m.type === "argus-gimbal" && typeof m.pitch_deg === "number") {
+    const deg = Math.max(-30, Math.min(90, m.pitch_deg));
+    gimbalGoal = { id: m.drone_id, deg, until: performance.now() + 1500 };
+    if (m.drone_id === selected && !gimbalDragging) { gimbalInput.value = String(Math.round(deg)); $("gimbal-value").textContent = `${Math.round(deg)}°`; }
+  } else if (m.type === "argus-camera" && typeof m.fov_deg === "number") {
+    const cur = cameraSettings.get(m.drone_id) ?? { mode: "rgb", fov_deg: 70 };
+    cameraSettings.set(m.drone_id, { ...cur, fov_deg: Math.max(20, Math.min(110, m.fov_deg)) });
+  }
+});
+/** Steer the drawn gimbal toward the optimistic goal with a 60 ms time constant (a 20 Hz stream of 4-degree steps renders as
+ *  one sweep) until telemetry agrees with it or the goal goes stale. Runs after the World's own per-frame smoothing. */
+function applyGimbalGoal(s: DroneState): void {
+  const goal = gimbalGoal; if (!goal || goal.id !== s.drone_id) return;
+  const p = world.poseOf(s.drone_id); const now = performance.now();
+  if (!p || now > goal.until || Math.abs(s.gimbal_pitch_deg - goal.deg) < 0.5) { gimbalGoal = null; gimbalGoalLast = 0; return; }
+  const dt = gimbalGoalLast ? Math.min(0.1, (now - gimbalGoalLast) / 1000) : 0; gimbalGoalLast = now;
+  p.gimbal += (goal.deg - p.gimbal) * (1 - Math.exp(-dt / 0.06));
+  p.sgimbal = p.gimbal;  // keep the World's smoothing from pulling it back toward the stale telemetry sample
 }
 
 window.addEventListener("keydown", (e) => {
@@ -442,12 +472,12 @@ window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 // heading every tick, so W plus A or D flies a curve and the airframe banks into it.
 const KEY_SPEED = 5.0, KEY_CLIMB = 2.5, KEY_YAW_RATE = 90;  // same feel as the dashboard; the autopilot ramps to it in about two seconds
 let manualPhase = "live";
-let camAccum = 0;
 setInterval(() => {
-  // camera arrows sweep while held: 40 deg/s of tilt, 3x zoom per second, sent in 5-degree / half-stop steps
+  // camera arrows sweep while held: 80 deg/s of tilt, 3x zoom per second, in 4-degree / 0.15x steps at 20 Hz
   const tilt = (keys.has("arrowdown") ? 1 : 0) - (keys.has("arrowup") ? 1 : 0);
   const zoomDir = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
-  if (tilt || zoomDir) { camAccum += 0.05; if (camAccum >= 0.125) { camAccum = 0; if (tilt) nudgeGimbal(tilt * 5); if (zoomDir) nudgeZoom(zoomDir * 0.375); } } else camAccum = 0;
+  if (tilt) nudgeGimbal(tilt * 4);
+  if (zoomDir) nudgeZoom(zoomDir * 0.15, true);
   if (!manual || !manualDrone) return;
   const s = drones.get(manualDrone); if (!s) return;
   const fwd = ((keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0)) * KEY_SPEED;
@@ -564,14 +594,14 @@ function reflectVision(mode: "rgb" | "thermal" | "lidar"): void {
   if (selected && drones.has(selected)) renderHud($("hud"), drones.get(selected), (drones.get(selected)!.alt > 0.3), mode);
 }
 /** Camera zoom in steps: field of view 110 (1x) down to 20 degrees (5.5x), brokered by the Hub so every view follows. */
-function nudgeZoom(deltaZoom: number): void {
+function nudgeZoom(deltaZoom: number, quiet = false): void {
   if (!selected) return;
   const cur = cameraSettings.get(selected) ?? { mode: "rgb", fov_deg: 70 };
   const zoom = Math.max(1, Math.min(5.5, 110 / cur.fov_deg + deltaZoom));
   const fov = Math.round(110 / zoom);
   cameraSettings.set(selected, { ...cur, fov_deg: fov });
   api(`/drones/${selected}/camera`, { fov_deg: fov }).catch((err) => log(String(err), "bad"));
-  log(`Camera zoom ${zoom.toFixed(1)}x`);
+  if (!quiet) log(`Camera zoom ${zoom.toFixed(1)}x`);
 }
 function setVision(mode: "rgb" | "thermal" | "lidar"): void {
   if (selected) {
@@ -645,11 +675,12 @@ new ResizeObserver((entries) => { for (const e of entries) { layout.droneW = e.c
 let visible = !document.hidden;
 document.addEventListener("visibilitychange", () => { visible = !document.hidden; });
 new IntersectionObserver((entries) => { for (const e of entries) visible = e.isIntersecting && !document.hidden; }).observe(isEmbedDrone ? droneCanvas : worldCanvas);
+let sizedW = 0, sizedH = 0, sizedRatio = 0;
 function resize(): void {
   const w = Math.floor(layout.worldW), h = Math.floor(layout.worldH);
-  const dpr = pixelRatio;
-  if (w > 0 && h > 0 && (worldCanvas.width !== Math.floor(w * dpr) || worldCanvas.height !== Math.floor(h * dpr))) {
-    renderer.setSize(w, h, false); worldCam.aspect = w / h; worldCam.updateProjectionMatrix(); overview.resize();
+  if (w > 0 && h > 0 && (w !== sizedW || h !== sizedH || pixelRatio !== sizedRatio)) {
+    sizedW = w; sizedH = h; sizedRatio = pixelRatio;
+    renderer.setPixelRatio(pixelRatio); renderer.setSize(w, h, false); worldCam.aspect = w / h; worldCam.updateProjectionMatrix(); overview.resize();
   }
 }
 // ---- perf instrumentation: per-stage ms averaged over the last second, on window.__argusPerf ----
@@ -705,7 +736,7 @@ function loop(now: number): void {
   if (now - lastFps > 1000) {
     $("fps").textContent = `${frames} fps`;
     // adaptive resolution: step the pixel ratio down when we cannot hold ~50 fps, back up when there is headroom
-    if (!document.hidden && now - lastRatioChange > 3000) {
+    if (visible && !isEmbedDrone && now - lastRatioChange > 3000) {
       if (frames < 45 && pixelRatio > 1.0) { pixelRatio = Math.max(1.0, +(pixelRatio - 0.25).toFixed(2)); lastRatioChange = now; }
       else if (frames > 58 && pixelRatio < MAX_RATIO) { pixelRatio = Math.min(MAX_RATIO, +(pixelRatio + 0.25).toFixed(2)); lastRatioChange = now; }
       $("fps").title = `render scale ${pixelRatio}x`;

@@ -20,7 +20,7 @@ import type {
  *   autonomy.plan_approved -> VerificationMessage 'pass'
  *   triage + incident      -> IncidentReportMessage
  *   sendCommand            -> Hub REST (see COMMANDS below)
- *   setManualInput         -> POST /drones/{id}/manual/command at 10 Hz
+ *   setManualInput         -> POST /drones/{id}/manual/command at 20 Hz, plus immediately on every stick change
  * ========================================================================== */
 import type {
   Anomaly,
@@ -62,6 +62,9 @@ export interface HubDroneState {
   status: 'idle' | 'on_mission' | 'manual_control' | 'returning' | 'offline';
   mission_id: string | null;
   gimbal_pitch_deg: number;
+  /** Autopilot attitude, when the Bridge reports it (newer Hubs); absent means unknown, not level. */
+  roll_deg?: number;
+  pitch_deg?: number;
   armed: boolean;
   mode: string;
   message: string;
@@ -87,6 +90,18 @@ export interface HubMission {
   plan?: { waypoints: { lat: number; lon: number; alt: number }[]; pattern: string; est_duration_s: number; est_battery_pct: number };
   /** Evidence frame refs captured so far. */
   evidence?: string[];
+}
+/** One frame plus the vision model's reading of it, as the Hub stores it on an IncidentReport. Capture context is optional (newer Hubs). */
+export interface HubObservation {
+  mission_id: string; drone_id: string; frame_ref: string; waypoint_index: number; captured_at: string; description: string; salient: boolean;
+  camera_mode?: string; zoom?: number; lat?: number; lon?: number; alt_m?: number; looking_for?: string;
+  /** Peak temperature in a thermal frame, when the capture was thermal. */
+  thermal_max_c?: number;
+}
+/** The Hub's stored IncidentReport (GET /incidents). The optional headline fields arrive on newer Hubs; older ones carry them only inside `narrative`. */
+export interface HubIncidentReport {
+  mission_id: string; verdict: 'false_alarm' | 'log' | 'escalate'; narrative: string; evidence_refs: string[]; observations: HubObservation[]; created_at: string | null;
+  detection_id?: string; drone_id?: string; title?: string; severity?: string; recommended_action?: string; threat_assessment?: string; summary?: string; flown?: boolean; attempts?: number;
 }
 export interface AgentWaypoint { lat: number; lon: number; alt_m: number; action: string; duration_s?: number; purpose?: string }
 export interface AgentPlan { anomaly_id: string; priority: string; reasoning: string; waypoints: AgentWaypoint[] }
@@ -117,6 +132,13 @@ const sub = <T,>(ls: Listeners<T>) => (cb: (v: T) => void): Unsubscribe => { ls.
 
 const KNOWN_MODES = new Set<string>(MODES);
 
+/* Manual Control stick scale. Full stick maps to what the SITL airframe will actually fly (sim/ardupilot/params.py:
+ * WPNAV_SPEED 500 cm/s, WPNAV_SPEED_UP 250, WPNAV_SPEED_DN 150); asking for more only saturates ArduPilot's own limit.
+ * The shared DEFAULTS (2 m/s) are the person-following companion's caps and far too timid for a site patrol. */
+const MANUAL_SPEED_MPS = 5.0;
+const MANUAL_CLIMB_MPS = 2.5;
+const MANUAL_YAW_DPS = 90;
+
 export class HubDataProvider implements MissionDataSource {
   readonly kind = 'hub' as const;
   private http = 'http://127.0.0.1:8000';
@@ -143,6 +165,9 @@ export class HubDataProvider implements MissionDataSource {
   private manualInput: ManualInput = { throttle: 0, yaw: 0, pitch: 0, roll: 0 };
   private manualTimer: ReturnType<typeof setInterval> | null = null;
   private lastClampRule: string | null = null;
+  /** What the autopilot is doing with the manual session: arming, taking off, or live (sticks obeyed). */
+  private manualPhase: string | null = null;
+  private lPhase: Listeners<string | null> = new Set();
 
   private lConn: Listeners<ConnectionState> = new Set();
   private lTel: Listeners<Telemetry> = new Set();
@@ -182,6 +207,8 @@ export class HubDataProvider implements MissionDataSource {
   }
 
   onConnectionChange = sub(this.lConn);
+  onManualPhase = sub(this.lPhase);
+  getManualPhase(): string | null { return this.manualPhase; }
   onTelemetry = sub(this.lTel);
   onTracking = sub(this.lTrack);
   onStatusText = sub(this.lStatus);
@@ -337,7 +364,14 @@ export class HubDataProvider implements MissionDataSource {
   }
 
   setManualInput(input: ManualInput): void {
+    const prev = this.manualInput;
     this.manualInput = input;
+    // a stick change goes out now rather than on the next 50 ms tick; the tick restarts so the loop keeps its cadence
+    if (this.manualActive && (input.pitch !== prev.pitch || input.roll !== prev.roll || input.throttle !== prev.throttle || input.yaw !== prev.yaw)) {
+      if (this.manualTimer) { clearInterval(this.manualTimer); this.manualTimer = null; }
+      this.startManualLoop();
+      void this.pushManual();
+    }
   }
 
   /* ---- internals: socket --------------------------------------------------------- */
@@ -531,12 +565,13 @@ export class HubDataProvider implements MissionDataSource {
   /* ---- internals: manual loop ------------------------------------------------------ */
   private startManualLoop(): void {
     if (this.manualTimer) return;
-    this.manualTimer = setInterval(() => void this.pushManual(), 100);
+    this.manualTimer = setInterval(() => void this.pushManual(), 50);
   }
   private stopManualLoop(): void {
     this.manualActive = false;
     if (this.manualTimer) { clearInterval(this.manualTimer); this.manualTimer = null; }
     this.lastClampRule = null;
+    if (this.manualPhase !== null) { this.manualPhase = null; emit(this.lPhase, null); }
   }
   private async pushManual(): Promise<void> {
     if (!this.manualActive) return;
@@ -544,14 +579,16 @@ export class HubDataProvider implements MissionDataSource {
     if (!s) return;
     const { throttle, yaw, pitch, roll } = this.manualInput;
     const h = (s.heading_deg * Math.PI) / 180;
-    const fwd = pitch * DEFAULTS.maxSpeed;
-    const right = roll * DEFAULTS.maxSpeed;
+    const fwd = pitch * MANUAL_SPEED_MPS;
+    const right = roll * MANUAL_SPEED_MPS;
     const vx = fwd * Math.cos(h) - right * Math.sin(h);   // north
     const vy = fwd * Math.sin(h) + right * Math.cos(h);   // east
     const r = await this.post(`/drones/${this.vehicleId}/manual/command`, {
-      vx, vy, vz: -throttle * DEFAULTS.maxClimbRate, yaw_rate_dps: yaw * DEFAULTS.maxYawRate,
+      vx, vy, vz: -throttle * MANUAL_CLIMB_MPS, yaw_rate_dps: yaw * MANUAL_YAW_DPS,
     });
-    if (!r.ok && r.status === 409) { this.stopManualLoop(); this.status(this.vehicleId, 'warning', 'Manual Control session ended by the Hub'); }
+    if (!r.ok && r.status === 409) { this.stopManualLoop(); this.status(this.vehicleId, 'warning', 'Manual Control session ended by the Hub'); return; }
+    const phase = r.ok ? (r.json as { phase?: string } | null)?.phase ?? null : null;
+    if (phase && phase !== this.manualPhase) { this.manualPhase = phase; emit(this.lPhase, phase); }
   }
 
   /* ---- internals: REST ---------------------------------------------------------------- */
@@ -597,7 +634,7 @@ export class HubDataProvider implements MissionDataSource {
       gpsHealth: { fix: 0, sats: 0, hdop: 0 },
       failsafeState: refused ? 'refuse' : s.status === 'returning' ? 'rtl' : 'none',
       failsafeReason: refused ? s.message : '',
-      attitude: { roll: 0, pitch: 0, yaw: s.heading_deg },
+      attitude: { roll: s.roll_deg ?? 0, pitch: s.pitch_deg ?? 0, yaw: s.heading_deg },
       position: { lat: s.lat, lon: s.lon, relAlt: s.alt, absAlt: s.alt },
       velocity: { groundspeed: gs, verticalSpeed: -s.velocity_ned.vz },
       heading: s.heading_deg, battery,

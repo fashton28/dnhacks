@@ -1,5 +1,5 @@
 import React from 'react';
-import { ShieldCheck } from 'lucide-react';
+import { ShieldCheck, FileText } from 'lucide-react';
 import { useArgus, activeMission, CAMERA_MODES, fovToZoom, type CameraMode } from '../store';
 import { DroneCard } from './FleetPanel';
 import { ArgusMark } from '../Brand';
@@ -10,6 +10,8 @@ export function BottomStrip({ onSelect, onCameraMode }: { onSelect: (id: string)
   const selected = useArgus((s) => s.selected);
   const mission = useArgus((s) => activeMission(s, s.selected));
   const validation = useArgus((s) => s.validation);
+  const lastReport = useArgus((s) => { const m = activeMission(s, s.selected); const id = m?.mission_id ?? s.incident?.mission_id ?? null; return id && s.reports[id] ? id : null; });
+  const openFindings = useArgus((s) => s.openFindings);
   const clamp = useArgus((s) => s.clamp);
   const cam = useArgus((s) => (s.selected ? s.camera[s.selected] : undefined)) ?? { mode: 'rgb' as CameraMode, fov_deg: 70 };
   const drone = useArgus((s) => (s.selected ? s.fleet[s.selected] : undefined));
@@ -37,6 +39,7 @@ export function BottomStrip({ onSelect, onCameraMode }: { onSelect: (id: string)
           <span className="a-label">Mission</span>
           {mission && <span className="a-id" style={{ color: 'var(--text-secondary)', fontWeight: 500 }}>{mission.mission_id}</span>}
           <span style={{ flex: 1 }} />
+          {lastReport && <button className="a-icobtn" style={{ width: 'auto', padding: '0 8px', gap: 5, height: 22 }} onClick={() => openFindings(lastReport)} title="Open the findings document"><FileText size={12} /><span className="a-label" style={{ color: 'inherit' }}>Findings</span></button>}
           {mission && <span className="a-chip" style={{ color: mission.phase === 'paused' ? 'var(--amber-bright)' : 'var(--green-bright)' }}>{mission.phase}</span>}
         </div>
         {mission ? (

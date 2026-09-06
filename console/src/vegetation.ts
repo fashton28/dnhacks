@@ -24,26 +24,32 @@ function jitter(geo: THREE.BufferGeometry, amount: number, seed: number): THREE.
 
 const TRUNK = new THREE.Color(0x4b3826);
 
-/** Pine: trunk plus four stacked, jittered cones. About 200 triangles. */
-export function pineGeometry(seed = 1): THREE.BufferGeometry {
+/** Detail level: "near" trees stand within the shadowed ring around the Site; "far" ones are hillside cover a few pixels tall,
+ *  drawn with the same silhouette from fewer triangles (the far set is ~90% of the woodland and was 4.2M triangles a frame). */
+export type TreeLod = "near" | "far";
+
+/** Pine: trunk plus four stacked, jittered cones. 96 triangles near, 48 far. */
+export function pineGeometry(seed = 1, lod: TreeLod = "near"): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
-  parts.push(colored(new THREE.CylinderGeometry(0.22, 0.38, 4.2, 6).translate(0, 2.1, 0), TRUNK));
+  const seg = lod === "near" ? 9 : 5;
+  parts.push(colored(new THREE.CylinderGeometry(0.22, 0.38, 4.2, lod === "near" ? 6 : 4).translate(0, 2.1, 0), TRUNK));
   const green = new THREE.Color(0x3c6b31);
   const tiers = [[3.3, 5.5, 4.2], [2.6, 4.8, 7.4], [1.9, 4.0, 10.2], [1.1, 3.2, 12.6]];
-  tiers.forEach(([r, h, y], i) => parts.push(colored(jitter(new THREE.ConeGeometry(r, h, 9, 1).translate(0, y, 0), 0.35, seed + i), green.clone().offsetHSL(0, 0, (i - 1.5) * 0.02))));
+  tiers.forEach(([r, h, y], i) => parts.push(colored(jitter(new THREE.ConeGeometry(r, h, seg, 1).translate(0, y, 0), 0.35, seed + i), green.clone().offsetHSL(0, 0, (i - 1.5) * 0.02))));
   return mergeGeometries(parts, false)!;
 }
 
-/** Deciduous: trunk plus a cluster of low-poly spheres. About 200 triangles. */
-export function deciduousGeometry(seed = 2): THREE.BufferGeometry {
+/** Deciduous: trunk plus a cluster of low-poly spheres. 504 triangles near, 88 far (four detail-0 icosahedra). */
+export function deciduousGeometry(seed = 2, lod: TreeLod = "near"): THREE.BufferGeometry {
   const parts: THREE.BufferGeometry[] = [];
-  parts.push(colored(new THREE.CylinderGeometry(0.25, 0.42, 3.6, 6).translate(0, 1.8, 0), TRUNK));
+  parts.push(colored(new THREE.CylinderGeometry(0.25, 0.42, 3.6, lod === "near" ? 6 : 4).translate(0, 1.8, 0), TRUNK));
   let s = seed;
   const rnd = () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff; };
   const green = new THREE.Color(0x3f6a2a);
-  for (let i = 0; i < 6; i++) {
-    const r = 1.6 + rnd() * 1.2;
-    const g = new THREE.IcosahedronGeometry(r, 1).translate((rnd() - 0.5) * 2.4, 4.4 + rnd() * 2.2, (rnd() - 0.5) * 2.4);
+  const blobs = lod === "near" ? 6 : 4;
+  for (let i = 0; i < blobs; i++) {
+    const r = (1.6 + rnd() * 1.2) * (lod === "near" ? 1 : 1.15);
+    const g = new THREE.IcosahedronGeometry(r, lod === "near" ? 1 : 0).translate((rnd() - 0.5) * 2.4, 4.4 + rnd() * 2.2, (rnd() - 0.5) * 2.4);
     parts.push(colored(jitter(g, 0.3, seed + i), green.clone().offsetHSL((rnd() - 0.5) * 0.03, 0, (rnd() - 0.5) * 0.08)));
   }
   return mergeGeometries(parts, false)!;
@@ -107,14 +113,14 @@ export function placeTrees(o: WoodlandOptions): TreePlacement[] {
 export function buildWoodland(placements: TreePlacement[], shadowsNear: number): THREE.Group {
   const group = new THREE.Group();
   group.name = "woodland";
-  const geos = [pineGeometry(), deciduousGeometry(), saplingGeometry()];
+  const geos: Record<TreeLod, THREE.BufferGeometry[]> = { near: [pineGeometry(), deciduousGeometry(), saplingGeometry()], far: [pineGeometry(1, "far"), deciduousGeometry(2, "far"), saplingGeometry()] };
   const mat = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95, metalness: 0 });
-  // split each species into a near set (casts shadows) and a far set (cheap)
-  for (let sp = 0; sp < geos.length; sp++) {
+  // split each species into a near set (full detail, casts shadows) and a far set (low detail, no shadows)
+  for (let sp = 0; sp < 3; sp++) {
     for (const near of [true, false]) {
       const items = placements.filter((p) => p.species === sp && (Math.hypot(p.x, p.y) < shadowsNear) === near);
       if (!items.length) continue;
-      const mesh = new THREE.InstancedMesh(geos[sp], mat, items.length);
+      const mesh = new THREE.InstancedMesh(geos[near ? "near" : "far"][sp], mat, items.length);
       const m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), up = new THREE.Vector3(0, 1, 0);
       items.forEach((p, i) => {
         q.setFromAxisAngle(up, p.rot);

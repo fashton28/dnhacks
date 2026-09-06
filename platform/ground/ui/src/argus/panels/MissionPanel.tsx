@@ -155,6 +155,8 @@ export function ValidatorPanel(): React.ReactElement {
 export function ReportPanel({ onResolve }: { onResolve: (r: 'escalated' | 'dismissed') => void }): React.ReactElement {
   const inc = useArgus((s) => s.incident);
   const triage = useArgus((s) => s.triage);
+  const openFindings = useArgus((s) => s.openFindings);
+  const hasReport = useArgus((s) => !!(s.incident && (s.reports[s.incident.mission_id] || s.decisions.length)));
   const tone = !inc ? 'neutral' : inc.severity === 'high' || inc.severity === 'critical' ? 'danger' : inc.severity === 'medium' ? 'caution' : 'nominal';
   return (
     <Panel title="Incident Report" icon={<FileText size={13} />} status={inc ? <Badge tone={tone} mono>{inc.severity.toUpperCase()}</Badge> : undefined} pad scroll>
@@ -170,6 +172,7 @@ export function ReportPanel({ onResolve }: { onResolve: (r: 'escalated' | 'dismi
             <div style={{ display: 'flex', gap: 6 }}>
               <Button size="sm" variant="danger" onClick={() => onResolve('escalated')}>Escalate</Button>
               <Button size="sm" onClick={() => onResolve('dismissed')}>Dismiss</Button>
+              {hasReport && <Button size="sm" variant="ghost" onClick={() => openFindings(inc.mission_id)} title="The full document: frames, decisions, safety record">Findings</Button>}
             </div>
           )}
         </div>

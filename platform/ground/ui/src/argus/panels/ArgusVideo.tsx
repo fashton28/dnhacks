@@ -3,6 +3,10 @@ import { useArgus, fovToZoom } from '../store';
 import { ArgusMark } from '../Brand';
 import { GIMBAL_MAX, GIMBAL_MIN } from './OpsPanel';
 import { hubHttpBase } from '../../dataSource/hubConfig';
+import { DroneSound } from '@/lib/droneSound';
+import { Volume2, VolumeX } from 'lucide-react';
+
+const SOUND_KEY = 'argus.gcs.sound';
 
 const TAPE_H = 420;
 const fmtHeading = (deg: number): string => {
@@ -15,11 +19,24 @@ const fmtHeading = (deg: number): string => {
  * with avionics over it: heading strip, altitude and speed, an altitude tape carrying the Safety Validator's ceiling,
  * reticle, gimbal ladder and link state.
  */
+/** The live camera iframe, once mounted: the dashboard posts optimistic gimbal and zoom targets to it so the picture
+ *  moves on the key press instead of a Hub round trip later. */
+let cameraFrame: HTMLIFrameElement | null = null;
+export function postToCameraFrame(message: Record<string, unknown>): void {
+  cameraFrame?.contentWindow?.postMessage(message, '*');
+}
+
 export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string; lastFrameTs: number; onGimbal: (pitchDeg: number) => void }): React.ReactElement {
   const selected = useArgus((s) => s.selected);
   const drone = useArgus((s) => (s.selected ? s.fleet[s.selected] : undefined));
   const tel = useArgus((s) => s.tel);
   const gimbalPending = useArgus((s) => s.gimbalPending);
+  const manualActive = useArgus((s) => s.manualActive);
+  const manualPhase = useArgus((s) => s.manualPhase);
+  const sightings = useArgus((s) => s.sightings);
+  const boxHost = React.useRef<HTMLDivElement | null>(null);
+  const [boxSize, setBoxSize] = React.useState({ w: 0, h: 0 });
+  React.useEffect(() => { const el = boxHost.current; if (!el) return; const ro = new ResizeObserver(() => setBoxSize({ w: el.clientWidth, h: el.clientHeight })); ro.observe(el); setBoxSize({ w: el.clientWidth, h: el.clientHeight }); return () => ro.disconnect(); }, []);
   const ceiling = useArgus((s) => s.envelope?.ceiling_m ?? s.missionSpec?.max_altitude_m ?? null);
   const [now, setNow] = React.useState(Date.now());
   React.useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
@@ -35,6 +52,17 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
   const liveUrl = firstDrone.current ? `${hubHttpBase()}/console/?embed=drone&drone=${encodeURIComponent(firstDrone.current)}` : '';
   // The Console echoes every selection it applies; keep asking until the camera confirms it follows the dashboard's selection.
   const [cameraSelected, setCameraSelected] = React.useState<string | null>(null);
+  // rotor sound: lives only while this view is mounted, so the Operator hears the aircraft only from its own perspective
+  const sound = React.useRef<DroneSound | null>(null);
+  const [muted, setMuted] = React.useState<boolean>(() => { try { return localStorage.getItem(SOUND_KEY) === 'off'; } catch { return false; } });
+  const [audioLive, setAudioLive] = React.useState(false);
+  React.useEffect(() => {
+    const ds = new DroneSound(); ds.start(); ds.setMuted(muted); sound.current = ds;
+    const id = setInterval(() => setAudioLive(ds.running), 500);
+    return () => { clearInterval(id); ds.stop(); sound.current = null; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+  React.useEffect(() => { sound.current?.setMuted(muted); try { localStorage.setItem(SOUND_KEY, muted ? 'off' : 'on'); } catch { /* private mode */ } }, [muted]);
   React.useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       const m = e.data as { type?: string; drone_id?: unknown } | null;
@@ -51,7 +79,7 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
     return () => clearInterval(t);
   }, [selected, cameraSelected]);
 
-  const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 45;
+  const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 8;
   const cam = useArgus((s) => (s.selected ? s.camera[s.selected] : undefined)) ?? { mode: 'rgb', fov_deg: 70 };
   const zoom = fovToZoom(cam.fov_deg);
   const frac = (gimbal - GIMBAL_MIN) / (GIMBAL_MAX - GIMBAL_MIN);
@@ -59,6 +87,7 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
   const speed = tel?.velocity.groundspeed ?? (drone ? Math.hypot(drone.velocity_ned.vx, drone.velocity_ned.vy) : 0);
   const heading = tel?.heading ?? drone?.heading_deg ?? 0;
   const bat = tel?.battery.soc_pct ?? drone?.battery_pct ?? 0;
+  React.useEffect(() => { sound.current?.update({ armed: !!drone?.armed && !stale, alt, speed, climb: tel?.velocity.verticalSpeed ?? (drone ? -drone.velocity_ned.vz : 0) }); }, [drone?.armed, alt, speed, stale, tel?.velocity.verticalSpeed, drone]);
   // altitude tape: 0 at the bottom, the scale grows with the ceiling or the Drone, in 10 m steps
   const tapeMax = Math.max(50, Math.ceil(((ceiling ?? 0) * 1.25) / 10) * 10, Math.ceil((alt * 1.2) / 10) * 10);
   const yOf = (v: number) => TAPE_H - (Math.max(0, Math.min(tapeMax, v)) / tapeMax) * TAPE_H;
@@ -68,8 +97,21 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
 
   return (
     <div style={{ position: 'absolute', inset: 0, background: '#000', overflow: 'hidden' }}>
-      {liveUrl && <iframe ref={frameRef} src={liveUrl} title="Drone camera" onLoad={() => { setFrameLoaded(true); frameRef.current?.contentWindow?.postMessage({ type: 'argus-select', drone_id: selected }, '*'); }} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 0, display: 'block', background: '#000' }} />}
+      {liveUrl && <iframe ref={(el) => { frameRef.current = el; cameraFrame = el; }} src={liveUrl} title="Drone camera" onLoad={() => { setFrameLoaded(true); frameRef.current?.contentWindow?.postMessage({ type: 'argus-select', drone_id: selected }, '*'); }} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', border: 0, display: 'block', background: '#000' }} />}
       <div className="a-shade" />
+
+      {/* what the vision model saw in the last frame: boxes scaled from frame pixels to the panel, for a few seconds */}
+      <div ref={boxHost} style={{ ...hud, inset: 0 }}>
+        {sightings && sightings.drone_id === selected && now - sightings.ts < 6000 && boxSize.w > 0 && sightings.sightings.map((s) => {
+          const sx = boxSize.w / (sightings.width || 1280), sy = boxSize.h / (sightings.height || 720);
+          const [x0, y0, x1, y1] = s.bbox; const hot = typeof s.temp_max_c === 'number' && s.temp_max_c >= 100;
+          return (
+            <div key={s.id} className="a-sight" data-hot={hot} style={{ left: x0 * sx, top: y0 * sy, width: Math.max(8, (x1 - x0) * sx), height: Math.max(8, (y1 - y0) * sy) }}>
+              <span>{s.label.replace(/_/g, ' ')} {Math.round(s.confidence * 100)}%{typeof s.temp_max_c === 'number' ? ` · ${s.temp_max_c.toFixed(0)} °C` : ''}{typeof s.range_m === 'number' ? ` · ${s.range_m.toFixed(0)} m` : ''}</span>
+            </div>
+          );
+        })}
+      </div>
 
       {/* heading strip */}
       <div style={{ ...hud, left: '50%', top: 78, transform: 'translateX(-50%)', width: 420, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6 }}>
@@ -83,7 +125,7 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
       </div>
 
       {/* primary readouts */}
-      <div style={{ ...hud, left: 124, top: '36%', display: 'flex', flexDirection: 'column', gap: 22 }}>
+      <div style={{ ...hud, left: 124, top: '40%', display: 'flex', flexDirection: 'column', gap: 22 }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><span className="a-hud-unit">Altitude AGL</span><div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}><span className="a-hud-big">{alt.toFixed(1)}</span><span className="a-hud-unit">m</span></div></div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}><span className="a-hud-unit">Ground speed</span><div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}><span className="a-hud-big" style={{ fontSize: 30 }}>{speed.toFixed(1)}</span><span className="a-hud-unit">m/s</span></div></div>
         <div className="a-hud" style={{ display: 'flex', gap: 16 }}><span><span className="dim">BAT </span>{bat.toFixed(0)}%</span><span><span className="dim">GIMBAL </span>{gimbal}°</span><span><span className="dim">FOV </span>{Math.round(cam.fov_deg)}°</span><span><span className="dim">ZOOM </span>{zoom.toFixed(1)}x</span></div>
@@ -114,6 +156,7 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
         <span className="a-modetag" data-mode={cam.mode}>{cam.mode === 'rgb' ? 'RGB' : cam.mode === 'thermal' ? 'THERMAL' : 'LIDAR'}</span>
         <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5, color: stale ? 'var(--amber-bright)' : 'var(--red-bright)' }}><span className="a-dot" data-live={!stale} />{stale ? 'NO SIGNAL' : 'LIVE'}</span>
         <span className="dim">{drone?.mode || ''}</span>
+        <button className="a-icobtn" onClick={() => setMuted((m) => !m)} style={{ pointerEvents: 'auto', width: 24, height: 24, background: 'rgba(11,13,17,0.6)', color: muted ? 'var(--text-tertiary)' : audioLive ? 'var(--text-primary)' : 'var(--amber-bright)' }} title={muted ? 'Rotor sound off' : audioLive ? 'Rotor sound on' : 'Rotor sound: click anywhere once so the browser allows audio'} aria-pressed={!muted} aria-label="Rotor sound">{muted ? <VolumeX size={13} /> : <Volume2 size={13} />}</button>
       </div>
 
       {/* gimbal ladder: drag or scroll to aim the camera */}
@@ -125,6 +168,12 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
             <input type="range" min={GIMBAL_MIN} max={GIMBAL_MAX} step={1} value={gimbal} onChange={(e) => onGimbal(Number(e.target.value))} aria-label="Gimbal pitch" />
           </div>
           <span className="read">{gimbal > 0 ? `${gimbal}° ↓` : gimbal < 0 ? `${-gimbal}° ↑` : 'LEVEL'}</span>
+        </div>
+      )}
+      {manualActive && manualPhase && manualPhase !== 'live' && (
+        <div style={{ ...hud, left: '50%', top: '62%', transform: 'translateX(-50%)', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+          <span className="a-hud" style={{ fontSize: 14, fontWeight: 700, letterSpacing: '0.12em', color: 'var(--amber-bright)' }}>{manualPhase.toUpperCase()}</span>
+          <span className="a-hud dim" style={{ fontSize: 11 }}>The autopilot holds the sticks until it is airborne</span>
         </div>
       )}
       {stale && (
