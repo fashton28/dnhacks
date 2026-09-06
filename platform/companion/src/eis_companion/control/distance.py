@@ -96,7 +96,17 @@ def estimate_distance(
     """
     if bbox_h_norm is None:
         return None
-    bbox_h_norm = float(bbox_h_norm)
+    try:
+        bbox_h_norm = float(bbox_h_norm)
+    except (TypeError, ValueError):
+        return None
+    # NaN/Infinity is "no measurement", NEVER a distance. Every guard below is
+    # a comparison, and every comparison is False for NaN -- a non-finite
+    # height would otherwise flow through as a non-finite distance, which the
+    # guidance standoff predicates (also comparisons) silently fail open on
+    # and the output clamps turn into +max_speed (FM-07).
+    if not math.isfinite(bbox_h_norm):
+        return None
     if bbox_h_norm < _MIN_BBOX_H_NORM:
         return None
 
@@ -106,7 +116,7 @@ def estimate_distance(
         return None
 
     z = (person_height_m * f_px) / h_px
-    if z <= 0.0:
+    if not math.isfinite(z) or z <= 0.0:
         return None
     return min(z, max_distance_m)
 
@@ -122,10 +132,18 @@ def estimate_distance_px(
 
     Z = (person_height_m * focal_px) / bbox_h_px.
     """
-    if bbox_h_px is None or bbox_h_px <= 0.0 or focal_px <= 0.0:
+    if bbox_h_px is None:
+        return None
+    try:
+        bbox_h_px = float(bbox_h_px)
+    except (TypeError, ValueError):
+        return None
+    if not (math.isfinite(bbox_h_px) and math.isfinite(focal_px)):
+        return None
+    if bbox_h_px <= 0.0 or focal_px <= 0.0:
         return None
     z = (person_height_m * focal_px) / float(bbox_h_px)
-    if z <= 0.0:
+    if not math.isfinite(z) or z <= 0.0:
         return None
     return min(z, max_distance_m)
 

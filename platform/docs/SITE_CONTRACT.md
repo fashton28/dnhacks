@@ -76,7 +76,7 @@ sensor adapter, and simulator all consume the same selected file.
       "lat": -26.09,
       "lon": 29.47,
       "image": "site/staging/stage-a.png",
-      "thermal_image": "site/staging/stage-a.png",
+      "thermal_image": "site/staging/stage-a-thermal.png",
       "image_kind": "scripted_placeholder",
       "required_sensors": ["rgb", "thermal", "lidar"],
       "truth": "vehicle"
@@ -166,12 +166,18 @@ required.
 - Staging coordinates are pre-surveyed observation points inside `geofence` and
   outside buffered NFZs.
 - `image` and `thermal_image` are repo-root-relative paths to paired RGB and
-  thermal frames. A scripted fixture may point both fields to the same generated
-  placeholder. `image_kind: scripted_placeholder` makes that provenance explicit;
-  such a file is not real optical, thermal, Sentinel-2, or Umbra imagery.
-  The interim stub aliases the two existing placeholder files; the sensing phase
-  must replace `thermal_image` with distinct scripted thermal variants before the
-  paired-modality demo is considered complete.
+  thermal frames. `image_kind: scripted_placeholder` makes that provenance
+  explicit; such a file is not real optical, thermal, Sentinel-2, or Umbra
+  imagery. The stub now names DISTINCT thermal variants
+  (`stage-a-thermal.png`, `stage-b-thermal.png`), and the aliasing described by
+  earlier revisions of this document is gone — a reader who implemented the
+  aliased form got a paired-modality observation that could never disagree
+  (`FM-169`).
+- Every referenced fixture MUST exist in the checkout and MUST carry PNG or
+  JPEG magic bytes. A missing or non-image file surfaces only on arrival, as
+  "no observation", in the middle of a flight;
+  `companion/tests/test_perception_honesty.py::test_every_site_fixture_referenced_by_the_stub_actually_exists`
+  turns that into a build-time failure instead.
 - `required_sensors` declares which rails the staging adapter prepares. It is not
   a blanket mission readiness rule: night missions require healthy thermal, and
   clutter transit requires healthy LiDAR. RGB, thermal, and LiDAR observations

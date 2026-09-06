@@ -172,6 +172,36 @@ class CommandVerifier:
         return self._require_all
 
     # ---- verification ----------------------------------------------------
+    def verify_frame(self, payload: Mapping[str, Any]) -> VerifyResult:
+        """Verify ANY inbound wire frame, not just a ``command`` envelope.
+
+        The control socket carries ``manualInput``, ``planCommand``,
+        ``planHeartbeat``, ``rfEvent`` and ``fleet`` frames too. Every one of
+        them moves the aircraft or feeds a watchdog, and none of them used to
+        pass through the signing layer at all -- so an unauthenticated peer on
+        the same network could fly the vehicle and hold the ground-link
+        deadman open (FM-40).
+
+        A ``command`` frame keeps its existing rules exactly (privileged set
+        always signed, safe-direction set never required). Every other frame
+        type needs a signature only when ``require_all`` is on, which the
+        config turns on automatically whenever the socket is not loopback.
+        """
+        data = dict(payload)
+        mtype = str(data.get("type", ""))
+        if mtype == "command":
+            return self.verify(data)
+        signature = str(data.get(_SIG_FIELD, "") or "")
+        if not signature:
+            if self._require_all:
+                return VerifyResult(
+                    False,
+                    f"{mtype or 'frame'} requires a signed operator envelope",
+                    "unsigned",
+                )
+            return VerifyResult(True, "unsigned frame accepted (signing not required)")
+        return self._verify_signature(data, mtype or "frame")
+
     def verify(self, payload: Mapping[str, Any]) -> VerifyResult:
         """Verify one command envelope. Never raises."""
         command = str(dict(payload).get("command", ""))
@@ -184,7 +214,11 @@ class CommandVerifier:
                     "unsigned",
                 )
             return VerifyResult(True, "unsigned command accepted (not privileged)")
+        return self._verify_signature(payload, command or "command")
 
+    def _verify_signature(self, payload: Mapping[str, Any], label: str) -> VerifyResult:
+        """Authenticity + freshness + uniqueness for a signed envelope."""
+        signature = str(dict(payload).get(_SIG_FIELD, "") or "")
         if not self._key:
             return VerifyResult(
                 False, "no session key configured; signed commands cannot be verified",

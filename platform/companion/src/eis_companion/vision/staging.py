@@ -58,7 +58,7 @@ from typing import Any, Callable, List, Mapping, Optional, Sequence, Union
 
 from eis_companion.types import TargetObservation
 
-from .detector import PersonDetector
+from .detector import DEFAULT_CONF_THRESHOLD, SUPPORTED_CLASSES, PersonDetector
 
 log = logging.getLogger(__name__)
 
@@ -77,17 +77,38 @@ DEFAULT_EMIT_REPEAT = 3
 
 #: Deterministic stub detections keyed by the staging point's ``truth``
 #: label (docs/SITE_CONTRACT.md: vehicle|breach|structure|false_alarm).
-#: Each entry: list of (bbox(x, y, w, h) normalised 0..1, confidence).
-STUB_DETECTIONS: dict[str, list[tuple[tuple[float, float, float, float], float]]] = {
+#: Each entry: list of (bbox(x, y, w, h) normalised 0..1, confidence, class).
+#:
+#: The CLASS is carried explicitly. Emitting a parked vehicle or a plant
+#: structure as a classless observation put it on the person-tracking wire,
+#: where the UI rendered it as a locked person target (FM-122); the
+#: orchestrator now routes by this field.
+STUB_DETECTIONS: dict[
+    str, list[tuple[tuple[float, float, float, float], float, str]]
+] = {
     # A parked vehicle: wide, low box near frame centre, high confidence.
-    "vehicle": [((0.36, 0.42, 0.26, 0.18), 0.91)],
+    "vehicle": [((0.36, 0.42, 0.26, 0.18), 0.91, "vehicle")],
     # A person breaching the fence line: portrait box, high confidence.
-    "breach": [((0.44, 0.30, 0.12, 0.38), 0.90)],
+    "breach": [((0.44, 0.30, 0.12, 0.38), 0.90, "person")],
     # Plant structure / clutter: big vague box, low confidence.
-    "structure": [((0.28, 0.24, 0.44, 0.50), 0.32)],
+    "structure": [((0.28, 0.24, 0.44, 0.50), 0.32, "structure")],
     # Nothing there.
     "false_alarm": [],
 }
+
+#: Lowest confidence any stub emits. The real detector's gate must sit at or
+#: below it, or the offline demo shows a cue the live backend can never
+#: reproduce (FM-121). Asserted in tests/test_staging.py.
+STUB_MIN_CONFIDENCE: float = min(
+    (conf for entries in STUB_DETECTIONS.values() for _, conf, _ in entries),
+    default=1.0,
+)
+
+#: Truth labels whose object class the person-only real backend cannot emit.
+UNSUPPORTED_REAL_TRUTHS: tuple[str, ...] = tuple(
+    truth for truth, entries in STUB_DETECTIONS.items()
+    if any(cls not in SUPPORTED_CLASSES for _, _, cls in entries)
+)
 
 
 # ---------------------------------------------------------------------------
@@ -224,6 +245,9 @@ class StagingObserver:
         # counts as already-resolved (real path).
         self._backend_resolved = detector is not None
         self._warned_truths: set[str] = set()
+        #: Truths this run's backend structurally cannot detect. Reported as a
+        #: CAPABILITY, never silently swallowed (FM-98).
+        self._capability_gaps: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public API
@@ -278,7 +302,10 @@ class StagingObserver:
                     st.burst_left -= 1
                     ts = self._clock()
                     out.extend(
-                        TargetObservation(bbox=o.bbox, conf=o.conf, ts=ts)
+                        TargetObservation(
+                            bbox=o.bbox, conf=o.conf, ts=ts,
+                            cls=getattr(o, "cls", "person"),
+                        )
                         for o in st.cached
                     )
             else:
@@ -294,10 +321,74 @@ class StagingObserver:
     # Detection backends
     # ------------------------------------------------------------------
 
+    def _backend_classes(self) -> Optional[tuple]:
+        """Classes the resolved backend declares, or None for "unrestricted".
+
+        A backend that does not declare ``supported_classes`` (an injected test
+        double, a future multi-class detector) makes no claim, so we make none
+        on its behalf.
+        """
+        declared = getattr(self._detector, "supported_classes", None)
+        if not declared:
+            return None
+        return tuple(str(c).strip().lower() for c in declared)
+
+    def _unsupported_truths(self) -> tuple:
+        """Truth labels the resolved backend structurally cannot produce."""
+        classes = self._backend_classes()
+        if classes is None:
+            return ()
+        return tuple(
+            truth for truth, entries in STUB_DETECTIONS.items()
+            if entries and any(cls.lower() not in classes for _, _, cls in entries)
+        )
+
+    def capabilities(self) -> dict:
+        """What this run's detection backend can actually produce.
+
+        The real backend filters to COCO class 0, so at a vehicle- or
+        structure-truth staging point it returns [] -- and an empty REAL result
+        used to be treated as a real result, so the scripted detection simply
+        disappeared. Installing the optional ``[detect]`` extra made the system
+        detect LESS, with nothing anywhere saying so (FM-98).
+        """
+        real = self._detector is not None
+        classes = self._backend_classes()
+        return {
+            "backend": "detector" if real else "stub",
+            "classes": (
+                list(classes) if classes is not None
+                else (["person", "vehicle", "structure"] if not real else ["unknown"])
+            ),
+            "unsupported_truths": sorted(
+                self._capability_gaps | set(self._unsupported_truths())
+            ),
+            "conf_threshold": (
+                float(self._detector_kwargs.get("conf_threshold", DEFAULT_CONF_THRESHOLD))
+                if real else 0.0
+            ),
+        }
+
     def _detect_for_point(self, point: StagingPoint) -> List[TargetObservation]:
         """Run the resolved backend on *point*'s still image."""
         self._resolve_backend()
         if self._detector is not None:
+            truth = point.truth.strip().lower()
+            if truth in self._unsupported_truths():
+                # This backend CANNOT produce this class. Emitting the stub
+                # here would fabricate a detection the installed detector never
+                # made; emitting nothing silently would hide the limitation.
+                # So: emit nothing, and record a capability gap the
+                # orchestrator turns into a healthEvent (FM-98).
+                if truth not in self._capability_gaps:
+                    self._capability_gaps.add(truth)
+                    log.warning(
+                        "StagingObserver: the real detector is person-only and "
+                        "cannot detect truth %r at '%s' -- reporting a "
+                        "capability gap, NOT a scripted detection",
+                        truth, point.id,
+                    )
+                return []
             obs = self._detect_real(point)
             if obs is not None:
                 return obs
@@ -367,8 +458,8 @@ class StagingObserver:
             return []
         ts = self._clock()
         return [
-            TargetObservation(bbox=bbox, conf=conf, ts=ts)
-            for bbox, conf in STUB_DETECTIONS[truth]
+            TargetObservation(bbox=bbox, conf=conf, ts=ts, cls=cls)
+            for bbox, conf, cls in STUB_DETECTIONS[truth]
         ]
 
     # ------------------------------------------------------------------

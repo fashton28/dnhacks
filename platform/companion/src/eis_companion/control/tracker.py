@@ -22,8 +22,9 @@ numpy + stdlib only -- no hardware, no detector. Unit-testable in isolation.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -73,9 +74,22 @@ class _KalmanBox:
         R = np.eye(4, dtype=float) * self._r
         y = z - self.H @ self.x
         S = self.H @ self.P @ self.H.T + R
-        K = self.P @ self.H.T @ np.linalg.inv(S)
-        self.x = self.x + K @ y
-        self.P = (np.eye(8) - K @ self.H) @ self.P
+        try:
+            K = self.P @ self.H.T @ np.linalg.inv(S)
+        except np.linalg.LinAlgError:
+            # Singular innovation covariance: skip the correction rather than
+            # folding an undefined gain into the state. The track keeps
+            # coasting on its prediction and ages out normally.
+            return
+        x_new = self.x + K @ y
+        P_new = (np.eye(8) - K @ self.H) @ self.P
+        if not (np.all(np.isfinite(x_new)) and np.all(np.isfinite(P_new))):
+            # A non-finite state LATCHES (x = x + K @ y keeps it NaN forever)
+            # and the "dims can't go negative" max() below is NaN-blind, so it
+            # would never be caught. Refuse the correction instead (FM-07).
+            return
+        self.x = x_new
+        self.P = P_new
         self.x[2] = max(self.x[2], 1e-4)
         self.x[3] = max(self.x[3], 1e-4)
 
@@ -203,7 +217,18 @@ class Tracker:
         """Ingest this frame's detections and advance all tracks.
 
         Returns a TrackingResult carrying the contract field values.
+
+        Detections carrying a NON-FINITE bbox/confidence are dropped at the
+        door. One NaN admitted into the Kalman state latches there for the life
+        of the track (``x = x + K @ y`` keeps it NaN, and the "dims can't go
+        negative" guards are the same NaN-blind ``max``), which silently
+        poisons ``estimated_distance`` and, through it, the hard standoff
+        (FM-07). Dropping the detection degrades to "no measurement", which
+        every downstream guard already handles.
         """
+        observations = [
+            obs for obs in (observations or []) if _finite_observation(obs)
+        ]
         if ts is None:
             ts = observations[0].ts if observations else (
                 self._last_ts if self._last_ts is not None else 0.0
@@ -372,6 +397,10 @@ class Tracker:
         est_dist: Optional[float] = None
         if self._locked_id is not None and self._locked_id in self._tracks:
             lt = self._tracks[self._locked_id]
+            # Belt-and-braces: even with the ingest filter above, a degenerate
+            # covariance inversion could produce a non-finite filtered height.
+            # estimate_distance() rejects it too; checking here keeps the
+            # "no measurement" answer local and obvious.
             est_dist = estimate_distance(
                 lt.height,
                 person_height_m=self.person_height_m,
@@ -418,7 +447,26 @@ class TrackingResult:
         return None
 
 
+def _finite_observation(obs: Any) -> bool:
+    """True only for a detection whose bbox and confidence are all finite."""
+    try:
+        bbox = tuple(float(v) for v in obs.bbox)
+        conf = float(obs.conf)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    if len(bbox) != 4:
+        return False
+    return all(math.isfinite(v) for v in bbox) and math.isfinite(conf)
+
+
 def _clip01(v: float) -> float:
+    """Clip to [0, 1]; a non-finite value clips to 0.0, never to 1.0.
+
+    ``min(1.0, NaN)`` is 1.0 under CPython, which would render a poisoned
+    track as a normal full-frame bbox in the operator's UI.
+    """
+    if not math.isfinite(v):
+        return 0.0
     return max(0.0, min(1.0, v))
 
 

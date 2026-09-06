@@ -23,6 +23,22 @@ class FusionResult:
     disagreements: tuple[str, ...]
 
 
+#: Classes a purely GEOMETRIC return may stand in for. A LiDAR cluster reports
+#: shape, not identity, so "unclassified" corroborates whatever the imaging
+#: rails identified at the same bearing and range. Without this, cross-rail
+#: association required exact string equality and a geometric return could
+#: never confirm anything it had not already named correctly (FM-115).
+UNCLASSIFIED = "unclassified"
+
+
+def class_compatible(a: str, b: str) -> bool:
+    """Whether two modality classes may describe the same object."""
+    a, b = str(a).strip().lower(), str(b).strip().lower()
+    if a == b:
+        return True
+    return UNCLASSIFIED in (a, b)
+
+
 def bearing_delta_deg(a: float, b: float) -> float:
     return abs((a - b + 180.0) % 360.0 - 180.0)
 
@@ -70,7 +86,7 @@ def fuse_tracks(
                 if (
                     j not in consumed
                     and candidate.modality == modality
-                    and candidate.cls == track.cls
+                    and class_compatible(candidate.cls, track.cls)
                     and bearing_error <= bearing_gate_deg
                     and range_error <= range_gate_m
                 ):
@@ -99,9 +115,16 @@ def fuse_tracks(
                 None,
             )
             output.extend(group)
+            # The fused class is the most SPECIFIC one in the group: an
+            # unclassified geometric return corroborates an identification, it
+            # never overwrites one.
+            named = [
+                item.cls for item in group
+                if str(item.cls).strip().lower() != UNCLASSIFIED
+            ]
             fused.append(SensorTrack(
                 id=next_id,
-                cls=track.cls,
+                cls=named[0] if named else track.cls,
                 bearing_deg=bearing,
                 range_m=distance,
                 conf=confidence,
@@ -120,4 +143,11 @@ def fuse_tracks(
     return FusionResult(tuple(output), tuple(disagreements))
 
 
-__all__ = ["FusionResult", "SensorTrack", "bearing_delta_deg", "fuse_tracks"]
+__all__ = [
+    "UNCLASSIFIED",
+    "FusionResult",
+    "SensorTrack",
+    "bearing_delta_deg",
+    "class_compatible",
+    "fuse_tracks",
+]

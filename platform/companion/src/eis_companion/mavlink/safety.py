@@ -362,7 +362,12 @@ class SafetyManager:
 # Module-level geofence + failsafe PARAM map (no SafetyManager needed)
 # --------------------------------------------------------------------------
 
-def failsafe_param_map(limits: Limits, *, cell_count: int = DEFAULT_PACK_CELLS) -> dict:
+def failsafe_param_map(
+    limits: Limits,
+    *,
+    cell_count: int = DEFAULT_PACK_CELLS,
+    geofence_radius_m: Optional[float] = None,
+) -> dict:
     """Return the exact ArduCopter parameters to flash for a safe vehicle.
 
     Returned as a flat ``dict[str, float]`` (param name -> value) so it can be:
@@ -389,7 +394,7 @@ def failsafe_param_map(limits: Limits, *, cell_count: int = DEFAULT_PACK_CELLS) 
         "FENCE_ENABLE": 1.0,
         "FENCE_TYPE": 3.0,
         "FENCE_ACTION": 1.0,            # 1 = RTL or LAND (breach -> come back)
-        "FENCE_RADIUS": float(_geofence_radius(L)),
+        "FENCE_RADIUS": float(_geofence_radius(L, geofence_radius_m)),
         "FENCE_ALT_MAX": float(L.max_altitude),
         "FENCE_MARGIN": 2.0,           # m, start reacting before the hard edge
 
@@ -441,14 +446,33 @@ def failsafe_param_map(limits: Limits, *, cell_count: int = DEFAULT_PACK_CELLS) 
     return params
 
 
-def _geofence_radius(limits: Limits) -> float:
-    """Geofence cylinder radius (m).
+#: Fallback cylinder radius when the caller supplies no site geometry (shared
+#: DEFAULTS.geofence_radius). It is a FALLBACK, not a policy: a 60 m circle
+#: around home fences a plant-scale site into its own launch pad, so the first
+#: outbound leg breaches and the firmware RTLs mid-mission -- which looks
+#: exactly like a real safety event (FM-155).
+DEFAULT_GEOFENCE_RADIUS_M: float = 60.0
+MIN_GEOFENCE_RADIUS_M: float = 20.0
 
-    ``Limits`` doesn't carry the fence radius directly (it lives in shared
-    DEFAULTS.geofence_radius = 60 m); we keep that here so the param map is
-    self-contained. Always >= a small floor so a misconfig can't disable it.
+
+def _geofence_radius(limits: Limits, requested: Optional[float] = None) -> float:
+    """Geofence cylinder radius (m), from the SITE when the caller knows it.
+
+    ``Limits`` doesn't carry a fence radius, so the caller passes the site's
+    own containment radius (home -> farthest perimeter vertex, plus margin).
+    Always >= a small floor so a misconfig cannot disable containment, and it
+    falls back to the shared default when no site is loaded.
     """
-    return max(20.0, 60.0)
+    if requested is None:
+        return max(MIN_GEOFENCE_RADIUS_M, DEFAULT_GEOFENCE_RADIUS_M)
+    try:
+        value = float(requested)
+    except (TypeError, ValueError):
+        return max(MIN_GEOFENCE_RADIUS_M, DEFAULT_GEOFENCE_RADIUS_M)
+    import math as _math
+    if not _math.isfinite(value) or value <= 0.0:
+        return max(MIN_GEOFENCE_RADIUS_M, DEFAULT_GEOFENCE_RADIUS_M)
+    return max(MIN_GEOFENCE_RADIUS_M, value)
 
 
 def _rtl_alt_cm(limits: Limits) -> float:

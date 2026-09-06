@@ -56,7 +56,12 @@ tracking:
 
 # --- Network: control WS + video ports -------------------------------------
 network:
-  host:               0.0.0.0
+  # LOOPBACK BY DEFAULT (FM-40). The control WebSocket takes arm / takeoff /
+  # executePlan / emergencyStop, and every real client runs on this machine.
+  # Set this to 0.0.0.0 (or EIS_BIND_ALL=true) ONLY with a reason: doing so
+  # automatically forces security.require_signed_commands on, because a socket
+  # the venue LAN can reach must authenticate every frame.
+  host:               127.0.0.1
   control_port:       8765   # control + telemetry WebSocket
   video_port:         8554   # RTSP (mediamtx)
   webrtc_port:        8889   # WebRTC/WHEP (low-latency UI)

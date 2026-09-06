@@ -19,6 +19,18 @@ class NavPolicy:
     extnav_max_position_variance_m2: float = 1.0
     gps_max_age_s: float = 1.0
     ekf_max_age_s: float = 1.0
+    #: Exponential backoff after an unacknowledged source switch. Without it a
+    #: refused (or unanswered) MAV_CMD_SET_EKF_SOURCE_SET re-issues on every
+    #: 10 Hz health tick, and each attempt blocks the MAVLink layer for up to
+    #: 1.5 s waiting for a COMMAND_ACK -- telemetry degrades to ~0.6 Hz and the
+    #: control loop starves exactly while a nav failsafe is being handled
+    #: (FM-10).
+    source_retry_backoff_s: float = 2.0
+    source_retry_backoff_max_s: float = 30.0
+    #: Consecutive unacknowledged attempts before the companion stops asking
+    #: and reports the source as unavailable. The fallback is not "keep
+    #: hammering the FC"; it is "hold and say so".
+    source_retry_give_up: int = 5
 
 
 @dataclass(frozen=True)
@@ -70,15 +82,46 @@ class NavHealth:
         self._candidate = "gps"
         self._candidate_since = 0.0
         self._last_requested: str | None = None
+        self._now_s: float = 0.0
+        # Per-source retry bookkeeping (FM-10). A refused/unanswered request
+        # backs off exponentially and eventually gives up; it never re-issues
+        # on the next tick.
+        self._retry_attempts: dict[str, int] = {}
+        self._retry_not_before_s: dict[str, float] = {}
+
+    @property
+    def source_unavailable(self) -> tuple[str, ...]:
+        """Sources this FC has refused often enough that we stopped asking."""
+        give_up = max(1, int(self.policy.source_retry_give_up))
+        return tuple(sorted(
+            name for name, attempts in self._retry_attempts.items()
+            if attempts >= give_up
+        ))
 
     def confirm_source(self, source: str, accepted: bool) -> bool:
-        """Commit only a source switch acknowledged by the MAVLink wrapper."""
-        if not accepted or source not in {"gps", "optflow", "extnav"}:
-            self._last_requested = None
+        """Commit only a source switch acknowledged by the MAVLink wrapper.
+
+        A REFUSED switch schedules an exponential backoff for that source
+        instead of clearing the request outright: clearing it was what let the
+        same blocking request re-issue on every tick (FM-10).
+        """
+        self._last_requested = None
+        if source not in {"gps", "optflow", "extnav"}:
             return False
+        if not accepted:
+            attempts = self._retry_attempts.get(source, 0) + 1
+            self._retry_attempts[source] = attempts
+            delay = min(
+                float(self.policy.source_retry_backoff_max_s),
+                float(self.policy.source_retry_backoff_s) * (2 ** (attempts - 1)),
+            )
+            self._retry_not_before_s[source] = self._now_s + delay
+            return False
+        # Accepted: the source works, so its retry history is irrelevant.
+        self._retry_attempts.pop(source, None)
+        self._retry_not_before_s.pop(source, None)
         changed = source != self.source
         self.source = source
-        self._last_requested = None
         return changed
 
     def evaluate(self, sample: NavSample) -> NavSnapshot:
@@ -130,15 +173,29 @@ class NavHealth:
             reason = "GPS denied; no healthy extnav or optical-flow fallback"
 
         now = max(0.0, float(sample.timestamp_s))
+        self._now_s = now
         if desired != self._candidate:
             self._candidate = desired
             self._candidate_since = now
 
         requested: str | None = None
         if desired != "none" and desired != self.source:
-            if now - self._candidate_since >= p.vote_s and self._last_requested != desired:
+            attempts = self._retry_attempts.get(desired, 0)
+            backed_off = now < self._retry_not_before_s.get(desired, 0.0)
+            given_up = attempts >= max(1, int(p.source_retry_give_up))
+            if (
+                now - self._candidate_since >= p.vote_s
+                and self._last_requested != desired
+                and not backed_off
+                and not given_up
+            ):
                 requested = desired
                 self._last_requested = desired
+            elif given_up:
+                reason = (
+                    f"GPS denied; flight controller refused the {desired} source "
+                    f"{attempts} times -- holding"
+                )
 
         denied_edge = requested in {"extnav", "optflow"} and self.source == "gps"
         recovered_edge = requested == "gps" and self.source != "gps"

@@ -110,6 +110,20 @@ _TYPEMASK_POS_ONLY = (
 # we send both for robustness.
 _STREAM_RATE_HZ = 10
 
+# --------------------------------------------------------------------------
+# Staleness thresholds (FM-08, FM-19, FM-20)
+# --------------------------------------------------------------------------
+# The FC heartbeat is nominally 1 Hz. Three missed beats is a dead link, not a
+# hiccup. Nothing below re-stamps a cached message as fresh: every rail carries
+# its own age so the consumer decides, rather than the cache lying by omission.
+FC_HEARTBEAT_TIMEOUT_S: float = 3.0
+#: BATTERY_STATUS / SYS_STATUS are streamed at ~10 Hz; 5 s of silence is a dead
+#: pack sensor, which must not read as "the last value, forever".
+BATTERY_MAX_AGE_S: float = 5.0
+#: WIND is low-rate on ArduPilot. Beyond this the estimate is absent, which is
+#: NOT the same as calm air.
+WIND_MAX_AGE_S: float = 10.0
+
 
 class Vehicle:
     """Pymavlink connection to the ArduPilot FC.
@@ -150,6 +164,15 @@ class Vehicle:
         self._last_heartbeat_ts: float = 0.0
         self._link_latency_ms: float = 0.0
         self._fc_ready: bool = False
+        # Set when recv raises (a wedged / closed socket). Cleared by the next
+        # message that actually arrives. Feeds fc_link_lost() (FM-08).
+        self._recv_error: bool = False
+        # What the FC actually holds for the geofence, as far as we can prove.
+        # 'stored' = the polygon transfer was ACCEPTED; 'enabled' = FENCE_ENABLE
+        # was read back as 1. Both start unknown (None) (FM-14 / FM-15).
+        self._fence_stored: Optional[bool] = None
+        self._fence_enabled: Optional[bool] = None
+        self._fence_detail: str = "geofence upload not attempted"
 
     # ----------------------------------------------------------------------
     # Connection lifecycle
@@ -341,32 +364,115 @@ class Vehicle:
             try:
                 msg = self._master.recv_match(blocking=False)
             except Exception:
+                # A dead socket raises here forever. Record it: without this
+                # the link failure is invisible and every cached message keeps
+                # being served as live (FM-08).
+                self._recv_error = True
                 break
             if msg is None:
                 break
-            mtype = msg.get_type()
-            if mtype == "BAD_DATA":
-                continue
-            if mtype == "HEARTBEAT":
-                try:
-                    if int(msg.get_srcSystem()) != int(self._target_system):
-                        continue
-                except (AttributeError, TypeError, ValueError):
-                    pass
-            self._msgs[mtype] = msg
-            self._msg_ts[mtype] = now()
-            if mtype == "STATUSTEXT" and "ArduPilot Ready" in str(getattr(msg, "text", "")):
-                self._fc_ready = True
-            if mtype == "HEARTBEAT":
-                self._last_heartbeat_ts = now()
-            count += 1
+            if self._absorb(msg):
+                count += 1
         return count
+
+    def _absorb(self, msg: Any) -> bool:
+        """Cache one received message. Returns True when it was kept.
+
+        Every blocking wait in this module funnels its non-matching traffic
+        through here instead of dropping it on the floor: ``recv_match``
+        CONSUMES what it does not return, so a 2 s COMMAND_ACK wait used to
+        silently discard the attitude/battery/GPS frames that arrived during
+        it -- state went stale exactly while a failsafe was being handled
+        (FM-09).
+        """
+        try:
+            mtype = msg.get_type()
+        except Exception:
+            return False
+        if mtype == "BAD_DATA":
+            return False
+        if mtype == "HEARTBEAT":
+            # A heartbeat from a NON-target system (a second FC, a router, a
+            # GCS sharing the UDP port) must never refresh our FC link health.
+            # An unreadable source id is treated as foreign -- "we could not
+            # tell" is not "it was ours" (FM-08).
+            try:
+                if int(msg.get_srcSystem()) != int(self._target_system):
+                    return False
+            except (AttributeError, TypeError, ValueError):
+                return False
+        self._msgs[mtype] = msg
+        self._msg_ts[mtype] = now()
+        self._recv_error = False
+        if mtype == "STATUSTEXT" and "ArduPilot Ready" in str(getattr(msg, "text", "")):
+            self._fc_ready = True
+        if mtype == "HEARTBEAT":
+            self._last_heartbeat_ts = now()
+        return True
+
+    def _recv(self, *, type=None, timeout: float = 0.25) -> Any:
+        """One blocking receive that CACHES everything it consumes.
+
+        Deliberately does NOT pass ``type=`` down to ``recv_match``: mavutil
+        consumes the messages its filter rejects and returns them to nobody, so
+        a 2 s COMMAND_ACK wait silently dropped every attitude / battery / GPS
+        frame that arrived during it -- state went stale exactly while a
+        failsafe was being handled (FM-09). We take everything, cache it, and
+        do the matching ourselves.
+
+        Returns the matching message, or ``None`` when nothing matching arrived
+        inside ``timeout``.
+        """
+        want = (
+            () if type is None
+            else ((type,) if isinstance(type, str) else tuple(type))
+        )
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            try:
+                msg = self._master.recv_match(blocking=True, timeout=timeout)
+            except Exception:
+                self._recv_error = True
+                return None
+            if msg is None:
+                return None
+            self._absorb(msg)
+            try:
+                mtype = msg.get_type()
+            except Exception:
+                mtype = ""
+            if not want or mtype in want:
+                return msg
+            if time.monotonic() >= deadline:
+                return None
 
     def fc_heartbeat_age_s(self) -> float:
         """Seconds since the last FC heartbeat (link-health for telemetry)."""
         if self._last_heartbeat_ts <= 0.0:
             return math.inf
         return now() - self._last_heartbeat_ts
+
+    def message_age_s(self, mtype: str) -> float:
+        """Seconds since ``mtype`` was last received (``inf`` if never)."""
+        received_at = self._msg_ts.get(mtype)
+        if received_at is None:
+            return math.inf
+        return max(0.0, now() - received_at)
+
+    def fc_link_lost(self, *, timeout_s: float = FC_HEARTBEAT_TIMEOUT_S) -> bool:
+        """True when the FC link is dead: no heartbeat inside ``timeout_s``.
+
+        ``_connected`` only records that a socket was opened once; it is never
+        cleared by a link that stops delivering. This is the companion-side
+        detector the failsafe ladder consumes, and it also covers the
+        asymmetric RX-only failure the FC's own FS_GCS backstop cannot see
+        (the FC still hears our heartbeat; we hear nothing) (FM-08).
+        """
+        if not self._connected:
+            return True
+        if self._recv_error:
+            return True
+        return self.fc_heartbeat_age_s() > max(0.1, float(timeout_s))
 
     # ----------------------------------------------------------------------
     # Translation -> contract telemetry + VehicleState
@@ -532,11 +638,15 @@ class Vehicle:
         radio = self._msgs.get("RADIO_STATUS") or self._msgs.get("RADIO")
         if radio is not None:
             rssi = float(getattr(radio, "rssi", 0))
-        age_ms = self.fc_heartbeat_age_s() * 1000.0
+        age_s = self.fc_heartbeat_age_s()
+        age_ms = age_s * 1000.0
         link = {
             "rssi": rssi,
             "latencyMs": float(age_ms if math.isfinite(age_ms) else 9999.0),
         }
+        # A dead FC link must not present as fresh telemetry with a moving
+        # timestamp. Every cached rail below is last-known, not live (FM-08).
+        stale = self.fc_link_lost()
 
         return {
             "type": "telemetry",
@@ -552,6 +662,14 @@ class Vehicle:
             "gps": gps_dict,
             "home": home,
             "link": link,
+            # Companion-side FC-link health. The orchestrator turns this into a
+            # failsafe signal and a healthEvent; it is deliberately NOT a
+            # decorative latency number nobody thresholds (FM-08).
+            "fcLink": {
+                "lost": bool(stale),
+                "heartbeatAgeS": float(age_s if math.isfinite(age_s) else 9999.0),
+                "telemetryStale": bool(stale),
+            },
         }
 
     # -- orchestrator-facing accessors (poll + translate in one call) -------
@@ -597,7 +715,14 @@ class Vehicle:
         raw_current = getattr(batt, "current_battery", -1) if batt is not None else (
             getattr(sysst, "current_battery", -1) if sysst is not None else -1
         )
-        current_a = float(raw_current) / 100.0 if raw_current != -1 else 0.0
+        # -1 is the MAVLink "not measured" sentinel. Collapsing it to 0.0 A
+        # made a dead pack sensor look like a vehicle drawing no current, which
+        # freezes the coulomb integrator at the last healthy SoC forever
+        # (FM-19). Report it as UNKNOWN and let the estimator refuse to
+        # integrate.
+        current_a: Optional[float] = (
+            float(raw_current) / 100.0 if raw_current != -1 else None
+        )
         remaining_raw = getattr(batt, "battery_remaining", -1) if batt is not None else (
             getattr(sysst, "battery_remaining", -1) if sysst is not None else -1
         )
@@ -644,14 +769,28 @@ class Vehicle:
             and int(getattr(sysst, "onboard_control_sensors_enabled", 0)) & prearm_bit
             and int(getattr(sysst, "onboard_control_sensors_health", 0)) & prearm_bit
         )
+        # Battery rail AGE, from the same _msg_ts the nav rails already use. Its
+        # absence was the whole of FM-19: the nav dict carried gps/ekf/extnav
+        # ages while its sibling battery dict carried none, so a frozen pack
+        # sensor was indistinguishable from a live one.
+        battery_age_s = min(
+            self.message_age_s("BATTERY_STATUS"),
+            self.message_age_s("SYS_STATUS"),
+        )
+        wind_age_s = self.message_age_s("WIND")
+        wind_present = wind is not None and wind_age_s <= WIND_MAX_AGE_S
         return {
             "fc_ready": self._fc_ready or prearm_healthy,
+            "fc_link_lost": self.fc_link_lost(),
+            "fc_heartbeat_age_s": self.fc_heartbeat_age_s(),
             "battery": {
                 "voltage_v": voltage_v,
                 "current_a": current_a,
                 "temp_c": temperature_c,
                 "reported_soc_pct": float(remaining_raw) if remaining_raw >= 0 else None,
                 "cell_voltages_v": tuple(voltages),
+                "age_s": battery_age_s,
+                "max_age_s": BATTERY_MAX_AGE_S,
             },
             "nav": {
                 "gps_fix": int(getattr(gps, "fix_type", 0)) if gps is not None else 0,
@@ -681,7 +820,14 @@ class Vehicle:
                     getattr(flow, "innovation_mps", math.inf)
                 ) if flow is not None else math.inf,
             },
-            "wind_mps": float(getattr(wind, "speed", 0.0)) if wind is not None else 0.0,
+            # A MISSING or STALE wind estimate is NOT calm air (FM-20). None
+            # means "no measurement"; the orchestrator refuses to treat it as
+            # 0 m/s and says so, instead of silently disabling the wind ladder.
+            "wind_mps": (
+                float(getattr(wind, "speed", 0.0)) if wind_present else None
+            ),
+            "wind_age_s": wind_age_s,
+            "wind_present": bool(wind_present),
         }
 
     def sim_truth_inputs(self) -> dict[str, float] | None:
@@ -711,14 +857,11 @@ class Vehicle:
         command = getattr(mavutil.mavlink, "MAV_CMD_SET_EKF_SOURCE_SET", 42007)
         try:
             self._command_long(command, float(source_sets[source]))
-            deadline = time.monotonic() + 1.5
-            while time.monotonic() < deadline:
-                ack = self._master.recv_match(type="COMMAND_ACK", blocking=True, timeout=0.25)
-                if ack is None or int(getattr(ack, "command", -1)) != int(command):
-                    continue
-                accepted = getattr(mavutil.mavlink, "MAV_RESULT_ACCEPTED", 0)
-                return int(getattr(ack, "result", -1)) == int(accepted)
-            log.warning("EKF source switch to %s timed out waiting for COMMAND_ACK", source)
+            # Absorbs every non-matching frame it consumes rather than
+            # discarding telemetry during the wait (FM-09).
+            if self._wait_command_ack(command, timeout_s=1.5):
+                return True
+            log.warning("EKF source switch to %s not acknowledged", source)
             return False
         except Exception:
             log.exception("EKF source switch to %s failed", source)
@@ -926,12 +1069,29 @@ class Vehicle:
     def _wait_command_ack(self, command: int, timeout_s: float = 2.0) -> bool:
         deadline = time.monotonic() + max(0.0, timeout_s)
         while time.monotonic() < deadline:
-            ack = self._master.recv_match(type="COMMAND_ACK", blocking=True, timeout=0.25)
-            if ack is None or int(getattr(ack, "command", -1)) != int(command):
+            ack = self._recv(type="COMMAND_ACK", timeout=0.25)
+            if ack is None:
+                if not self._pending_inbox():
+                    break        # the fake/real link has nothing more to give
+                continue
+            if int(getattr(ack, "command", -1)) != int(command):
                 continue
             accepted = getattr(mavutil.mavlink, "MAV_RESULT_ACCEPTED", 0)
             return int(getattr(ack, "result", -1)) == int(accepted)
         return False
+
+    def _pending_inbox(self) -> bool:
+        """Whether the link might still deliver (True for a real connection).
+
+        A real ``recv_match`` blocks for its timeout, so a ``None`` genuinely
+        means "nothing arrived in that window" and we keep waiting until the
+        deadline. Test doubles return ``None`` instantly, which would otherwise
+        spin this loop for the whole timeout.
+        """
+        inbox = getattr(self._master, "inbox", None)
+        if inbox is None:
+            return True
+        return bool(inbox)
 
     def arm(self, *, force: bool = False) -> bool:
         """Arm the motors. ``force=True`` bypasses some prearm checks (emergency).
@@ -954,10 +1114,32 @@ class Vehicle:
         self._command_long(command, 0.0, magic)
         return self._wait_command_ack(command)
 
-    def set_mode(self, mode: str) -> bool:
-        """Set the flight mode by ArduCopter name (e.g. 'GUIDED', 'LOITER').
+    def set_mode(
+        self,
+        mode: str,
+        *,
+        verify: bool = True,
+        timeout_s: float = 1.5,
+        attempts: int = 3,
+    ) -> bool:
+        """Set the flight mode by ArduCopter name and VERIFY it actually took.
 
-        Returns False if the mode name is unknown to this FC's mapping.
+        Returns True only when the FC is OBSERVED in ``mode``: either it
+        already was, or a COMMAND_ACK accepted our DO_SET_MODE, or a HEARTBEAT
+        came back carrying the requested ``custom_mode``. Returns False if the
+        mode name is unknown to this FC's mapping, or if every attempt went
+        unconfirmed.
+
+        Why the readback exists (FM-02): ``set_mode_send`` is fire-and-forget.
+        Returning True unconditionally made every rung of the failsafe ladder,
+        plus engageManual and executePlan, believe a refused or dropped mode
+        change had succeeded -- the vehicle stays in GUIDED while telemetry
+        reports ``failsafeState=rtl``. ArduCopter refuses RTL without a home
+        position, GUIDED with an unhealthy EKF, and LAND while disarmed; all
+        three used to read as success.
+
+        ``verify=False`` restores the old fire-and-forget behaviour for callers
+        that genuinely cannot block. Nothing on the failsafe path uses it.
         """
         if not self._connected or self._master is None:
             raise RuntimeError("not connected")
@@ -969,14 +1151,75 @@ class Vehicle:
             except Exception:
                 self._mode_mapping = {}
         if mode not in self._mode_mapping:
+            log.warning("set_mode(%s) refused: unknown to this FC's mode map", mode)
             return False
-        mode_id = self._mode_mapping[mode]
-        self._master.mav.set_mode_send(
-            self._target_system,
-            mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED,
-            mode_id,
-        )
-        return True
+        mode_id = int(self._mode_mapping[mode])
+
+        if self._observed_custom_mode() == mode_id:
+            return True
+
+        do_set_mode = getattr(mavutil.mavlink, "MAV_CMD_DO_SET_MODE", 176)
+        custom_flag = mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+        for attempt in range(max(1, int(attempts))):
+            try:
+                self._master.mav.set_mode_send(
+                    self._target_system, custom_flag, mode_id,
+                )
+            except Exception:
+                log.exception("set_mode(%s) send failed", mode)
+                return False
+            if not verify:
+                return True
+            if self._await_mode(mode_id, do_set_mode, timeout_s):
+                return True
+            # Escalate to the COMMAND_LONG form, which some firmware answers
+            # when the legacy SET_MODE is ignored, and which yields an ACK.
+            try:
+                self._command_long(
+                    do_set_mode, float(custom_flag), float(mode_id),
+                )
+            except Exception:
+                log.exception("set_mode(%s) DO_SET_MODE send failed", mode)
+                break
+            if self._await_mode(mode_id, do_set_mode, timeout_s):
+                return True
+            log.warning(
+                "set_mode(%s) unconfirmed after attempt %d/%d",
+                mode, attempt + 1, max(1, int(attempts)),
+            )
+        log.error("set_mode(%s) NOT confirmed by the flight controller", mode)
+        return False
+
+    def _observed_custom_mode(self) -> Optional[int]:
+        """The custom_mode from the newest cached HEARTBEAT, or None."""
+        hb = self._msgs.get("HEARTBEAT")
+        if hb is None:
+            return None
+        try:
+            return int(getattr(hb, "custom_mode", -1))
+        except (TypeError, ValueError):
+            return None
+
+    def _await_mode(self, mode_id: int, command: int, timeout_s: float) -> bool:
+        """Wait for a HEARTBEAT carrying ``mode_id`` (or an accepted ACK)."""
+        accepted = getattr(mavutil.mavlink, "MAV_RESULT_ACCEPTED", 0)
+        deadline = time.monotonic() + max(0.0, float(timeout_s))
+        while True:
+            msg = self._recv(type=["HEARTBEAT", "COMMAND_ACK"], timeout=0.2)
+            if msg is not None:
+                mtype = msg.get_type()
+                if mtype == "HEARTBEAT" and self._observed_custom_mode() == mode_id:
+                    return True
+                if (
+                    mtype == "COMMAND_ACK"
+                    and int(getattr(msg, "command", -1)) == int(command)
+                    and int(getattr(msg, "result", -1)) == int(accepted)
+                ):
+                    return True
+            elif not self._pending_inbox():
+                return self._observed_custom_mode() == mode_id
+            if time.monotonic() >= deadline:
+                return self._observed_custom_mode() == mode_id
 
     def takeoff(self, alt: float) -> bool:
         """Ensure GUIDED, then command NAV_TAKEOFF to ``alt`` metres (rel home).
@@ -1197,51 +1440,166 @@ class Vehicle:
         retries: int = 3,
         timeout: float = 1.0,
     ) -> bool:
-        """PARAM_SET ``name`` = ``value`` and wait for the PARAM_VALUE echo.
+        """PARAM_SET ``name`` = ``value`` and VERIFY the echoed PARAM_VALUE.
 
-        Best-effort: retries a few times, logs and returns False on silence or
-        error -- NEVER raises (a SITL without some param must not kill the
-        connection). The echo is matched by param_id only; ArduPilot echoes
-        the value it actually stored.
+        Best-effort: retries a few times, logs and returns False on silence,
+        error, or a mismatched echo -- NEVER raises (a SITL without some param
+        must not kill the connection).
+
+        The echo is matched on param_id AND param_value (FM-14). ArduPilot
+        echoes the value it ACTUALLY STORED, so a write it refuses or clamps
+        comes back as the OLD value. Matching on the name alone -- which is
+        what this did -- reported success for a parameter that never changed,
+        which is exactly how a fence could be "enabled" while the firmware
+        still had FENCE_ENABLE=0.
         """
         if not self._connected or self._master is None:
             log.warning("set_param(%s) skipped: not connected", name)
             return False
+        want = float(value)
         try:
             for _ in range(max(1, int(retries))):
                 self._master.mav.param_set_send(
                     self._target_system,
                     self._target_component,
                     name.encode("ascii"),
-                    float(value),
+                    want,
                     mavutil.mavlink.MAV_PARAM_TYPE_REAL32,
                 )
-                msg = self._master.recv_match(
-                    type="PARAM_VALUE", blocking=True, timeout=timeout,
-                )
-                while msg is not None:
-                    got = getattr(msg, "param_id", "")
-                    if isinstance(got, bytes):
-                        got = got.decode("ascii", errors="replace")
-                    if got.rstrip("\x00") == name:
+                deadline = time.monotonic() + max(0.0, float(timeout))
+                while True:
+                    msg = self._recv(type="PARAM_VALUE", timeout=timeout)
+                    if msg is None:
+                        if not self._pending_inbox() or time.monotonic() >= deadline:
+                            break
+                        continue
+                    if _param_name(msg) != name:
+                        if time.monotonic() >= deadline:
+                            break
+                        continue
+                    stored = getattr(msg, "param_value", None)
+                    if stored is None:
+                        # No value in the echo: we cannot prove the write, so
+                        # we do not claim it.
+                        log.warning(
+                            "set_param(%s) echo carried no value; treating as "
+                            "unverified", name,
+                        )
+                        break
+                    if _close(float(stored), want):
                         return True
-                    msg = self._master.recv_match(
-                        type="PARAM_VALUE", blocking=True, timeout=timeout,
+                    log.warning(
+                        "set_param(%s=%s) REFUSED/CLAMPED by the FC: it stored "
+                        "%s", name, want, stored,
                     )
+                    return False
         except Exception:
             log.exception("set_param(%s) failed", name)
             return False
         log.warning("set_param(%s=%s) not acknowledged; continuing", name, value)
         return False
 
+    def get_param(self, name: str, *, timeout: float = 1.0) -> Optional[float]:
+        """PARAM_REQUEST_READ ``name`` and return the value the FC reports.
+
+        ``None`` means "the FC did not tell us" -- never a fabricated default.
+        """
+        if not self._connected or self._master is None:
+            return None
+        try:
+            self._master.mav.param_request_read_send(
+                self._target_system,
+                self._target_component,
+                name.encode("ascii"),
+                -1,
+            )
+        except Exception:
+            log.exception("get_param(%s) request failed", name)
+            return None
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        while True:
+            msg = self._recv(type="PARAM_VALUE", timeout=timeout)
+            if msg is None:
+                if not self._pending_inbox() or time.monotonic() >= deadline:
+                    return None
+                continue
+            if _param_name(msg) == name:
+                try:
+                    return float(getattr(msg, "param_value"))
+                except (AttributeError, TypeError, ValueError):
+                    return None
+            if time.monotonic() >= deadline:
+                return None
+
+    def apply_failsafe_params(
+        self,
+        *,
+        cell_count: int = 4,
+        geofence_radius_m: Optional[float] = None,
+    ) -> Tuple[int, int, list]:
+        """Push the derived safety envelope to the FLIGHT CONTROLLER.
+
+        ``mavlink.safety.failsafe_param_map`` derives FENCE_*, BATT_FS_*,
+        FS_GCS_*, RTL_ALT and the WPNAV speed caps from the SAME ``Limits`` the
+        software clamps use. Until this method existed nothing called it: the
+        map was a documentation table, the FC kept its ``.parm`` defaults, and
+        the "clamped twice" invariant had no firmware half (FM-16).
+
+        Returns ``(applied, attempted, failures)``. Never raises: a param this
+        firmware does not have is a failure to report, not a reason to drop the
+        FC connection.
+        """
+        from .safety import failsafe_param_map
+
+        params = failsafe_param_map(
+            self._limits,
+            cell_count=cell_count,
+            geofence_radius_m=geofence_radius_m,
+        )
+        failures: list = []
+        applied = 0
+        for name, value in params.items():
+            try:
+                ok = self.set_param(name, float(value))
+            except Exception:
+                ok = False
+            if ok:
+                applied += 1
+            else:
+                failures.append(name)
+        if failures:
+            log.warning(
+                "failsafe params: %d/%d applied; unconfirmed: %s",
+                applied, len(params), ", ".join(failures),
+            )
+        else:
+            log.info("failsafe params: all %d applied and verified", applied)
+        return applied, len(params), failures
+
     # ----------------------------------------------------------------------
     # Geofence upload (site perimeter -> ArduPilot polygon inclusion fence)
     # ----------------------------------------------------------------------
+    def fence_status(self) -> dict:
+        """What we can PROVE about the FC's fence, not what we hoped.
+
+        ``stored``/``enabled`` are tri-state: ``None`` means "unknown / not
+        attempted". ``enforced`` is True only when the polygon transfer was
+        accepted AND FENCE_ENABLE was read back as 1. The orchestrator gates
+        dispatch on this instead of on an unread boolean (FM-14 / FM-15).
+        """
+        return {
+            "stored": self._fence_stored,
+            "enabled": self._fence_enabled,
+            "enforced": bool(self._fence_stored and self._fence_enabled),
+            "detail": self._fence_detail,
+        }
+
     def upload_geofence(
         self,
         perimeter: Sequence[Tuple[float, float]],
         *,
         item_timeout: float = 2.0,
+        exclusions: Sequence[Sequence[Tuple[float, float]]] = (),
     ) -> bool:
         """Upload ``perimeter`` as an ArduPilot polygon INCLUSION fence.
 
@@ -1268,6 +1626,7 @@ class Vehicle:
         try:
             if not self._connected or self._master is None:
                 log.warning("upload_geofence skipped: not connected")
+                self._note_fence(False, False, "no FC link; no fence uploaded")
                 return False
 
             ring = list(perimeter)
@@ -1276,17 +1635,53 @@ class Vehicle:
                     "upload_geofence refused: perimeter needs >= 3 vertices, got %d",
                     len(ring),
                 )
+                self._note_fence(
+                    False, False,
+                    f"perimeter needs >= 3 vertices, got {len(ring)}",
+                )
                 return False
             for latlon in ring:
                 lat_f, lon_f = float(latlon[0]), float(latlon[1])
                 if not (math.isfinite(lat_f) and math.isfinite(lon_f)):
                     log.warning("upload_geofence refused: non-finite vertex %r", latlon)
+                    self._note_fence(False, False, "perimeter has a non-finite vertex")
                     return False
                 if not (-90.0 <= lat_f <= 90.0 and -180.0 <= lon_f <= 180.0):
                     log.warning("upload_geofence refused: vertex out of range %r", latlon)
+                    self._note_fence(
+                        False, False, "perimeter has an out-of-range vertex"
+                    )
                     return False
 
-            count = len(ring)
+            inclusion = getattr(
+                mavutil.mavlink, "MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION", 5001
+            )
+            exclusion = getattr(
+                mavutil.mavlink, "MAV_CMD_NAV_FENCE_POLYGON_VERTEX_EXCLUSION", 5002
+            )
+            # One flat item list: the inclusion perimeter first, then every
+            # NFZ as its own EXCLUSION polygon. NFZs used to reach the firmware
+            # nowhere at all -- a breach INSIDE the perimeter triggered nothing
+            # (FM-13).
+            items: list = [
+                (inclusion, float(len(ring)), latlon) for latlon in ring
+            ]
+            zones = 0
+            for zone in exclusions or ():
+                poly = [tuple(v) for v in zone]
+                if len(poly) < 3 or not all(
+                    math.isfinite(float(v[0])) and math.isfinite(float(v[1]))
+                    and -90.0 <= float(v[0]) <= 90.0 and -180.0 <= float(v[1]) <= 180.0
+                    for v in poly
+                ):
+                    log.warning(
+                        "upload_geofence: skipping malformed exclusion polygon %r", poly
+                    )
+                    continue
+                zones += 1
+                items.extend((exclusion, float(len(poly)), latlon) for latlon in poly)
+
+            count = len(items)
             self._master.mav.mission_count_send(
                 self._target_system,
                 self._target_component,
@@ -1296,9 +1691,8 @@ class Vehicle:
 
             sent = 0
             while sent < count:
-                msg = self._master.recv_match(
+                msg = self._recv(
                     type=["MISSION_REQUEST", "MISSION_REQUEST_INT", "MISSION_ACK"],
-                    blocking=True,
                     timeout=item_timeout,
                 )
                 if msg is None:
@@ -1306,6 +1700,7 @@ class Vehicle:
                         "upload_geofence: no MISSION_REQUEST after item %d/%d; "
                         "giving up (fence NOT loaded)", sent, count,
                     )
+                    self._note_fence(False, None, "no MISSION_REQUEST from the FC")
                     return False
                 if msg.get_type() == "MISSION_ACK":
                     # An early ack mid-transfer is a rejection.
@@ -1313,12 +1708,15 @@ class Vehicle:
                         "upload_geofence: FC rejected transfer early (MISSION_ACK "
                         "type=%s)", getattr(msg, "type", "?"),
                     )
+                    self._note_fence(False, None, "FC rejected the fence transfer")
                     return False
                 seq = int(getattr(msg, "seq", sent))
                 if not 0 <= seq < count:
                     log.warning("upload_geofence: FC requested bad seq %d", seq)
+                    self._note_fence(False, None, f"FC requested bad seq {seq}")
                     return False
-                lat_f, lon_f = float(ring[seq][0]), float(ring[seq][1])
+                command, vertex_count, latlon = items[seq]
+                lat_f, lon_f = float(latlon[0]), float(latlon[1])
                 # ArduPilot accepts MISSION_ITEM_INT replies to either request
                 # flavour (it speaks the INT protocol).
                 self._master.mav.mission_item_int_send(
@@ -1326,10 +1724,10 @@ class Vehicle:
                     self._target_component,
                     seq,
                     mavutil.mavlink.MAV_FRAME_GLOBAL,
-                    mavutil.mavlink.MAV_CMD_NAV_FENCE_POLYGON_VERTEX_INCLUSION,
+                    command,
                     0,                          # current
                     0,                          # autocontinue
-                    float(count),               # param1: polygon vertex count
+                    vertex_count,               # param1: polygon vertex count
                     0.0, 0.0, 0.0,              # param2..4 (unused)
                     int(round(lat_f * 1e7)),    # x: lat degE7
                     int(round(lon_f * 1e7)),    # y: lon degE7
@@ -1338,11 +1736,10 @@ class Vehicle:
                 )
                 sent += 1
 
-            ack = self._master.recv_match(
-                type="MISSION_ACK", blocking=True, timeout=item_timeout,
-            )
+            ack = self._recv(type="MISSION_ACK", timeout=item_timeout)
             if ack is None:
                 log.warning("upload_geofence: no final MISSION_ACK; fence state unknown")
+                self._note_fence(None, None, "no final MISSION_ACK; fence state unknown")
                 return False
             if int(getattr(ack, "type", -1)) != int(
                 mavutil.mavlink.MAV_MISSION_ACCEPTED
@@ -1351,19 +1748,66 @@ class Vehicle:
                     "upload_geofence: FC NACKed fence (MISSION_ACK type=%s)",
                     getattr(ack, "type", "?"),
                 )
+                self._note_fence(False, None, "FC NACKed the fence")
                 return False
 
-            log.info("upload_geofence: %d-vertex inclusion fence accepted", count)
+            log.info(
+                "upload_geofence: %d-vertex inclusion fence + %d exclusion zone(s) "
+                "accepted", len(ring), zones,
+            )
 
-            # Best-effort enable: log + continue on NACK/silence (SITL may lack
-            # or rename params; the fence itself is already stored).
+            # STORED is not ENFORCED. FENCE_TYPE selects which fences are armed
+            # and FENCE_ENABLE arms them; both echoes are now VERIFIED, and the
+            # outcome is recorded so the orchestrator can gate on it instead of
+            # discarding it (FM-14 / FM-15).
             # FENCE_TYPE bit0=max-alt(1) | bit2=polygon(4) -> 5.
-            self.set_param("FENCE_TYPE", 5.0)
-            self.set_param("FENCE_ENABLE", 1.0)
+            type_ok = self.set_param("FENCE_TYPE", 5.0)
+            enable_ok = self.set_param("FENCE_ENABLE", 1.0)
+            if type_ok and enable_ok:
+                self._note_fence(
+                    True, True,
+                    f"{len(ring)}-vertex inclusion fence + {zones} exclusion "
+                    f"zone(s) stored and ENABLED",
+                )
+            else:
+                unverified = ", ".join(
+                    name for name, ok in
+                    (("FENCE_TYPE", type_ok), ("FENCE_ENABLE", enable_ok)) if not ok
+                )
+                self._note_fence(
+                    True, False,
+                    f"fence STORED but NOT verified as enabled ({unverified} "
+                    f"unconfirmed) -- the FC may not enforce it",
+                )
+            # The polygon reached the FC; whether it is ARMED is fence_status().
             return True
         except Exception:
             log.exception("upload_geofence failed; continuing without FC fence")
+            self._note_fence(False, None, "geofence upload raised")
             return False
+
+    def _note_fence(
+        self, stored: Optional[bool], enabled: Optional[bool], detail: str
+    ) -> None:
+        self._fence_stored = stored
+        self._fence_enabled = enabled
+        self._fence_detail = detail
+
+
+def _param_name(msg: Any) -> str:
+    """The PARAM_VALUE's param_id as a plain, unpadded string."""
+    got = getattr(msg, "param_id", "")
+    if isinstance(got, bytes):
+        got = got.decode("ascii", errors="replace")
+    return str(got).rstrip("\x00")
+
+
+def _close(a: float, b: float, *, rel: float = 1e-3, abs_tol: float = 1e-3) -> bool:
+    """Float equality for a PARAM_VALUE echo (REAL32 round-trip tolerance)."""
+    try:
+        return math.isclose(float(a), float(b), rel_tol=rel, abs_tol=abs_tol)
+    except (TypeError, ValueError):
+        return False
 
 
 def _finite(v: float) -> float:
