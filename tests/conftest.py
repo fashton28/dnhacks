@@ -76,6 +76,7 @@ def manual_autonomy(monkeypatch):
     """The test Hub starts in manual mode: a posted Detection flies only when the test dispatches it.
     Tests of the hands-off modes switch through POST /autonomy/mode."""
     monkeypatch.setenv("ARGUS_AUTONOMY_MODE", "manual")
+    monkeypatch.setenv("ARGUS_STARTUP_SCENARIO", "")  # tests start their own stories
 
 
 @pytest.fixture

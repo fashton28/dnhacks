@@ -178,11 +178,37 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
                 app.state.registry.mark_stale()
                 await asyncio.sleep(0.5)
 
+        async def startup_scenario() -> None:
+            """The demo's foundation starts itself: once a Drone and a Renderer are connected, run the startup Scenario
+            (ARGUS_STARTUP_SCENARIO, default transformer_fire; empty to disable) after ARGUS_STARTUP_DELAY_S (default 20).
+            With the autonomy mode at its default, the plant alarm it raises dispatches a Drone with nobody at the keyboard."""
+            kind = os.environ.get("ARGUS_STARTUP_SCENARIO", "transformer_fire").strip()
+            if not kind:
+                return
+            delay = float(os.environ.get("ARGUS_STARTUP_DELAY_S", "20"))
+            deadline = asyncio.get_running_loop().time() + 300.0
+            while asyncio.get_running_loop().time() < deadline:
+                reg = app.state.registry
+                ready = any(c.ws is not None and c.state is not None and c.state.status.value == "idle" and "GPS" in c.state.message for c in reg.drones.values())
+                if ready and reg.renderers:
+                    break
+                await asyncio.sleep(2.0)
+            else:
+                app.state.audit.append("startup_scenario_skipped", kind=kind, reason="no ready Drone and Renderer within 300 s")
+                return
+            await asyncio.sleep(delay)
+            if app.state.registry.scene.scenario_ids:
+                return  # somebody already started a story
+            app.state.audit.append("startup_scenario", kind=kind, delay_s=delay)
+            await run_scenario(Scenario(id=f"startup-{kind}", kind=kind, params={}))
+
         task = asyncio.create_task(stale_loop())
+        boot = asyncio.create_task(startup_scenario())
         try:
             yield
         finally:
             task.cancel()
+            boot.cancel()
 
     app = FastAPI(title="ARGUS Hub", lifespan=lifespan)
     app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])  # Vite dev servers on other ports
