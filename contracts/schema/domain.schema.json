@@ -1107,5 +1107,131 @@
     ],
     "title": "Scenario",
     "type": "object"
+  },
+  "PlantSignal": {
+    "$defs": {
+      "PlantAsset": {
+        "additionalProperties": false,
+        "description": "The instrumented plant asset a signal belongs to, and where it stands.",
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "lat": {
+            "maximum": 90,
+            "minimum": -90,
+            "title": "Lat",
+            "type": "number"
+          },
+          "lon": {
+            "maximum": 180,
+            "minimum": -180,
+            "title": "Lon",
+            "type": "number"
+          }
+        },
+        "required": [
+          "name",
+          "lat",
+          "lon"
+        ],
+        "title": "PlantAsset",
+        "type": "object"
+      },
+      "PlantSignalKind": {
+        "description": "What a plant instrument measures: winding temperature, valve position, fire alarm zone, radiation monitor.",
+        "enum": [
+          "temperature",
+          "valve",
+          "fire_alarm",
+          "radiation"
+        ],
+        "title": "PlantSignalKind",
+        "type": "string"
+      },
+      "PlantSignalSeverity": {
+        "enum": [
+          "info",
+          "warning",
+          "alarm"
+        ],
+        "title": "PlantSignalSeverity",
+        "type": "string"
+      }
+    },
+    "additionalProperties": false,
+    "description": "One reading from the plant's own instrumentation (CONTEXT.md). A signal above its threshold becomes a Detection\nat the asset's position; the reading rides along in the Detection's metadata as data, never instructions.",
+    "properties": {
+      "id": {
+        "title": "Id",
+        "type": "string"
+      },
+      "ts": {
+        "format": "date-time",
+        "title": "Ts",
+        "type": "string"
+      },
+      "sensor_id": {
+        "title": "Sensor Id",
+        "type": "string"
+      },
+      "kind": {
+        "$ref": "#/$defs/PlantSignalKind"
+      },
+      "value": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          }
+        ],
+        "title": "Value"
+      },
+      "unit": {
+        "default": "",
+        "title": "Unit",
+        "type": "string"
+      },
+      "threshold": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "number"
+          },
+          {
+            "type": "null"
+          }
+        ],
+        "default": null,
+        "title": "Threshold"
+      },
+      "asset": {
+        "$ref": "#/$defs/PlantAsset"
+      },
+      "severity": {
+        "$ref": "#/$defs/PlantSignalSeverity",
+        "default": "info"
+      },
+      "note": {
+        "default": "",
+        "title": "Note",
+        "type": "string"
+      }
+    },
+    "required": [
+      "id",
+      "ts",
+      "sensor_id",
+      "kind",
+      "value",
+      "asset"
+    ],
+    "title": "PlantSignal",
+    "type": "object"
   }
 }

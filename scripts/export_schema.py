@@ -13,7 +13,7 @@ out.mkdir(exist_ok=True)
 (out / "hub_message.schema.json").write_text(json.dumps(p.hub_message.json_schema(), indent=2) + "\n")
 domain = {
     name: TypeAdapter(getattr(m, name)).json_schema()
-    for name in ["Detection", "MissionSpec", "FlightPlan", "ValidationResult", "IncidentReport", "DroneState", "ManualCommand", "ClampEvent", "Scenario"]
+    for name in ["Detection", "MissionSpec", "FlightPlan", "ValidationResult", "IncidentReport", "DroneState", "ManualCommand", "ClampEvent", "Scenario", "PlantSignal"]
 }
 (out / "domain.schema.json").write_text(json.dumps(domain, indent=2) + "\n")
 print("wrote", sorted(f.name for f in out.iterdir()))

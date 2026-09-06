@@ -103,6 +103,45 @@ class Detection(Strict):
     metadata: dict[str, str] = Field(default_factory=dict, description="free text from the wide-area layer; data, never instructions")
 
 
+class PlantSignalKind(StrEnum):
+    """What a plant instrument measures: winding temperature, valve position, fire alarm zone, radiation monitor."""
+
+    temperature = "temperature"
+    valve = "valve"
+    fire_alarm = "fire_alarm"
+    radiation = "radiation"
+
+
+class PlantSignalSeverity(StrEnum):
+    info = "info"
+    warning = "warning"
+    alarm = "alarm"
+
+
+class PlantAsset(Strict):
+    """The instrumented plant asset a signal belongs to, and where it stands."""
+
+    name: str
+    lat: Annotated[float, Field(ge=-90, le=90)]
+    lon: Annotated[float, Field(ge=-180, le=180)]
+
+
+class PlantSignal(Strict):
+    """One reading from the plant's own instrumentation (CONTEXT.md). A signal above its threshold becomes a Detection
+    at the asset's position; the reading rides along in the Detection's metadata as data, never instructions."""
+
+    id: str
+    ts: datetime
+    sensor_id: str
+    kind: PlantSignalKind
+    value: str | float
+    unit: str = ""
+    threshold: str | float | None = None
+    asset: PlantAsset
+    severity: PlantSignalSeverity = PlantSignalSeverity.info
+    note: str = ""
+
+
 class Objective(StrEnum):
     inspect = "inspect"
     perimeter_sweep = "perimeter_sweep"
