@@ -28,6 +28,7 @@ from contracts.models import (
     FlightPlan,
     IncidentReport,
     ManualCommand,
+    PlantSignal,
     Scenario,
     SceneProp,
     SceneState,
@@ -61,6 +62,7 @@ from hub.detections import DetectionStore
 from hub.incidents import IncidentStore
 from hub.manual import ManualControl
 from hub.missions import MissionPhase, MissionRunner
+from hub.plant import PlantSignals, signal_to_detection
 from hub.registry import Registry
 from hub.safety import validate
 from sim.common.site_limits import SiteLimits
@@ -157,6 +159,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         app.state.manual = ManualControl()
         app.state.detections = DetectionStore(path=settings.evidence_dir / "detections.jsonl" if settings.evidence_dir else None)
         app.state.incidents = IncidentStore()
+        app.state.plant = PlantSignals()
         app.state.limits = SiteLimits.load()
         app.state.settings = settings
         app.state.autonomy = Autonomy(app, asyncio.get_running_loop(), settings.runs_dir)
@@ -588,6 +591,25 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         if det is None:
             raise HTTPException(404, f"unknown detection {detection_id}")
         return det
+
+    # ---- plant signals (the plant's own instrumentation as a trigger) ----------------------------
+    async def ingest_plant_signal(signal: PlantSignal) -> Detection:
+        """Store and publish a PlantSignal, then the Detection it becomes. Autonomy policy decides what follows."""
+        app.state.plant.append(signal)
+        app.state.audit.append("plant_signal", signal_id=signal.id, sensor_id=signal.sensor_id, signal_kind=signal.kind.value, severity=signal.severity.value,
+                               value=signal.value, threshold=signal.threshold, asset=signal.asset.name)
+        reg().publish({"type": "plant_signal", **signal.model_dump(mode="json")})
+        det = signal_to_detection(signal)
+        await post_detection(det)
+        return det
+
+    @app.post("/plant/signals", response_model=Detection, status_code=201)
+    async def post_plant_signal(signal: PlantSignal) -> Detection:
+        return await ingest_plant_signal(signal)
+
+    @app.get("/plant/signals", response_model=list[PlantSignal])
+    async def list_plant_signals() -> list[PlantSignal]:
+        return app.state.plant.list()
     # ---- wide-area layer and autonomy ---------------------------------------------------------
     @app.post("/widearea/detect", response_model=list[Detection])
     async def widearea_detect(body: DetectBody) -> list[Detection]:

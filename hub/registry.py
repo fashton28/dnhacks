@@ -54,15 +54,16 @@ class Registry:
     # Events a freshly opened Console needs to rebuild the trust column for a dispatch already under way.
     # A new pretriage starts a new story; everything after it is kept (capped) and replayed in the snapshot.
     TRUST_TYPES = ("pretriage", "drone_selected", "mission_spec", "validation", "envelope", "envelope_repaired", "agent_action", "agent_note",
-                   "hard_stop", "inspection", "triage", "incident", "dispatch_outcome")
+                   "hard_stop", "inspection", "triage", "incident", "dispatch_outcome", "plant_signal", "decision")
 
     def publish(self, event: dict[str, Any]) -> None:
         event.setdefault("ts", datetime.now(UTC).isoformat())  # when it happened, so a replayed trail keeps its real times
         t = event.get("type")
         if t in self.TRUST_TYPES:
-            if t == "pretriage":
-                self.trust_events = []
             if not hasattr(self, "trust_events"):
+                self.trust_events = []
+            # a plant signal starts a new story; so does a pretriage, unless a decision on this Detection already opened one
+            if t == "plant_signal" or (t == "pretriage" and not any(e.get("type") == "decision" and e.get("detection_id") == event.get("detection_id") for e in self.trust_events)):
                 self.trust_events = []
             self.trust_events.append(event)
             del self.trust_events[:-300]
