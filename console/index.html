@@ -35,8 +35,6 @@
           <span id="hub-status" class="pill" title="Live feed from the Hub">hub</span>
           <span id="renderer-status" class="pill" title="This tab is a Renderer: it draws Drone cameras for the Hub">renderer</span>
           <span id="fps" class="pill mono" title="World view frame rate">-- fps</span>
-        <button id="tx-toggle" class="btn ghost" title="Show or hide the on-screen transmitter (it also appears whenever Manual Control is active)" aria-pressed="false">Transmitter</button>
-        <span id="rc-pill" class="pill" title="Plug in a gamepad: left stick yaw and throttle, right stick pitch and roll, A take control, B release, Y return home, X camera">no RC · press a button</span>
           <button id="help-btn" class="btn ghost icon" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">?</button>
         </div>
       </header>
@@ -44,7 +42,7 @@
       <div id="manual-banner" class="banner" hidden>
         <span class="banner-title">MANUAL CONTROL</span>
         <span id="manual-text"></span>
-        <span class="banner-keys mono">W S A D · Q E · ◄ ► · H resume · X abort · R home</span>
+        <span class="banner-keys mono">W S A D · Q E · arrows camera · H resume · X abort · R home</span>
       </div>
 
       <main>
@@ -87,7 +85,6 @@
               <div id="hud" class="hud mono"></div>
             </div>
             <div id="drone-telemetry" class="telemetry mono"></div>
-            <div id="vrc"></div>
           </section>
         </aside>
 
@@ -112,10 +109,11 @@
         <span>F</span><em>focus World view on the selected Drone</em>
         <span>G</span><em>fit the Site in the World view</em>
         <span>V</span><em>cycle vision mode (RGB · Thermal · LiDAR)</em>
-        <span>W · S</span><em>Manual Control: forward · back</em>
+        <span>W · S</span><em>Manual Control: forward · back along the nose</em>
         <span>A · D</span><em>turn left · right</em>
         <span>Q · E</span><em>down · up</em>
-        <span>◄ · ►</span><em>slide left · right</em>
+        <span>▲ · ▼</span><em>camera tilt up · down</em>
+        <span>◄ · ►</span><em>camera zoom out · in</em>
         <span>H</span><em>hand back, resume the paused Mission</em>
         <span>X</span><em>hand back, abort the Mission</em>
         <span>R</span><em>return home</em>

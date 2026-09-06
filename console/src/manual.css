@@ -2,40 +2,9 @@
 .status-chip.taking-off { color: #ffc24b; border-color: rgba(245, 166, 35, 0.45); animation: argus-pulse 1s ease-in-out infinite; }
 @keyframes argus-pulse { 50% { opacity: 0.55; } }
 
-/* ---- virtual transmitter: two Mode 2 sticks and a button row under the Drone view ---- */
-.vrc { display: grid; grid-template-columns: 124px 1fr 124px; gap: 10px; align-items: center; margin: 0 12px 10px; padding: 8px 10px; border: 1px solid var(--line-2); border-radius: 10px;
-  background: linear-gradient(180deg, rgba(20,26,34,.95), rgba(10,13,18,.98)); user-select: none; touch-action: none; }
-.vrc-stick { position: relative; width: 124px; height: 124px; border-radius: 50%; cursor: grab;
-  background: radial-gradient(circle at 50% 45%, #1b232d 0%, #10161d 62%, #0a0e13 100%); box-shadow: inset 0 2px 8px rgba(0,0,0,.7), 0 0 0 1px rgba(255,255,255,.05); }
-.vrc-stick.active { cursor: grabbing; }
-.vrc-ring { position: absolute; inset: 12px; border-radius: 50%; border: 1px dashed rgba(139,152,168,.28); }
-.vrc-cross { position: absolute; inset: 0; background:
-  linear-gradient(rgba(139,152,168,.18), rgba(139,152,168,.18)) center/1px 70% no-repeat,
-  linear-gradient(rgba(139,152,168,.18), rgba(139,152,168,.18)) center/70% 1px no-repeat; border-radius: 50%; }
-.vrc-knob { position: absolute; left: calc(50% - 14px); top: calc(50% - 14px); width: 28px; height: 28px; border-radius: 50%;
-  background: radial-gradient(circle at 40% 35%, #6d7a8a, #2a333f 60%, #151b22); box-shadow: 0 3px 8px rgba(0,0,0,.7), inset 0 1px 1px rgba(255,255,255,.25); pointer-events: none; }
-.vrc-stick.deflected .vrc-knob { box-shadow: 0 3px 10px rgba(0,0,0,.8), 0 0 0 2px rgba(63,185,80,.55), inset 0 1px 1px rgba(255,255,255,.25); }
-.vrc-lbl { position: absolute; font: 600 8.5px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; letter-spacing: .08em; color: rgba(139,152,168,.75); pointer-events: none; }
-.vrc-lbl-top { top: 4px; left: 50%; transform: translateX(-50%); } .vrc-lbl-bottom { bottom: 4px; left: 50%; transform: translateX(-50%); }
-.vrc-lbl-left { left: 3px; top: 50%; transform: translateY(-50%) rotate(-90deg); transform-origin: center; } .vrc-lbl-right { right: 3px; top: 50%; transform: translateY(-50%) rotate(90deg); }
-.vrc-mid { display: flex; flex-direction: column; gap: 6px; align-items: stretch; min-width: 0; }
-.vrc-title { font: 600 10px/1 -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .14em; color: var(--fg-1); text-align: center; }
-.vrc-mode { color: #3fb950; margin-left: 6px; }
-.vrc-btn { font: 600 10.5px/1 -apple-system, BlinkMacSystemFont, sans-serif; letter-spacing: .06em; padding: 8px 6px; border-radius: 6px; border: 1px solid var(--line-2); background: #141a22; color: var(--fg-0); cursor: pointer; }
-.vrc-btn:hover { border-color: rgba(63,185,80,.5); }
-.vrc-take { background: #1f6f3a; border-color: #2ea043; }
-.vrc.in-control .vrc-take { background: #0d1117; border-color: #3fb950; color: #3fb950; }
-.vrc-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
-.vrc-phase { font: 500 10px/1.3 -apple-system, BlinkMacSystemFont, sans-serif; text-align: center; color: var(--fg-1); min-height: 13px; }
-.vrc-phase.live { color: #3fb950; } .vrc-phase.waiting { color: #ffc24b; animation: argus-pulse 1s ease-in-out infinite; }
-body.embed #drone-panel .vrc, body.headless .vrc { display: none; }
-
 /* Header at laptop width: the Scenario buttons scroll in one row instead of wrapping into the banner below */
 #top nav { flex: 1 1 auto; min-width: 0; display: flex; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: none; }
 #top nav::-webkit-scrollbar { display: none; }
 #top nav .btn { white-space: nowrap; flex: none; }
 #top .status { flex: none; }
 
-/* Transmitter toggle in the header: lit while pinned on */
-#tx-toggle.on { color: #3fb950; border-color: rgba(63,185,80,.55); background: rgba(63,185,80,.08); }
-#vrc[hidden] { display: none; }

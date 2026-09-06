@@ -2,8 +2,6 @@ import "./style.css";
 import "./manual.css";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { RcController, type Sticks } from "./rc";
-import { VirtualRc } from "./vrc";
 import { api, liveFeed, RendererLink, type DroneState, type SceneState } from "./hub";
 import { SiteScene, enuToThree } from "./scene";
 import { VisionModes } from "./vision";
@@ -416,74 +414,33 @@ window.addEventListener("keydown", (e) => {
   if (k === "h") manualEnd("resume");
   if (k === "x") manualEnd("abort");
   if (k === "r" && selected) returnHome(selected);
-  if (["w", "a", "s", "d", "q", "e", "arrowleft", "arrowright"].includes(k)) {
+  if (k === "arrowup" || k === "arrowdown") { e.preventDefault(); nudgeGimbal(k === "arrowup" ? -5 : 5); return; }  // camera tilt
+  if (k === "arrowleft" || k === "arrowright") { e.preventDefault(); nudgeZoom(k === "arrowright" ? 0.5 : -0.5); return; }  // camera zoom
+  if (["w", "a", "s", "d", "q", "e"].includes(k)) {
     e.preventDefault();
     if (!manual && selected) manualStart(selected).catch((err) => log(String(err), "bad"));
   }
 });
 window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
-// ---- RC controller: a gamepad is a Mode 2 transmitter (see rc.ts) -------------------------------------------------
-const rc = new RcController();
-const rcPill = $("rc-pill");
-rc.onConnect = (id) => { rcPill.textContent = `RC ${id.replace(/\(.*\)/, "").trim().slice(0, 28)}`; rcPill.className = "pill ok"; log(`RC controller connected: ${id}`, "good"); };
-rc.onDisconnect = (id) => { rcPill.textContent = "no RC · press a button"; rcPill.className = "pill"; log(`RC controller disconnected: ${id}`, "warn"); };
-const RC_SPEED = 6.0, RC_CLIMB = 2.5, RC_YAW_RATE = 90;  // full stick: metres per second, metres per second, degrees per second
-const KEY_STICK = 0.5;  // a held key is half stick: 3 m/s, 1.25 m/s climb, 45 deg/s
-// The on-screen transmitter under the Drone view: the same Sticks as a gamepad, driven by mouse or touch.
-const cycleCamera = () => { if (!selected) return; const modes = ["rgb", "thermal", "lidar"] as const; const cur = cameraSettings.get(selected)?.mode ?? "rgb"; setVision(modes[(modes.indexOf(cur) + 1) % 3]); };
-const vrc = new VirtualRc($("vrc"), {
-  take: () => { if (selected && !manual) manualStart(selected).catch((err) => log(String(err), "bad")); },
-  release: () => { if (manual) manualEnd("resume"); },
-  home: () => { if (selected) returnHome(selected); },
-  camera: cycleCamera,
-});
-// The transmitter shows itself whenever Manual Control is active, and otherwise only when the Operator switches it on
-// from the header toggle (remembered per browser).
-const TX_KEY = "argus.console.transmitter";
-let txPinned = (() => { try { return localStorage.getItem(TX_KEY) === "1"; } catch { return false; } })();
-const txToggle = $("tx-toggle") as HTMLButtonElement;
-function refreshTransmitter(): void {
-  const show = manual || txPinned;
-  $("vrc").hidden = !show;
-  txToggle.setAttribute("aria-pressed", String(txPinned));
-  txToggle.classList.toggle("on", txPinned);
-}
-txToggle.onclick = () => { txPinned = !txPinned; try { localStorage.setItem(TX_KEY, txPinned ? "1" : "0"); } catch { /* private mode */ } refreshTransmitter(); };
-refreshTransmitter();
+// ---- Manual Control loop: keyboard only. W/S fly along the nose, A/D turn the nose, Q/E descend and climb. The arrow keys
+// drive the camera (up/down tilt, left/right zoom) and never move the aircraft. Velocities are recomputed from the current
+// heading every tick, so W plus A or D flies a curve and the airframe banks into it.
+const KEY_SPEED = 3.0, KEY_CLIMB = 1.5, KEY_YAW_RATE = 60;
 let manualPhase = "live";
-let rcSeen: string | null = null;
 setInterval(() => {
-  const pad = rc.poll();
-  if (pad.id !== rcSeen) { rcSeen = pad.id; if (pad.id) rc.onConnect?.(pad.id); else rc.onDisconnect?.("controller"); }  // poll-driven: some browsers never fire the connect event for an already-plugged pad
-  const virt = vrc.poll();
-  if (pad.buttons.release && manual) { manualEnd("resume"); return; }
-  if (pad.buttons.home && selected) { returnHome(selected); return; }
-  if (pad.buttons.camera) cycleCamera();
-  // Keyboard, like a real drone: W/S along the nose, A/D turn the nose, arrows slide sideways, Q/E climb and descend.
-  const kb: Sticks = {
-    pitch: ((keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0)) * KEY_STICK, roll: ((keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0)) * KEY_STICK,
-    throttle: ((keys.has("e") ? 1 : 0) - (keys.has("q") ? 1 : 0)) * KEY_STICK, yaw: ((keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0)) * KEY_STICK,
-    active: false, id: "keyboard", buttons: { take: false, release: false, home: false, camera: false },
-  };
-  kb.active = Math.abs(kb.pitch) + Math.abs(kb.roll) + Math.abs(kb.throttle) + Math.abs(kb.yaw) > 0;
-  // Priority: a physical controller, then the on-screen sticks, then the keyboard. Any deflection takes control.
-  const sticks = pad.id && pad.active ? pad : virt.active ? virt : kb;
-  if (sticks.id !== "virtual") vrc.reflect(sticks);
-  if ((pad.buttons.take || sticks.active) && !manual && selected) manualStart(selected).catch((err) => log(String(err), "bad"));
-  vrc.setPhase(manualPhase, manual);
-  if ($("vrc").hidden === manual) refreshTransmitter();  // appears on the tick that takes control, hides when it ends unless pinned
   if (!manual || !manualDrone) return;
   const s = drones.get(manualDrone); if (!s) return;
-  // Velocities are recomputed from the current heading every tick, so forward plus yaw flies a curve and the airframe banks into it.
-  const fwd = sticks.pitch * RC_SPEED, right = sticks.roll * RC_SPEED, up = sticks.throttle * RC_CLIMB, yawRate = sticks.yaw * RC_YAW_RATE;
+  const fwd = ((keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0)) * KEY_SPEED;
+  const up = ((keys.has("e") ? 1 : 0) - (keys.has("q") ? 1 : 0)) * KEY_CLIMB;
+  const yawRate = ((keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0)) * KEY_YAW_RATE;
   const h = s.heading_deg * Math.PI / 180;
-  const vn = fwd * Math.cos(h) - right * Math.sin(h);
-  const ve = fwd * Math.sin(h) + right * Math.cos(h);
+  const vn = fwd * Math.cos(h);
+  const ve = fwd * Math.sin(h);
   api<any>(`/drones/${manualDrone}/manual/command`, { vx: vn, vy: ve, vz: -up, yaw_rate_dps: yawRate })
     .then((r) => {
       if (r.clamped) showClamp(r.clamped.rule);
       const phase = String(r.phase ?? "live");
-      if (phase !== manualPhase) { manualPhase = phase; vrc.setPhase(phase, manual); if (phase !== "live") log(`Manual Control: ${phase}, sticks go live once airborne`, "warn"); else log("Manual Control: sticks live", "good"); }
+      if (phase !== manualPhase) { manualPhase = phase; if (phase !== "live") log(`Manual Control: ${phase}, keys go live once airborne`, "warn"); else log("Manual Control: keys live", "good"); }
       const chip = $("drone-view-status"); if (manual && phase !== "live") { chip.textContent = phase; chip.className = "chip status-chip taking-off"; }
     })
     .catch((err) => log(String(err), "bad"));
@@ -533,6 +490,16 @@ function reflectVision(mode: "rgb" | "thermal" | "lidar"): void {
   const frame = document.querySelector<HTMLElement>(".drone-frame");
   if (frame) frame.className = `drone-frame${mode !== "rgb" ? ` mode-${mode}` : ""}`;
   if (selected && drones.has(selected)) renderHud($("hud"), drones.get(selected), (drones.get(selected)!.alt > 0.3), mode);
+}
+/** Camera zoom in steps: field of view 110 (1x) down to 20 degrees (5.5x), brokered by the Hub so every view follows. */
+function nudgeZoom(deltaZoom: number): void {
+  if (!selected) return;
+  const cur = cameraSettings.get(selected) ?? { mode: "rgb", fov_deg: 70 };
+  const zoom = Math.max(1, Math.min(5.5, 110 / cur.fov_deg + deltaZoom));
+  const fov = Math.round(110 / zoom);
+  cameraSettings.set(selected, { ...cur, fov_deg: fov });
+  api(`/drones/${selected}/camera`, { fov_deg: fov }).catch((err) => log(String(err), "bad"));
+  log(`Camera zoom ${zoom.toFixed(1)}x`);
 }
 function setVision(mode: "rgb" | "thermal" | "lidar"): void {
   if (selected) {

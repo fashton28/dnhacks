@@ -83,11 +83,10 @@ Both are served by the Hub and driven by the same live feed.
   `?embed=1` shows only the World view (used by the dashboard's World view tab).
 
 Hub endpoints added for the dashboard: `GET /drones/{id}/mjpeg` (multipart JPEG stream of the Drone view), `GET /overheads` (captured overhead images), `GET /autonomy`, `POST /detections/{id}/dispatch`, and `GET/POST /drones/{id}/camera` (vision mode rgb/thermal/lidar and field of view 20 to 110 degrees; the Renderer draws that Drone accordingly and the live feed publishes `camera` events).
-Manual Control flies like a real drone.
-Keyboard: W and S along the nose, A and D turn the nose, Left and Right arrows slide sideways, Q and E descend and climb; H hands control back, R returns home.
-RC controller: plug in any gamepad (Xbox, PlayStation, or a transmitter in joystick mode) and it is a Mode 2 transmitter: left stick yaw and throttle, right stick pitch and roll, A takes control, B releases, Y returns home, X cycles the camera.
-Sticks have a deadzone and an expo curve; full deflection is 6 m/s, 2.5 m/s climb and 90 degrees per second of yaw, all clamped by the Safety Validator like every other command.
-The first command under Manual Control arms the autopilot and climbs clear of the pad; the Hub's reply carries `phase` (`arming`, `taking off`, `live`) and sticks move the Drone only when live.
+Manual Control is keyboard only and flies like a real drone.
+W and S fly forward and back along the nose, A and D turn the nose, Q and E descend and climb; the arrow keys drive the camera (up and down tilt the gimbal, left and right zoom).
+Holding W while turning flies a curve and the airframe banks into it, because the Bridge reports ArduPilot's real attitude.
+The first command under Manual Control arms the autopilot and climbs clear of the pad; the Hub's reply carries `phase` (`arming`, `taking off`, `live`) and keys move the Drone only when live.
 Camera gimbal pitch is a Drone command: `POST /drones/{id}/command {type: look_at, pitch_deg}` from -30 (up) to 90 (straight down).
 
 LLM layer endpoints: `GET /site/context` (the Zones and maintenance windows the Triage Agent reads), `POST /detections/{id}/dispatch` (Triage decision first, then plan, verify, fly, inspect, report), and `POST /redteam/{case}` with `bad_plan`, `prompt_injection`, `outside_geofence` or `over_endurance`.
