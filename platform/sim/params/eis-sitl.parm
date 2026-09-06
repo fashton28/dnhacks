@@ -46,8 +46,8 @@ PILOT_ACCEL_Z    250      # cm/s/s vertical accel
 # --- Geofence (FC-side backstop for standoff + altitude caps) ---------------
 # THESE NUMBERS MUST CONTAIN THE SITE, NOT THE LAUNCH PAD.
 # The previous values (radius 60 m, alt 30 m) were the single-vehicle demo's
-# numbers and were never reconciled with the Komati site the demo actually
-# flies: a ~720 x 880 m perimeter with a 20-80 m altitude band. The first
+# numbers and were never reconciled with the Meridian Station site the demo
+# actually flies: a 600 x 600 m perimeter with a 5-60 m altitude band. The first
 # outbound leg breached the 60 m circle and any leg above 30 m breached the
 # altitude fence, so ArduPilot RTL'd mid-demo under FIRMWARE authority --
 # indistinguishable, on stage, from a real safety event (FM-155).
@@ -60,10 +60,19 @@ PILOT_ACCEL_Z    250      # cm/s/s vertical accel
 # not be tighter than the site.
 FENCE_ENABLE     1        # enable fence
 FENCE_TYPE       3        # 1=alt, 2=circle, 3=alt+circle (companion -> 5 = alt+polygon)
-FENCE_ALT_MAX    80       # m  -- the site alt_band max (site/site.stub.json)
-FENCE_RADIUS     1000     # m  -- contains the ~720 x 880 m Komati perimeter
+FENCE_ALT_MAX    60       # m  -- the site alt_band max (site/site.stub.json)
+FENCE_RADIUS     1000     # m  -- contains the 600 x 600 m Meridian perimeter
 FENCE_MARGIN     2        # m  -- breach margin
 FENCE_ACTION     1        # 1 = RTL or LAND on breach (safe)
+
+# --- SITL home / site anchor -------------------------------------------------
+# ArduPilot takes its ORIGIN from the launcher, not from this file, so there is
+# deliberately no home parameter here -- a second authority for the origin is
+# exactly the divergence FM-165 describes. sim/run_sitl.sh passes
+# --custom-location/--home from $EIS_SITL_HOME; set it to the site's own home
+# (site/site.stub.json "home", which is also pads[0]) so the simulated vehicle
+# spawns on the pad it flies from:
+#   EIS_SITL_HOME=41.1992364,-98.3995821,550,0   # Meridian Station, pad-1
 
 # --- Arming checks (keep real checks; SITL still needs a GPS lock) -----------
 ARMING_CHECK     1        # 1 = all checks enabled (safe default)

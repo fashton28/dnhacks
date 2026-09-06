@@ -12,7 +12,7 @@ a command in the appendix.** If a number cannot be re-run, it is not on a slide.
 
 **A drone that is not allowed to fly the plan the model wrote.**
 
-- Autonomous inspection for critical infrastructure — Komati power station
+- Autonomous inspection for critical infrastructure — Meridian Station
 - Satellite cue → LLM plan → deterministic refusal → human approval → ArduPilot
 - Offline, end to end, on this laptop
 
@@ -37,9 +37,9 @@ a command in the appendix.** If a number cannot be re-run, it is not on a slide.
 
 > **Speaker note.** Land the resolution number hard — it is the whole reason the
 > system has two layers rather than one. One pixel of Sentinel-2 is a tennis
-> court. A bakkie is a third of a pixel. The satellite is a *change* sensor, not
-> an *identity* sensor, and no amount of model cleverness changes that. Komati is
-> a real Eskom station and is treated here as protected critical infrastructure
+> court. A pickup truck is a third of a pixel. The satellite is a *change* sensor, not
+> an *identity* sensor, and no amount of model cleverness changes that. Meridian
+> Station is fictional and is treated here as protected critical infrastructure
 > (`CONOPS.md`); we are using a labelled stub of its geometry, not survey data.
 
 ---
@@ -118,8 +118,8 @@ a command in the appendix.** If a number cannot be re-run, it is not on a slide.
 **Watch the verifier say no, by name, and disable the button.**
 
 - Plan 1 is **REJECTED** on three of eighteen checks:
-  - `nfz_transit` — route passes **0 m** from the chimney NFZ; **25 m** required
-  - `altitude` — **15 m**, outside the site band **[20, 45] m**
+  - `nfz_transit` — route passes **0 m** from the reactor-exclusion NFZ; **25 m** required
+  - `altitude` — **1 m**, outside the site band **[5, 45] m**
   - `anomaly_proximity` — **no target within 200 m** of the anomaly
 - The verifier *offers* repairs it can make (clamp the altitude, route around the
   NFZ) and still refuses, because it will not invent a target near the anomaly
@@ -144,9 +144,9 @@ a command in the appendix.** If a number cannot be re-run, it is not on a slide.
 | Element | What it actually is | What is real about it |
 |---|---|---|
 | Satellite tiles | Generated PNGs — `ground/satellite/scripts/make-tiles.mjs`, seed `1592598566`, provenance stamped into `tiles.json` | `detectAnomalies` / `latLonToPixel` / `validateGeoRef` are the production core, running in the browser on those bytes |
-| Tile resolution | 512 × 512 px over a **1,300 m × 1,568 m** footprint ≈ **2.5–3.1 m/pixel** | Sentinel-2's real constraint is **10 m/pixel**. Our tiles are *easier* than reality — the two-layer argument is what survives, not the pixel count |
+| Tile resolution | 512 × 512 px over a **960 m × 960 m** footprint ≈ **1.9 m/pixel** | Sentinel-2's real constraint is **10 m/pixel**. Our tiles are *easier* than reality — the two-layer argument is what survives, not the pixel count |
 | Staging imagery | `image_kind: "scripted_placeholder"` in the site model, four PNGs | Resolved, decoded and cited through the same frame-reference path a real camera uses; a failed rail shows *evidence withheld*, never a stale frame |
-| Site model | Labelled **Komati stub** — nine required fields, `docs/SITE_CONTRACT.md` | Validated by two independent validators; drives the plan, the fence upload, the map and the verifier from one file |
+| Site model | Labelled **Meridian Station stub** — nine required fields, `docs/SITE_CONTRACT.md` | Validated by two independent validators; drives the plan, the fence upload, the map and the verifier from one file |
 | RF / SDR | Scripted sidecar, fixed detector thresholds (ADR D11) | Receive-only by design; events flow through the real contract envelopes |
 | Thermal / LiDAR | Synthetic rails against staged truth | Fusion, disagreement penalties and health gating are real code with real tests |
 | Flight | ArduCopter SITL | Real MAVLink GUIDED, real polygon fence upload, real firmware failsafes |
@@ -159,7 +159,7 @@ a command in the appendix.** If a number cannot be re-run, it is not on a slide.
 > **Speaker note.** Volunteer this slide before anyone asks. Judges assume the
 > pretty parts are fake; the credibility win is being the one who says which, and
 > then showing that the *seams* are load-bearing. The resolution line is the one
-> to be scrupulous about: our synthetic tiles are ~2.5 m/pixel, which is better
+> to be scrupulous about: our synthetic tiles are ~1.9 m/pixel, which is better
 > than Sentinel-2, so do not claim the detector was tested at 10 m/pixel. Claim
 > the architecture, which is what the resolution constraint motivates.
 
@@ -230,11 +230,11 @@ a command in the appendix.** If a number cannot be re-run, it is not on a slide.
   profile, 30–50 m band (current ceiling 45 m), one lap, ≤15 s hold, ≤2 dispatches
   per rolling hour, GPS only, healthy thermal at night, wind ≤ half the attended
   limit. Operator disconnection alone never enables it
-- **Regulatory path.** The site jurisdiction is South Africa: SACAA Part 101
-  RPAS, operator/aircraft/pilot/airspace approvals, National Key Point
-  restrictions. The equivalent US framing is a **Part 107 waiver path** —
-  §107.31 BVLOS and §107.29 night, supported by the same artefacts the system
-  already produces: a written CONOPS, a hazard/failure catalogue with
+- **Regulatory path.** The site is fictional, so no jurisdiction is claimed; a
+  real deployment resolves uncrewed-aircraft, critical-infrastructure and
+  privacy rules where it actually flies. In US framing that is a **Part 107
+  waiver path** — §107.31 BVLOS and §107.29 night — supported by the same
+  artefacts the system already produces: a written CONOPS, a hazard/failure catalogue with
   deterministic responses, a containment argument (geofence + NFZ buffers +
   firmware fence), and a durable audit trail
 - **Deployment shape.** Drone-in-a-box: a fixed dock on site, a scheduled
@@ -323,14 +323,14 @@ Every number on slide 7. Companion suite and SDR suite use
 ### Live-demo facts quoted on slide 5
 
 Reproduced against `site/site.stub.json` and the baked anomaly
-`sat-change-1` (−26.090664, 29.469245, confidence 0.94):
+`sat-change-1` (41.198370, −98.400005, confidence 0.94):
 
 - `scripted-failing-sat-change-1` → **rejected**, failing `anomaly_proximity`
   ("no mission target is within 200 m of the anomaly"), `altitude` ("tool 0
-  altitude 15 m is outside [20, 45] m"), `nfz_transit` ("leg to tool 0 is 0 m
-  from NFZ \"chimney\"; 25 m required")
-- `scripted-sat-change-1` → **pass**, 18/18: `goto_gps` at 45 m,
+  altitude 1 m is outside [5, 45] m"), `nfz_transit` ("leg to tool 0 is 0 m
+  from NFZ \"reactor-exclusion\"; 25 m required")
+- `scripted-sat-change-1` → **pass**, 18/18: `goto_gps` at 32.5 m,
   `orbit_point` radius 25 m, `rtl`
-- Site policy in force: NFZ buffer 25 m, alt band [20, 80] m, clear altitude
+- Site policy in force: NFZ buffer 25 m, alt band [5, 60] m, clear altitude
   45 m, `standard` profile capped at 4 m/s and 45 m, hard standoff floor 3 m,
   hard speed ceiling 8 m/s, sortie cap 480 s, dispatch minimum SoC 80 %

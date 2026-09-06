@@ -1,0 +1,1 @@
+{"dataset":"DNHacks synthetic SAR fallback","kind":"synthetic","claim":"Generated demonstration intensities; not Umbra imagery","bounds":{"north":41.2026949,"south":41.1973051,"west":-98.4035817,"east":-98.3964183},"before":"sar-before.json","after":"sar-after.json"}

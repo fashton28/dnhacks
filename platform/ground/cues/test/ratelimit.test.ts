@@ -136,8 +136,8 @@ describe('shared cue budget', () => {
         kind: 'drone_link',
         band: '2.4GHz',
         confidence: 0.5,
-        lat: -26.09 - i / 10_000,
-        lon: 29.472,
+        lat: 41.2 - i / 10_000,
+        lon: -98.4,
       });
     }
     expect(admitted).toHaveLength(2);

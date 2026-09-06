@@ -12,7 +12,8 @@
  * When the site contract grows one, this parser moves onto it unchanged.
  *
  * Times are wall-clock at the site. `utcOffsetMinutes` is a FIXED offset (the
- * modelled site, Komati, is SAST = UTC+120 all year); no DST table is implied.
+ * modelled site, Meridian Station, is UTC-360 all year); no DST table is
+ * implied.
  * ========================================================================== */
 
 import type { WhitelistRule } from './types.js';
@@ -54,7 +55,7 @@ export interface DeliveryWindow {
 }
 
 export interface SiteNormalcy {
-  /** Fixed site-local offset from UTC, minutes. Komati (SAST) is +120. */
+  /** Fixed site-local offset from UTC, minutes. Meridian Station is -360. */
   utcOffsetMinutes: number;
   /** Hours the site is staffed. Cues in `staffedZones` are expected then. */
   staffedHours: NormalcyWindow[];

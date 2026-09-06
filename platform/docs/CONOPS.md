@@ -1,4 +1,4 @@
-# Concept of operations — Komati Power Station
+# Concept of operations — Meridian Station
 
 Runtime paths in this document are relative to [`platform/`](..), this file's
 parent directory.
@@ -8,11 +8,12 @@ the humans in the loop are not there. Adversaries and defence layers are in
 [`docs/THREAT_MODEL.md`](THREAT_MODEL.md); per-failure responses and their
 required assertions are in [`docs/FAILURE_MODES.md`](FAILURE_MODES.md).
 
-The modelled site is **Komati Power Station, Mpumalanga** — an Eskom station
-retired from generation in 2022, designated critical infrastructure, with a
-switchyard that remains part of the grid. **Operation is demonstrated in
-simulation only.** Nothing here has been flown at Komati and no Eskom system is
-connected to.
+The modelled site is **Meridian Station** — a FICTIONAL generating station with a
+reactor exclusion zone and a switchyard, the one site the whole team's stacks
+share. It is anchored at a real rural location (41.2000, -98.4000) only so the
+geodesic maths is real; no facility stands there. **Operation is demonstrated in
+simulation only.** Nothing here has been flown anywhere and no operator's system
+is connected to.
 
 ---
 
@@ -60,9 +61,9 @@ the disposition.
 
 - Is the destination of every escalation in unattended mode and the second
   destination in attended mode.
-- Owns the decision to call external parties (SAPS, Eskom incident management,
-  emergency services). **The system never contacts anyone outside the site
-  automatically.**
+- Owns the decision to call external parties (police, the site operator's own
+  incident management, emergency services). **The system never contacts anyone
+  outside the site automatically.**
 
 ---
 
@@ -147,7 +148,7 @@ system is tempted to do something clever. It does not.
 2. **The cue is not re-flown.** An unacknowledged escalation does not trigger
    another unattended sortie against the same cue; the 2-per-hour cap stands
    regardless.
-3. **Nothing external is contacted.** No automated call to SAPS, to emergency
+3. **Nothing external is contacted.** No automated call to the police, to emergency
    services, or to anyone off site. The system's last act is an
    `escalation_undelivered` health event and a retained, hash-chained record.
 4. **Further unattended dispatch is refused** while an escalation remains
@@ -176,11 +177,11 @@ treats them as it treats NFZs: routes avoid them, orbits shrink to clear them, a
 a task that can only be satisfied from inside one is **infeasible**, not
 best-effort.
 
-Minimum set for a site like Komati:
+Minimum set for a site like Meridian Station:
 
 - The public road and rail reserve adjacent to the perimeter, and land beyond the
   perimeter generally — the site is observed, its neighbours are not.
-- Neighbouring residential and farm land, including the settlements around the
+- Neighbouring residential and farm land, including any settlement around the
   station.
 - Contractor accommodation, offices, ablutions, change houses and any staff
   welfare area inside the perimeter.
@@ -200,8 +201,9 @@ exist to be retained, leaked, or asked for later.
 | Cue-time fixed-camera frames | Same class as the sortie they triggered | Provenance travels with the evidence |
 
 Retention periods are defaults for the deploying organisation to set against its
-own policy and South African data-protection law (POPIA); the system's obligation
-is that a period exists, is enforced by deletion, and is recorded.
+own policy and whatever data-protection law applies where it actually operates;
+the system's obligation is that a period exists, is enforced by deletion, and is
+recorded.
 
 ### Privacy commitments
 
@@ -223,40 +225,44 @@ with the regulator and the site owner before any flight.
 
 ### Site status
 
-Eskom generation sites, Komati included, were declared National Key Points under
-the National Key Points Act and carried into the **Critical Infrastructure
-Protection Act (Act 8 of 2019)** regime. Consequences that bind this system:
+Meridian Station is fictional, so no jurisdiction, regulator or
+critical-infrastructure designation applies to it and none is claimed here. A
+generating station and its switchyard would in practice be designated critical
+infrastructure under whatever regime governs the deploying country. The
+consequences that would then bind this system:
 
 - Site security measures, including any aerial surveillance, are subject to the
   infrastructure administrator's approval and to the site's own security plan.
-- There are restrictions on photographing and publishing information about
-  declared critical infrastructure. Site geometry used here is a **deterministic
-  stub**, not a survey, and imagery on the demo path is generated placeholder
-  material explicitly labelled `image_kind: scripted_placeholder`.
+- There are typically restrictions on photographing and publishing information
+  about designated critical infrastructure. Site geometry used here is a
+  **deterministic stub**, not a survey, and imagery on the demo path is generated
+  placeholder material explicitly labelled `image_kind: scripted_placeholder`.
 - Evidence handling, retention and disclosure follow the site owner's rules, not
   this system's defaults, wherever the two differ.
 
 **Everything demonstrated is simulated.** No approval has been sought because
-nothing has been flown.
+nothing has been flown, and there is no site to seek approval for.
 
 ### Aviation
 
-Any real flight is a South African RPAS operation under the Civil Aviation
-Regulations administered by SACAA:
+The site is fictional, so no civil aviation authority is named here and no
+approval regime is asserted. What any real flight would have to resolve first,
+with the regulator of the country it is flown in:
 
-- **Part 101** governs RPAS. Non-private operation — which security work for a
-  site owner is — requires a **Remote Pilot Licence (RPL)** for the pilot and an
-  **RPAS Operator Certificate (ROC)** plus an air services licence for the
-  operator, together with an approved operations manual naming this concept of
-  operations.
-- **Default limits** apply unless specifically approved: within visual line of
-  sight, by day, below 400 ft (≈120 m) AGL, and not within 50 m of persons,
-  property or structures without permission. Our 20–80 m band sits inside the
-  altitude limit; the 50 m lateral rule is why every observation is standoff
-  observation with permission from the site owner for the site itself.
+- Uncrewed-aircraft rules and the licences they require. Non-private operation —
+  which security work for a site owner is — typically requires a licensed remote
+  pilot and a certificated operator, together with an approved operations manual
+  naming this concept of operations.
+- **Default limits** apply almost everywhere unless specifically approved: within
+  visual line of sight, by day, below roughly 120 m AGL, and not close to
+  uninvolved persons, property or structures without permission. Our 5–60 m band
+  sits inside the usual altitude limit; a lateral stand-off rule is why every
+  observation is standoff observation with permission from the site owner for the
+  site itself.
 - **BVLOS**, **night** and **operation over persons** each require specific
-  approval. The unattended envelope in §2 is a system-level restriction that does
-  **not** by itself satisfy a BVLOS approval; unattended operation would need one.
+  approval in every regime we are aware of. The unattended envelope in §2 is a
+  system-level restriction that does **not** by itself satisfy a BVLOS approval;
+  unattended operation would need one.
 - Airspace coordination around the site (and any temporary restriction) is the
   operator's responsibility before flight.
 
@@ -287,18 +293,19 @@ gauntlet are exercised against ArduCopter SITL, scripted rails and fixtures. The
 numbers that back any claim are in [`docs/NUMBERS.md`](NUMBERS.md); a claim
 without a row there is not a claim.
 
-**Simulated, and named as such.** Site geometry is a plausible deterministic stub,
-not a survey of Komati. Staged imagery is generated placeholder material, not real
+**Simulated, and named as such.** Site geometry is a plausible deterministic stub
+generated from the team's fictional Meridian Station model, not a survey of any
+real place. Staged imagery is generated placeholder material, not real
 optical, thermal, Sentinel-2 or SAR capture. The renderer's pixels are rendered,
 not sensed. Detection performance figures from scripted fixtures measure the
 plumbing, not field performance.
 
-**Not yet flown.** Between this system and a Komati deployment sits a flight-test
+**Not yet flown.** Between this system and any real deployment sits a flight-test
 campaign that has not happened: airframe and payload qualification; fence,
 failsafe and RTL behaviour verified in the air; corridor tolerances and monitor
 thresholds tuned against real wind and real GNSS multipath around large steel
-structures; thermal and LiDAR rails characterised at night and in Highveld
-conditions; link budget and ground-station siting proven on the actual site;
+structures; thermal and LiDAR rails characterised at night and in the site's own
+weather; link budget and ground-station siting proven on the actual site;
 degraded-navigation behaviour flown, not simulated; and the regulatory package in
 §5 obtained. Corridor tolerances, monitor thresholds and range constants in this
 repository are **initial simulation tuning values**, not flight-proven settings.

@@ -114,11 +114,11 @@ Windows side).
   preserve these. The e2e tests fail loudly on a breach — fix the code, don't loosen
   the test.
 
-## Root files that are NOT the product
+## Design handoff material (removed)
 
-The design-system root dirs/files — `components/`, `instruments/`, `tokens/`,
-`ui_kits/`, `guidelines/`, `templates/`, `slides/`, `_ds_*`, `SKILL.md`,
-`DESIGN_SYSTEM.md` — are **reference only** from the design handoff. The production
-UI is `ground/ui/`. Note: `DESIGN_SYSTEM.md` is the original `readme.md`; on
-Windows's case-insensitive FS a new `README.md` clobbers it, so don't recreate the
-lowercase one.
+The design-system reference dirs/files that shipped with the baseline (`components/`,
+`tokens/`, `ui_kits/`, `guidelines/`, `templates/`, `slides/`, `_ds_*`, `styles.css`,
+`SKILL.md`, `DESIGN_SYSTEM.md`, `prompt.txt`) were removed in the discrepancy rewrite;
+see `../docs/DISCREPANCY_REWRITE.md` for the audit. The production UI is `ground/ui/`
+and `platform/ground/ui/src/components/` is its live component library, unrelated to the
+removed prototype. `assets/logo-mark.svg` stays: Linux icon generation reads it.

@@ -82,9 +82,9 @@ export function sentinel2Source(
   };
 }
 
-/** Default SAR chip directory: platform/data/tiles/komati (repo-root relative). */
+/** Default SAR chip directory: platform/data/tiles/meridian (repo-root relative). */
 export function defaultSarDataDir(repoRoot: string = process.cwd()): string {
-  return join(repoRoot, 'data', 'tiles', 'komati');
+  return join(repoRoot, 'data', 'tiles', 'meridian');
 }
 
 /** SAR log-ratio change detection over the baked chips, offline. */

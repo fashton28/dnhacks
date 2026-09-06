@@ -1,17 +1,22 @@
-import React from 'react';
+import type { ButtonHTMLAttributes, CSSProperties, ReactNode } from 'react';
 
-/** IconButton — square icon-only control for toolbars and panel headers. */
+/**
+ * IconButton — square, icon-only control for toolbars and panel headers.
+ * `title` doubles as the accessible name. Hover / active / disabled looks are
+ * `.eis-iconbtn` pseudo-class rules; `active` (a toggled-on tool) is a
+ * data-attribute so it survives the hover state.
+ */
 
-type IconButtonVariant = 'ghost' | 'solid';
-type IconButtonSize = 'sm' | 'md' | 'lg';
+export type IconButtonVariant = 'ghost' | 'solid';
+export type IconButtonSize = 'sm' | 'md' | 'lg';
 
-export interface IconButtonProps extends Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'title'> {
-  icon: React.ReactNode;
+export interface IconButtonProps extends Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'title'> {
+  icon: ReactNode;
   size?: IconButtonSize;
   variant?: IconButtonVariant;
   active?: boolean;
   title?: string;
-  style?: React.CSSProperties;
+  style?: CSSProperties;
 }
 
 export function IconButton({
@@ -20,51 +25,23 @@ export function IconButton({
   variant = 'ghost',
   active = false,
   disabled = false,
-  onClick,
   title,
-  style = {},
+  className,
+  type = 'button',
   ...rest
 }: IconButtonProps) {
-  const [hover, setHover] = React.useState(false);
-  const dims: Record<IconButtonSize, number> = { sm: 26, md: 30, lg: 36 };
-  const d = dims[size];
-
-  const rest_bg = variant === 'solid' ? 'var(--surface-input)' : 'transparent';
-  const bg = active ? 'var(--accent-subtle)' : hover && !disabled ? 'var(--surface-hover)' : rest_bg;
-  const fg = active
-    ? 'var(--accent-text)'
-    : disabled
-    ? 'var(--text-disabled)'
-    : hover
-    ? 'var(--text-primary)'
-    : 'var(--text-secondary)';
-
   return (
     <button
-      type="button"
+      {...rest}
+      type={type}
+      className={className ? `eis-iconbtn ${className}` : 'eis-iconbtn'}
       title={title}
       aria-label={title}
+      aria-pressed={active || undefined}
       disabled={disabled}
-      onClick={onClick}
-      onMouseEnter={() => setHover(true)}
-      onMouseLeave={() => setHover(false)}
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: d,
-        height: d,
-        flex: 'none',
-        color: fg,
-        background: bg,
-        border: `1px solid ${active ? 'var(--accent-border)' : variant === 'solid' ? 'var(--border-input)' : 'transparent'}`,
-        borderRadius: 'var(--radius-sm)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        transition: 'background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out)',
-        ...style,
-      }}
-      {...rest}
+      data-size={size}
+      data-variant={variant}
+      data-active={active || undefined}
     >
       {icon}
     </button>

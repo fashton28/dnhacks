@@ -39,8 +39,8 @@ from eis_companion.security import record_hash, sign_payload
 from eis_companion.types import ControlSource, Limits, VehicleState
 
 STUB_SITE = "site/site.stub.json"
-HOME_LAT, HOME_LON = -26.0900, 29.4719
-FAR_LAT, FAR_LON = -26.09065, 29.46925
+HOME_LAT, HOME_LON = 41.1992364, -98.3995821
+FAR_LAT, FAR_LON = 41.198383, -98.4
 M_PER_DEG_LAT = 111_320.0
 KEY = "wiring-test-session-key"
 
@@ -237,7 +237,7 @@ def test_monitor_rtls_on_a_geofence_margin_intrusion():
     c = make_companion()
     run(c._execute_plan({"plan": valid_plan()}))
     # 1 m inside the stub geofence's northern edge.
-    c._vehicle_state = airborne_state(lat=-26.0871 - 1.0 / M_PER_DEG_LAT, lon=29.472)
+    c._vehicle_state = airborne_state(lat=41.2019763 - 1.0 / M_PER_DEG_LAT, lon=-98.4)
 
     run(c._envelope_tick())
     assert c._envelope_rtl is True

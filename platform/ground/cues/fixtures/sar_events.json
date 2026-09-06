@@ -2,14 +2,14 @@
   "schema_version": 1,
   "rail": "sar",
   "timebase": "relative",
-  "provenance": "Scripted replay of the ground/satellite SAR log-ratio detector over the baked chips in data/tiles/komati (provenance kind 'synthetic', claim 'Generated demonstration intensities; not Umbra imagery'). Use the sarSource() bridge to run the real detector instead. The cue kind names the DIRECTION of the change (the baked chips brighten), and the baked dataset ships no image, so the cue carries no thumbnail rather than a path to the intensity chip it was computed from.",
+  "provenance": "Scripted replay of the ground/satellite SAR log-ratio detector over the baked chips in data/tiles/meridian (provenance kind 'synthetic', claim 'Generated demonstration intensities; not Umbra imagery'). Use the sarSource() bridge to run the real detector instead. The cue kind names the DIRECTION of the change (the baked chips brighten), and the baked dataset ships no image, so the cue carries no thumbnail rather than a path to the intensity chip it was computed from.",
   "events": [
     {
       "atMs": 800,
       "payload": {
         "id": "sar-change-1",
-        "lat": -26.09015625,
-        "lon": 29.472075,
+        "lat": 41.19983156875,
+        "lon": -98.39977614375,
         "type": "sar_backscatter_increase",
         "confidence": 0.5019608,
         "thumbnail": "",

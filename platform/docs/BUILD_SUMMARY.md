@@ -19,7 +19,8 @@ Build the **complete monorepo** described by the two briefs — not just the UI:
 - `claude-code-prd(1).md` — the full-system brief (Jetson companion, ground
   control center, simulator, reproducible setup, hardware docs).
 - `design_handoff_ground_control/PRD.md` — the UI product brief.
-- `prompt.txt` — the operative instruction to build the GCS frontend.
+- `prompt.txt` — the operative instruction to build the GCS frontend (removed with the
+  design handoff material; see `docs/DISCREPANCY_REWRITE.md` at the repo root).
 
 The whole system meets at one `DataSource` contract so the UI runs identically on
 a mock or a live drone, and the companion implements the same contract over

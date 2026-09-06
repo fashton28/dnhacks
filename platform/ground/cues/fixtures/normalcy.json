@@ -1,6 +1,6 @@
 {
-  "_comment": "Site normalcy for the Komati stub. Cues explained by ordinary site activity are suppressed as NOISE, never as authorisation: every suppression is recorded through CueAdapter.onSuppression so a widened window is visible in the audit (docs/THREAT_MODEL.md A3). Times are site-local (SAST, UTC+120) minutes since midnight; days are 0=Sunday..6=Saturday.",
-  "utcOffsetMinutes": 120,
+  "_comment": "Site normalcy for the Meridian Station stub. Cues explained by ordinary site activity are suppressed as NOISE, never as authorisation: every suppression is recorded through CueAdapter.onSuppression so a widened window is visible in the audit (docs/THREAT_MODEL.md A3). Times are site-local (UTC-360) minutes since midnight; days are 0=Sunday..6=Saturday.",
+  "utcOffsetMinutes": -360,
   "staffedHours": [
     { "days": [1, 2, 3, 4, 5], "startMinute": 360, "endMinute": 1080 }
   ],

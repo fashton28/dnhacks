@@ -61,38 +61,39 @@ def test_stub_parses_exactly():
     assert isinstance(site, Site)
     assert site.source_path == str(STUB)
 
-    assert site.home.lat == pytest.approx(-26.09)
-    assert site.home.lon == pytest.approx(29.4719)
-    assert site.home.alt_m == pytest.approx(1600.0)
+    assert site.home.lat == pytest.approx(41.1992364)
+    assert site.home.lon == pytest.approx(-98.3995821)
+    assert site.home.alt_m == pytest.approx(550.0)
 
     # Perimeter: order preserved, [lat, lon] -> (lat, lon).
     assert site.perimeter == [
-        (-26.0867, 29.4672),
-        (-26.0867, 29.477),
-        (-26.094, 29.477),
-        (-26.094, 29.4672),
+        (41.1973051, -98.4035817),
+        (41.1973051, -98.3964183),
+        (41.2026949, -98.3964183),
+        (41.2026949, -98.4035817),
     ]
 
     assert len(site.nfz) == 2
-    zone = site.nfz[0]
-    assert zone.name == "chimney"
-    assert zone.ceiling_m == pytest.approx(80.0)
+    zone = site.nfz[1]
+    assert zone.name == "switchyard"
+    assert zone.ceiling_m == pytest.approx(60.0)
     assert zone.polygon == [
-        (-26.08815, 29.46975),
-        (-26.08815, 29.47045),
-        (-26.08885, 29.47045),
-        (-26.08885, 29.46975),
+        (41.2001069, -98.3994998),
+        (41.2001069, -98.3988288),
+        (41.2007016, -98.3988288),
+        (41.2007016, -98.3994998),
     ]
+    assert site.nfz[0].name == "reactor-exclusion"
 
-    assert site.alt_band.min_m == pytest.approx(20.0)
-    assert site.alt_band.max_m == pytest.approx(80.0)
+    assert site.alt_band.min_m == pytest.approx(5.0)
+    assert site.alt_band.max_m == pytest.approx(60.0)
 
     assert [s.id for s in site.staging] == [
-        "komati-west-service-road",
-        "komati-east-yard",
+        "meridian-south-service-road",
+        "meridian-east-yard",
     ]
     a, b = site.staging
-    assert (a.lat, a.lon) == (pytest.approx(-26.09065), pytest.approx(29.46925))
+    assert (a.lat, a.lon) == (pytest.approx(41.198383), pytest.approx(-98.4))
     assert a.image == "site/staging/stage-a.png"
     assert a.truth == "vehicle"
     assert b.truth == "false_alarm"
@@ -130,7 +131,7 @@ def test_resolve_default_is_site_json_at_repo_root(monkeypatch):
 def test_load_site_from_env_uses_stub(monkeypatch):
     monkeypatch.setenv(SITE_FILE_ENV, "site/site.stub.json")
     site = load_site_from_env()
-    assert site.home.lat == pytest.approx(-26.09)
+    assert site.home.lat == pytest.approx(41.1992364)
     assert len(site.perimeter) == 4
 
 

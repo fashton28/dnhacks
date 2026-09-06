@@ -1,14 +1,24 @@
-import React from 'react';
+import type { CSSProperties } from 'react';
 
-/** Toggle — on/off switch for settings (SITL, geofence enable, map layers). */
+/**
+ * Toggle — on/off switch for settings (SITL, geofence enable, map layers,
+ * demo faults). Controlled through `checked` / `onChange`.
+ *
+ * The switch is a `role="switch"` button; the knob position and track colour
+ * follow its `aria-checked` state in CSS. With a `label` the switch is
+ * wrapped in a <label> so the text is a click target too; `style` applies to
+ * whichever element is outermost.
+ */
+
+export type ToggleSize = 'sm' | 'md';
 
 export interface ToggleProps {
   checked?: boolean;
   onChange?: (v: boolean) => void;
   disabled?: boolean;
   label?: string | null;
-  size?: 'sm' | 'md';
-  style?: React.CSSProperties;
+  size?: ToggleSize;
+  style?: CSSProperties;
 }
 
 export function Toggle({
@@ -17,55 +27,33 @@ export function Toggle({
   disabled = false,
   label = null,
   size = 'md',
-  style = {},
+  style,
 }: ToggleProps): JSX.Element {
-  const dims = size === 'sm'
-    ? { w: 30, h: 18, k: 12 }
-    : { w: 38, h: 22, k: 16 };
+  const flip = (): void => {
+    if (!disabled) onChange?.(!checked);
+  };
 
-  const sw = (
+  const control = (
     <button
       type="button"
       role="switch"
+      className="eis-switch"
       aria-checked={checked}
       disabled={disabled}
-      onClick={() => !disabled && onChange && onChange(!checked)}
-      style={{
-        position: 'relative',
-        width: dims.w, height: dims.h, flex: 'none',
-        borderRadius: 999,
-        border: '1px solid',
-        borderColor: checked ? 'transparent' : 'var(--border-input)',
-        background: checked ? 'var(--accent)' : 'var(--surface-input)',
-        cursor: disabled ? 'not-allowed' : 'pointer',
-        opacity: disabled ? 0.5 : 1,
-        transition: 'background var(--dur-base) var(--ease-out)',
-        padding: 0,
-      }}
+      data-size={size}
+      style={label ? undefined : style}
+      onClick={flip}
     >
-      <span
-        style={{
-          position: 'absolute',
-          top: '50%',
-          left: checked ? `calc(100% - ${dims.k}px - 2px)` : 2,
-          width: dims.k, height: dims.k,
-          marginTop: -dims.k / 2,
-          borderRadius: '50%',
-          background: '#fff',
-          boxShadow: 'var(--shadow-raised)',
-          transition: 'left var(--dur-base) var(--ease-out)',
-        }}
-      />
+      <span className="eis-switch-knob" aria-hidden="true" />
     </button>
   );
 
-  if (!label) return sw;
+  if (!label) return control;
+
   return (
-    <label style={{ display: 'inline-flex', alignItems: 'center', gap: 9, cursor: disabled ? 'not-allowed' : 'pointer', ...style }}>
-      {sw}
-      <span style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--text-base)', color: 'var(--text-secondary)' }}>
-        {label}
-      </span>
+    <label className="eis-switch-row" data-disabled={disabled || undefined} style={style}>
+      {control}
+      <span className="eis-switch-text">{label}</span>
     </label>
   );
 }

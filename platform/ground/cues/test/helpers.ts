@@ -19,15 +19,15 @@ export function stubSite(): CueSite {
   return loadCueSiteFrom(STUB_SITE_PATH);
 }
 
-/** A quiet site-local instant: Thursday 00:00 SAST, outside every normalcy
- *  window in fixtures/normalcy.json. */
-export const QUIET_START_MS = Date.UTC(2024, 0, 10, 22, 0, 0);
+/** A quiet site-local instant: Thursday 00:00 site time (UTC-360), outside
+ *  every normalcy window in fixtures/normalcy.json. */
+export const QUIET_START_MS = Date.UTC(2024, 0, 11, 6, 0, 0);
 
-/** Wednesday 08:00 SAST — inside staffed hours and the east-service-gate window. */
-export const STAFFED_START_MS = Date.UTC(2024, 0, 10, 6, 0, 0);
+/** Wednesday 08:00 site time — inside staffed hours and the east-service-gate window. */
+export const STAFFED_START_MS = Date.UTC(2024, 0, 10, 14, 0, 0);
 
-/** Thursday 09:00 SAST — inside the switchyard delivery window (days 2 and 4). */
-export const DELIVERY_START_MS = Date.UTC(2024, 0, 11, 7, 0, 0);
+/** Thursday 09:00 site time — inside the switchyard delivery window (days 2 and 4). */
+export const DELIVERY_START_MS = Date.UTC(2024, 0, 11, 15, 0, 0);
 
 export interface Recorder {
   anomalies: AnomalyMessage[];

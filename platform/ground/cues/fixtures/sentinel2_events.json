@@ -8,8 +8,8 @@
       "atMs": 500,
       "payload": {
         "id": "sat-change-1",
-        "lat": -26.090664228395244,
-        "lon": 29.469244902459533,
+        "lat": 41.19836993906433,
+        "lon": -98.40000497024599,
         "type": "change",
         "confidence": 0.94,
         "thumbnail": "",

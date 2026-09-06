@@ -1,19 +1,36 @@
+/* ControlsPanel — flight actions, mode chips and the person-tracking controls.
+ *
+ * Command semantics (all through `onCmd`, i.e. the acked command path):
+ *   Arm       → the app's checklist-gated `onArm` flow, never `arm` directly
+ *   Disarm    → `disarm`
+ *   Takeoff   → the app's confirm flow, enabled only armed-and-on-the-ground
+ *   Land/RTL  → `land` / `rtl`, enabled only while airborne
+ *   Mode chip → `setMode { mode }`
+ *   Engage    → hold-to-confirm `onEngage` (airborne only); Disengage is an
+ *               instant plain button → `disengageTracking`
+ * Standoff and max-speed sliders report through the app, which sends
+ * `setStandoff` / `setMaxSpeed`; the companion clamps both to its safety
+ * envelope, so the slider range is a UI convenience, not a limit.
+ */
 import React from 'react';
 import {
+  ArrowDown,
+  ArrowUp,
+  CornerDownLeft,
+  Crosshair,
+  LocateFixed,
   Lock,
   LockOpen,
-  ArrowUp,
-  ArrowDown,
-  CornerDownLeft,
-  Target,
+  Plane,
   Square,
+  TriangleAlert,
 } from 'lucide-react';
 import { Panel } from '@/components/Panel';
 import { Button } from '@/components/Button';
 import { HoldButton } from '@/components/HoldButton';
-import { StatusPill } from '@/components/StatusPill';
+import { StatusPill, type StatusPillStatus } from '@/components/StatusPill';
 import { Slider } from '@/components/Slider';
-import type { Telemetry, TrackingStatus, ConnectionState, CommandName, Command, Mode } from '@/contract';
+import type { Telemetry, TrackingStatus, TrackingState, ConnectionState, CommandName, Command, Mode } from '@/contract';
 import { GIMBAL_PITCH_MAX_DEG, GIMBAL_PITCH_MIN_DEG } from '@/contract';
 
 /* ------------------------------------------------------------------ */
@@ -41,30 +58,98 @@ export interface ControlsPanelProps {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Inline icon helper (matches prototype's Ic pattern)                 */
+/*  Gating — pure, exported for tests                                   */
 /* ------------------------------------------------------------------ */
 
-function Ic({ d, s = 16 }: { d: React.ReactNode; s?: number }) {
+/** Flight modes offered as one-tap chips. */
+export const MODE_CHIPS: readonly Mode[] = ['LOITER', 'GUIDED', 'ALT_HOLD', 'POSHOLD', 'BRAKE'];
+
+/** Above this relative altitude the vehicle counts as airborne. */
+export const AIRBORNE_ALT_M = 0.5;
+
+export function isAirborne(tel: Telemetry | null): boolean {
+  return (tel?.position?.relAlt ?? 0) > AIRBORNE_ALT_M;
+}
+
+export interface FlightGates {
+  canTakeoff: boolean;
+  canLand: boolean;
+  canRtl: boolean;
+  canEngageTracking: boolean;
+  checklistNag: boolean;
+}
+
+export function flightGates(s: { armed: boolean; flying: boolean; checklistDone: boolean }): FlightGates {
+  return {
+    canTakeoff: s.armed && !s.flying,
+    canLand: s.flying,
+    canRtl: s.flying,
+    canEngageTracking: s.flying,
+    checklistNag: !s.checklistDone && !s.armed,
+  };
+}
+
+const TRACKING_PILL: Readonly<Record<TrackingState, { status: StatusPillStatus; pulse: boolean }>> = {
+  idle:      { status: 'neutral', pulse: false },
+  searching: { status: 'info',    pulse: false },
+  locked:    { status: 'caution', pulse: true },
+  lost:      { status: 'danger',  pulse: false },
+};
+
+export function trackingPill(state: TrackingState): { status: StatusPillStatus; pulse: boolean } {
+  return TRACKING_PILL[state] ?? TRACKING_PILL.idle;
+}
+
+export const STANDOFF_SLIDER = { min: 2, max: 15, step: 0.5 } as const;
+export const MAX_SPEED_SLIDER = { min: 0.5, max: 8, step: 0.5 } as const;
+
+/* ------------------------------------------------------------------ */
+/*  Pieces                                                              */
+/* ------------------------------------------------------------------ */
+
+function ModeChip({ mode, active, onSelect }: { mode: Mode; active: boolean; onSelect: (m: Mode) => void }) {
   return (
-    <svg
-      width={s} height={s}
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
+    <button
+      type="button"
+      onClick={() => onSelect(mode)}
+      aria-pressed={active}
+      style={{
+        padding: '4px 8px',
+        fontFamily: 'var(--font-mono)',
+        fontSize: 10.5,
+        fontWeight: 500,
+        background: active ? 'var(--accent-subtle)' : 'var(--surface-input)',
+        border: `1px solid ${active ? 'var(--accent-border)' : 'var(--border-input)'}`,
+        color: active ? 'var(--accent-text)' : 'var(--text-secondary)',
+        borderRadius: 'var(--radius-sm)',
+        cursor: 'pointer',
+      }}
     >
-      {d}
-    </svg>
+      {mode}
+    </button>
   );
 }
 
-/* ------------------------------------------------------------------ */
-/*  Component                                                           */
-/* ------------------------------------------------------------------ */
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>
+      {children}
+    </span>
+  );
+}
 
-const MODE_CHIPS: Mode[] = ['LOITER', 'GUIDED', 'ALT_HOLD', 'POSHOLD', 'BRAKE'];
+interface FlightAction {
+  key: string;
+  label: string;
+  icon: React.ReactNode;
+  variant: 'primary' | 'secondary';
+  disabled?: boolean;
+  run: () => void;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Panel                                                               */
+/* ------------------------------------------------------------------ */
 
 export function ControlsPanel({
   tel,
@@ -82,230 +167,102 @@ export function ControlsPanel({
   gimbalPitch,
   onSetGimbal,
 }: ControlsPanelProps) {
-  const armed = tel?.armed ?? false;
+  const armed = tel?.armed === true;
+  const flying = isAirborne(tel);
+  const gates = flightGates({ armed, flying, checklistDone });
+  const tState: TrackingState = tracking?.state ?? 'idle';
+  const pill = trackingPill(tState);
   const reportedPitch = tel?.gimbal?.pitchDeg;
   const commandedPitch = gimbalPitch ?? reportedPitch ?? 0;
-  const flying = (tel?.position?.relAlt ?? 0) > 0.5;
-  const tState = tracking?.state ?? 'idle';
-  const trackingOn = tState !== 'idle';
+
+  const actions: FlightAction[] = [
+    armed
+      ? { key: 'disarm', label: 'Disarm', icon: <LockOpen size={14} />, variant: 'secondary', run: () => onCmd('disarm') }
+      : { key: 'arm', label: 'Arm', icon: <Lock size={14} />, variant: 'primary', run: onArm },
+    { key: 'takeoff', label: 'Takeoff', icon: <ArrowUp size={14} />, variant: 'secondary', disabled: !gates.canTakeoff, run: onTakeoff },
+    { key: 'land', label: 'Land', icon: <ArrowDown size={14} />, variant: 'secondary', disabled: !gates.canLand, run: () => onCmd('land') },
+    { key: 'rtl', label: 'RTL', icon: <CornerDownLeft size={14} />, variant: 'secondary', disabled: !gates.canRtl, run: () => onCmd('rtl') },
+  ];
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, height: '100%', minHeight: 0 }}>
-
-      {/* ---- FLIGHT ---- */}
-      <Panel
-        title="Flight"
-        icon={
-          <Ic
-            d={<><path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" /></>}
-            s={13}
-          />
-        }
-      >
+      <Panel title="Flight" icon={<Plane size={13} />}>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 7 }}>
-          {!armed ? (
-            <Button
-              variant="primary"
-              block
-              onClick={onArm}
-              icon={<Lock size={14} />}
-            >
-              Arm
+          {actions.map((a) => (
+            <Button key={a.key} variant={a.variant} block disabled={a.disabled} onClick={a.run} icon={a.icon}>
+              {a.label}
             </Button>
-          ) : (
-            <Button
-              variant="secondary"
-              block
-              onClick={() => onCmd('disarm')}
-              icon={<LockOpen size={14} />}
-            >
-              Disarm
-            </Button>
-          )}
-
-          <Button
-            variant="secondary"
-            block
-            disabled={!armed || flying}
-            onClick={onTakeoff}
-            icon={<ArrowUp size={14} />}
-          >
-            Takeoff
-          </Button>
-
-          <Button
-            variant="secondary"
-            block
-            disabled={!flying}
-            onClick={() => onCmd('land')}
-            icon={<ArrowDown size={14} />}
-          >
-            Land
-          </Button>
-
-          <Button
-            variant="secondary"
-            block
-            disabled={!flying}
-            onClick={() => onCmd('rtl')}
-            icon={<CornerDownLeft size={14} />}
-          >
-            RTL
-          </Button>
+          ))}
         </div>
 
-        {/* Pre-flight checklist warning */}
-        {!checklistDone && !armed && (
-          <div style={{
-            marginTop: 8,
-            fontSize: 11,
-            color: 'var(--caution-fg)',
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-          }}>
-            <Ic
-              d={<>
-                <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
-                <line x1="12" y1="9" x2="12" y2="13" />
-                <line x1="12" y1="17" x2="12.01" y2="17" />
-              </>}
-              s={13}
-            />
+        {gates.checklistNag && (
+          <div role="status" style={{ marginTop: 8, fontSize: 11, color: 'var(--caution-fg)', display: 'flex', alignItems: 'center', gap: 6 }}>
+            <TriangleAlert size={13} />
             Pre-flight checklist required
           </div>
         )}
 
-        {/* Mode chips */}
         <div style={{ marginTop: 9 }}>
-          <span style={{
-            fontSize: 10,
-            fontWeight: 600,
-            letterSpacing: '0.06em',
-            textTransform: 'uppercase',
-            color: 'var(--text-tertiary)',
-          }}>
-            Mode
-          </span>
+          <SectionLabel>Mode</SectionLabel>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5, marginTop: 6 }}>
             {MODE_CHIPS.map((m) => (
-              <button
-                key={m}
-                onClick={() => onCmd('setMode', { mode: m })}
-                style={{
-                  padding: '4px 8px',
-                  fontFamily: 'var(--font-mono)',
-                  fontSize: 10.5,
-                  fontWeight: 500,
-                  background: tel?.mode === m ? 'var(--accent-subtle)' : 'var(--surface-input)',
-                  border: `1px solid ${tel?.mode === m ? 'var(--accent-border)' : 'var(--border-input)'}`,
-                  color: tel?.mode === m ? 'var(--accent-text)' : 'var(--text-secondary)',
-                  borderRadius: 'var(--radius-sm)',
-                  cursor: 'pointer',
-                }}
-              >
-                {m}
-              </button>
+              <ModeChip key={m} mode={m} active={tel?.mode === m} onSelect={(mode) => onCmd('setMode', { mode })} />
             ))}
           </div>
         </div>
       </Panel>
 
-      {/* ---- PERSON TRACKING ---- */}
       <Panel
         title="Person tracking"
-        icon={
-          <Ic
-            d={<>
-              <circle cx="12" cy="12" r="8" />
-              <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
-              <circle cx="12" cy="12" r="2.5" fill="currentColor" stroke="none" />
-            </>}
-            s={13}
-          />
-        }
+        icon={<LocateFixed size={13} />}
         status={
-          <StatusPill
-            size="sm"
-            status={
-              tState === 'locked'
-                ? 'caution'
-                : tState === 'searching'
-                ? 'info'
-                : tState === 'lost'
-                ? 'danger'
-                : 'neutral'
-            }
-            pulse={tState === 'locked'}
-          >
+          <StatusPill size="sm" status={pill.status} pulse={pill.pulse}>
             {tState}
           </StatusPill>
         }
       >
-        {!trackingOn ? (
+        {tState === 'idle' ? (
           <HoldButton
             variant="primary"
-            disabled={!flying}
-            hint={flying ? 'Hold to engage' : 'Take off first'}
-            icon={
-              <Ic
-                d={<>
-                  <circle cx="12" cy="12" r="7" />
-                  <path d="M12 2v4M12 18v4M2 12h4M18 12h4" />
-                </>}
-                s={17}
-              />
-            }
+            disabled={!gates.canEngageTracking}
+            hint={gates.canEngageTracking ? 'Hold to engage' : 'Take off first'}
+            icon={<Crosshair size={17} />}
             onConfirm={onEngage}
           >
             Engage Tracking
           </HoldButton>
         ) : (
-          <button
+          <Button
+            variant="danger"
+            block
+            size="lg"
+            icon={<Square size={15} fill="currentColor" stroke="none" />}
             onClick={() => onCmd('disengageTracking')}
-            style={{
-              display: 'flex',
-              width: '100%',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: 8,
-              height: 'var(--control-h-xl)',
-              background: 'var(--red-deep)',
-              border: '1px solid var(--red)',
-              borderRadius: 'var(--radius-md)',
-              color: '#fff',
-              fontFamily: 'var(--font-sans)',
-              fontSize: 14,
-              fontWeight: 700,
-              cursor: 'pointer',
-              letterSpacing: '0.02em',
-            }}
+            style={{ height: 'var(--control-h-xl)', fontSize: 14, fontWeight: 700, letterSpacing: '0.02em' }}
           >
-            <Square size={15} fill="currentColor" stroke="none" />
             Disengage Tracking
-          </button>
+          </Button>
         )}
 
-        {/* Sliders */}
         <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 13 }}>
           <Slider
             label="Standoff distance"
             value={standoff}
-            min={2}
-            max={15}
-            step={0.5}
+            min={STANDOFF_SLIDER.min}
+            max={STANDOFF_SLIDER.max}
+            step={STANDOFF_SLIDER.step}
             unit="m"
-            ticks={['2 m', '15 m']}
+            ticks={[`${STANDOFF_SLIDER.min} m`, `${STANDOFF_SLIDER.max} m`]}
             onChange={onSetStandoff}
           />
           <Slider
             label="Max speed"
             value={maxSpeed}
-            min={0.5}
-            max={8}
-            step={0.5}
+            min={MAX_SPEED_SLIDER.min}
+            max={MAX_SPEED_SLIDER.max}
+            step={MAX_SPEED_SLIDER.step}
             unit="m/s"
-            ticks={['0.5', '8']}
+            ticks={[`${MAX_SPEED_SLIDER.min}`, `${MAX_SPEED_SLIDER.max}`]}
             accent="var(--green)"
             onChange={onSetMaxSpeed}
           />
