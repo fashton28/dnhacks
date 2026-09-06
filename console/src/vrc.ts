@@ -94,10 +94,10 @@ export class VirtualRc {
     requestAnimationFrame(step);
   }
 
-  private render(s: Stick): void {
+  private render(s: Stick, x = s.x, y = s.y): void {
     const r = s.pad.clientWidth / 2 - 14;
-    s.knob.style.transform = `translate(${(s.x * r).toFixed(1)}px, ${(s.y * r).toFixed(1)}px)`;
-    s.pad.classList.toggle("deflected", Math.hypot(s.x, s.y) > this.tuning.deadzone);
+    s.knob.style.transform = `translate(${(x * r).toFixed(1)}px, ${(y * r).toFixed(1)}px)`;
+    s.pad.classList.toggle("deflected", Math.hypot(x, y) > this.tuning.deadzone);
   }
 
   /** Current sticks, shaped like a gamepad's. Buttons report once per click. */
@@ -112,10 +112,11 @@ export class VirtualRc {
     return out;
   }
 
-  /** Show input that came from the keyboard or a gamepad on the knobs (only sticks nobody is holding). */
+  /** Show input that came from the keyboard or a gamepad on the knobs (only sticks nobody is holding).
+   *  Display only: the stick's own input state stays at centre, so a mirrored deflection is never read back by poll(). */
   reflect(s: Sticks): void {
-    if (this.left.pointer === null) { this.left.x = s.yaw; this.left.y = -s.throttle; this.render(this.left); }
-    if (this.right.pointer === null) { this.right.x = s.roll; this.right.y = -s.pitch; this.render(this.right); }
+    if (this.left.pointer === null) this.render(this.left, s.yaw, -s.throttle);
+    if (this.right.pointer === null) this.render(this.right, s.roll, -s.pitch);
   }
 
   /** "arming", "taking off", "live", or "" when not in Manual Control. */
