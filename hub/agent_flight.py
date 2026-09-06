@@ -260,7 +260,9 @@ class AgentFlight(Inspector):
                               "result": {**verdict.model_dump(mode="json"), "attempt": self.steps}})
             return "refused by the Safety Validator: " + "; ".join(f"[{v.rule}] {v.detail}" for v in verdict.violations)
         reg = self.app.state.registry
-        self._run(reg.send(self.drone_id, Goto(cmd_id=reg.new_cmd_id(), lat=lat, lon=lon, alt=alt, speed_mps=6.0)))
+        # arrive facing the Detection: the camera looks along the nose, so every capture frames the target
+        face = (math.degrees(math.atan2(-east, -north)) + 360.0) % 360.0 if (east or north) else None
+        self._run(reg.send(self.drone_id, Goto(cmd_id=reg.new_cmd_id(), lat=lat, lon=lon, alt=alt, speed_mps=6.0, yaw_deg=face)))
         started = time.time()
         deadline = started + (180.0 if not airborne else 120.0) / max(1.0, self.app.state.settings.speed_factor)
         while time.time() < deadline:

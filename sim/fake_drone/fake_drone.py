@@ -76,6 +76,8 @@ class FakeDrone:
                 vz = math.copysign(min(CLIMB_MPS, abs(dz) / dt), dz)
             if dist <= 0.05 and abs(dz) <= 0.05:
                 self.mode = "hover"
+                if getattr(self, "target_yaw", None) is not None:
+                    self.heading = float(self.target_yaw) % 360  # face the target on arrival, as the autopilot does
         elif self.mode == "velocity":
             n, e, d = self.manual_vel
             vx, vy, vz = e, n, -d
@@ -130,6 +132,7 @@ class FakeDrone:
         if isinstance(cmd, Goto):
             x, y = latlon_to_enu(cmd.lat, cmd.lon)
             self.target = (x, y, cmd.alt)
+            self.target_yaw = cmd.yaw_deg
             self.target_speed = cmd.speed_mps or CRUISE_MPS
             self.mode = "goto"
             if self.status in (DroneStatus.idle, DroneStatus.returning):

@@ -45,6 +45,7 @@ class Bridge:
         self.status = DroneStatus.idle
         self.intent: str = "idle"  # idle | mission | manual | rth
         self.pending_goto: tuple[float, float, float] | None = None
+        self.pending_yaw: float | None = None  # heading to face on arrival, from the Goto command
         self.manual_vel: tuple[float, float, float, float] | None = None
         self.takeoff_target: float | None = None
         self.last_vel_send = 0.0
@@ -105,11 +106,11 @@ class Bridge:
     def takeoff(self, alt: float) -> None:
         self.mav.mav.command_long_send(self.mav.target_system, self.mav.target_component, mavutil.mavlink.MAV_CMD_NAV_TAKEOFF, 0, 0, 0, 0, 0, 0, 0, alt)
 
-    def send_position(self, lat: float, lon: float, alt: float) -> None:
+    def send_position(self, lat: float, lon: float, alt: float, yaw_deg: float | None = None) -> None:
         """Reposition via MAV_CMD_DO_REPOSITION so the autopilot answers with a COMMAND_ACK (denied when outside its fence)."""
         self.mav.mav.command_int_send(self.mav.target_system, self.mav.target_component, mavutil.mavlink.MAV_FRAME_GLOBAL_RELATIVE_ALT_INT,
                                       mavutil.mavlink.MAV_CMD_DO_REPOSITION, 0, 0,
-                                      -1, mavutil.mavlink.MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, 0, float("nan"),
+                                      -1, mavutil.mavlink.MAV_DO_REPOSITION_FLAGS_CHANGE_MODE, 0, float("nan") if yaw_deg is None else float(yaw_deg),
                                       int(lat * 1e7), int(lon * 1e7), alt)
         self.awaiting_reposition_ack = time.time()
 
@@ -204,7 +205,7 @@ class Bridge:
             self.takeoff_target = None
         if self.pending_goto is not None:
             lat, lon, alt = self.pending_goto
-            self.send_position(lat, lon, alt)
+            self.send_position(lat, lon, alt, self.pending_yaw)
             self.pending_goto = None
         if self.manual_vel is not None and now - self.last_vel_send > 1.0 / VEL_RESEND_HZ:
             self.send_velocity(*self.manual_vel)
@@ -217,6 +218,7 @@ class Bridge:
             if self.last_message.startswith("REFUSED"):
                 self.last_message = ""
             self.pending_goto = (cmd.lat, cmd.lon, cmd.alt)
+            self.pending_yaw = cmd.yaw_deg
             return Ack(cmd_id=cmd.cmd_id, ok=True, detail="arming and taking off" if not self.armed else "")
         if isinstance(cmd, Hover):
             self.pending_goto = None

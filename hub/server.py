@@ -183,27 +183,42 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             (ARGUS_STARTUP_SCENARIO, default transformer_fire; empty to disable) after ARGUS_STARTUP_DELAY_S (default 20).
             With the autonomy mode at its default, the plant alarm it raises dispatches a Drone with nobody at the keyboard."""
             kind = os.environ.get("ARGUS_STARTUP_SCENARIO", "transformer_fire").strip()
+            print(f"[startup] scenario task running, kind={kind!r}", flush=True)
             if not kind:
                 return
             delay = float(os.environ.get("ARGUS_STARTUP_DELAY_S", "20"))
+            app.state.audit.append("startup_scenario_armed", scenario=kind, delay_s=delay)
             deadline = asyncio.get_running_loop().time() + 300.0
-            while asyncio.get_running_loop().time() < deadline:
-                reg = app.state.registry
-                ready = any(c.ws is not None and c.state is not None and c.state.status.value == "idle" and "GPS" in c.state.message for c in reg.drones.values())
-                if ready and reg.renderers:
-                    break
-                await asyncio.sleep(2.0)
-            else:
-                app.state.audit.append("startup_scenario_skipped", kind=kind, reason="no ready Drone and Renderer within 300 s")
+            try:
+                while asyncio.get_running_loop().time() < deadline:
+                    reg = app.state.registry
+                    ready = any(c.ws is not None and c.state is not None and str(c.state.status) .endswith("idle") and "GPS" in (c.state.message or "") for c in reg.drones.values())
+                    if ready and len(reg.renderers) > 0:
+                        break
+                    await asyncio.sleep(2.0)
+                else:
+                    app.state.audit.append("startup_scenario_skipped", scenario=kind, reason="no ready Drone and Renderer within 300 s")
+                    return
+            except Exception as e:  # noqa: BLE001
+                app.state.audit.append("startup_scenario_failed", scenario=kind, error=repr(e)[:200])
                 return
+            app.state.audit.append("startup_scenario_ready", scenario=kind)
             await asyncio.sleep(delay)
             if app.state.registry.scene.scenario_ids:
                 return  # somebody already started a story
-            app.state.audit.append("startup_scenario", kind=kind, delay_s=delay)
+            app.state.audit.append("startup_scenario", scenario=kind, delay_s=delay)
             await run_scenario(Scenario(id=f"startup-{kind}", kind=kind, params={}))
 
         task = asyncio.create_task(stale_loop())
-        boot = asyncio.create_task(startup_scenario())
+
+        async def guarded_startup() -> None:
+            try:
+                await startup_scenario()
+            except Exception as e:  # noqa: BLE001
+                print(f"[startup] scenario task failed: {e!r}", flush=True)
+                app.state.audit.append("startup_scenario_failed", error=repr(e)[:200])
+
+        boot = asyncio.create_task(guarded_startup())
         try:
             yield
         finally:

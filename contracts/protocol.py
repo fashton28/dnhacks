@@ -78,6 +78,7 @@ class Goto(Command):
     lon: float
     alt: float
     speed_mps: float | None = None
+    yaw_deg: float | None = Field(default=None, description="compass heading to face on arrival (the camera looks along the nose); None keeps the autopilot's default")
 
 
 class Hover(Command):

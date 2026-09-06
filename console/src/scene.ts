@@ -653,7 +653,7 @@ export class SiteScene {
       const g = new THREE.Group(); g.name = "steam";
       const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.6, 14), new THREE.MeshStandardMaterial({ color: 0x9aa4ad, metalness: 0.6, roughness: 0.5 }));
       pipe.position.y = 0.8; g.add(pipe);
-      const steam = new Plume(0, 0, 1.6, 1.8, this.quality === "high" ? 320 : 120, { color: 0xf4f8fb, heat: 0.35, vigour: 0.9, opacity: 0.8, minPx: 9, size: 1500 });
+      const steam = new Plume(0, 0, 1.6, 2.6, this.quality === "high" ? 520 : 180, { color: 0xf6f9fc, heat: 0.35, vigour: 1.25, opacity: 0.88, minPx: 10, size: 2400 });
       steam.points.name = "steam"; g.add(steam.points); this.animated.push(steam);
       o = g;
     } else if (p.kind === "person") {

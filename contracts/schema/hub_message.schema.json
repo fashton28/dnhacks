@@ -81,6 +81,19 @@
           ],
           "default": null,
           "title": "Speed Mps"
+        },
+        "yaw_deg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "compass heading to face on arrival (the camera looks along the nose); None keeps the autopilot's default",
+          "title": "Yaw Deg"
         }
       },
       "required": [
