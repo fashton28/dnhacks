@@ -520,6 +520,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
     async def run_scenario(sc: Scenario) -> SceneState:
         scene = reg().scene
         p = sc.params
+        signal: PlantSignal | None = None  # the plant's own instrumentation reacting to the Scenario, ingested after the scene is placed
         if sc.kind == "intruder_vehicle":
             scene.props.append(SceneProp(id=f"{sc.id}-vehicle", kind="vehicle", x=float(p.get("x", 130)), y=float(p.get("y", -135)), yaw_deg=float(p.get("heading_deg", 90))))
         elif sc.kind in ("fence_breach", "perimeter_opening"):
@@ -531,15 +532,29 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         elif sc.kind == "unattended_object_benign":  # the same crate, in the service yard by the maintenance shed
             scene.props.append(SceneProp(id=f"{sc.id}-crate", kind="crate", x=float(p.get("x", -48)), y=float(p.get("y", -62)), yaw_deg=float(p.get("heading_deg", 20))))
         elif sc.kind == "transformer_fire":  # transformer bay 2 in the switchyard on fire: flames, dark smoke, scorched ground
-            scene.props.append(SceneProp(id=f"{sc.id}-fire", kind="fire", x=float(p.get("x", 75)), y=float(p.get("y", 82)), yaw_deg=0.0))
+            x, y = float(p.get("x", 75)), float(p.get("y", 82))
+            scene.props.append(SceneProp(id=f"{sc.id}-fire", kind="fire", x=x, y=y, yaw_deg=0.0))
+            signal = plant_signal_at(sc.id, x, y, sensor_id="TE-T2-W1", kind="temperature", value=142, unit="C", threshold=105,
+                                     asset="transformer T2", severity="alarm", note="rising 4 C per minute")
         elif sc.kind == "steam_release":  # relief vent on the auxiliary building roof lifts: a white column that looks like smoke from above
-            scene.props.append(SceneProp(id=f"{sc.id}-steam", kind="steam", x=float(p.get("x", 67)), y=float(p.get("y", -42)), yaw_deg=0.0, z=float(p.get("z", 6.9))))
+            x, y = float(p.get("x", 67)), float(p.get("y", -42))
+            scene.props.append(SceneProp(id=f"{sc.id}-steam", kind="steam", x=x, y=y, yaw_deg=0.0, z=float(p.get("z", 6.9))))
+            signal = plant_signal_at(sc.id, x, y, sensor_id="ZS-RV-3", kind="valve", value="open", unit="", threshold="closed",
+                                     asset="relief valve RV-3", severity="warning", note="unplanned lift")
         elif sc.kind == "authorized_activity":  # marked maintenance vehicle in the service yard during a declared window
             scene.props.append(SceneProp(id=f"{sc.id}-vehicle", kind="vehicle", x=float(p.get("x", -52)), y=float(p.get("y", -75)), yaw_deg=float(p.get("heading_deg", 0))))
         scene.scenario_ids.append(sc.id)
         app.state.audit.append("scenario_run", scenario=sc.model_dump(mode="json"))
         await reg().broadcast_scene()
+        if signal is not None:
+            await ingest_plant_signal(signal)
         return scene
+
+    def plant_signal_at(scenario_id: str, x: float, y: float, *, sensor_id: str, kind: str, value, unit: str, threshold, asset: str, severity: str, note: str) -> PlantSignal:
+        from contracts.site import enu_to_latlon
+        lat, lon = enu_to_latlon(x, y)
+        return PlantSignal(id=f"sig-{scenario_id}-{sensor_id}", ts=datetime.now(UTC), sensor_id=sensor_id, kind=kind, value=value, unit=unit, threshold=threshold,
+                           asset={"name": asset, "lat": lat, "lon": lon}, severity=severity, note=note)
 
     @app.post("/scenarios/reset", response_model=SceneState)
     async def reset_scene() -> SceneState:
