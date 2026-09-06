@@ -92,11 +92,12 @@ blocks are **byte-identical** in the two `src/` trees.
 | Channel | Shape | Resolution | Status |
 |---|---|---|---|
 | `site:load` | invoke → `Promise<string>` (raw site JSON text); exposed as `window.eis.loadSiteFile()` | `EIS_SITE_FILE` (repo-root-relative per `docs/SITE_CONTRACT.md`); unset → `site/site.json`, falling back to `site/site.stub.json` when the default is missing. An explicitly set `EIS_SITE_FILE` never silently falls back — a missing file rejects. Root = repo root in dev, `process.resourcesPath` when packaged. | ✅ added in both `src/ipc.ts` + `src/preload.ts` |
-| `satellite:loadTiles` | invoke → `Promise<{ beforePng, afterPng, tilesJson, anomaliesJson } \| null>` (PNGs base64, JSON as raw text); exposed as `window.eis.loadSatelliteTiles()` | `ground/satellite/data/{before,after}.png` + `tiles.json` (+ optional `anomalies.json`) under the same root; returns `null` when the assets are absent so the renderer falls back to a dev-server fetch. | ✅ added in both `src/ipc.ts` + `src/preload.ts` |
+| `site:resolveAsset` | invoke → `Promise<string \| null>` (image as a data URL) | Only PNG/JPEG/WebP paths contained by the selected site directory. | ✅ added in both |
+| ~~`satellite:loadTiles`~~ | — | **REMOVED (FM-148)** from both shells. The renderer imports the baked tiles through the `@satdata` Vite alias in every build, so the handler was unreachable and the "renderer falls back to a dev-server fetch" contract it documented was never implemented. Its `extraResources` copy put ~870 KB of PNG into every installer for an IPC channel nothing invoked. | ✅ removed in both `src/ipc.ts` + `src/preload.ts` + both `electron-builder.yml` |
 
-Packaging: both `electron-builder.yml` files gain two `extraResources` entries
-so the same repo-root-relative paths resolve when packaged —
-`../../../site → site` and `../../satellite/data → ground/satellite/data`.
+Packaging: both `electron-builder.yml` files carry the `extraResources` entry
+that makes the repo-root-relative site path resolve when packaged
+(`../../../site → site`), plus the built planner and the SDR sources.
 
 ## Phase 3 planner, SDR, and evidence IPC
 
@@ -115,20 +116,32 @@ uses the same subprocess code and defaults to `python3`. Live SDR drivers remain
 optional runtime dependencies, while scripted mode is the offline default.
 
 ### Surfaced renderer-touch (LINUX_PRD §1)
-The shared renderer type `ground/ui/src/vite-env.d.ts` (`ElectronBridge`) must
-gain `loadSiteFile()` / `loadSatelliteTiles()` to match the two preloads — a
-bridge-type addition implemented once in the shared renderer (same precedent as
-`power`), owned by the ground-ui workstream. Both shells implement the methods,
-so they are non-optional on the bridge (unlike `power?`).
+The shared renderer type `ground/ui/src/vite-env.d.ts` (`ElectronBridge`) carries
+`loadSiteFile()` / `resolveSiteAsset()` to match the two preloads — a bridge-type
+addition implemented once in the shared renderer (same precedent as `power`).
 
-### Sync status (re-audited after the retrofit)
-- `src/recorder.ts`, `src/settingsStore.ts`, `tsconfig.json` — **IDENTICAL** (SHA256).
-- `src/main.ts` — unchanged; identical except the two `ground/app/{windows,linux}` path-comment lines.
+## FMEA wave — shell changes (applied to BOTH trees in lockstep)
+
+| Mode | Change | Files |
+|---|---|---|
+| **FM-149** | The SDR sidecar spawn had no `error` listener, so a failed spawn threw in the main process and took the whole ground-control window with it — and `pythonPath` falls back to a bare `python`/`python3` that may not exist, with `sdr:start` firing automatically on mount. There is now a `.on('error')` handler, a synchronous `spawn` try/catch, an existence check on the sidecar script, and `createInterface` is guarded on a null `stdout`/`stderr`. The SDR degrades to a `no_device` health event; it never ends the session. | `src/phase3Host.ts` (identical in both) |
+| **FM-82** | The planner bundle was `require`d lazily inside `planner:propose` — a measured 3,123 ms synchronous stall of the main process on the first proposal. It is now loaded on `setImmediate` at handler registration, so the cost lands while the window is still painting. A warm-up failure is remembered, never thrown, and `planner:status` reports it. | `src/phase3Host.ts` |
+| **FM-83** | A missing `ground/planner/dist` now produces a message naming the artefact and the command that builds it, instead of a raw `Cannot find module`. | `src/phase3Host.ts` |
+| **FM-131** | `DEV_URL` was the hardcoded constant `http://localhost:5173` while Vite's `strictPort` was false, so Vite could slide to 5174 and the shell would render whatever else answered 5173. The port now comes from `EIS_UI_PORT` — the SAME variable `ground/ui/vite.config.ts` reads — Vite's port is strict, and `verifyDevServer()` checks that what answered is actually this UI before the window loads. | `src/main.ts`, `ground/ui/vite.config.ts` |
+| **FM-148** | `satellite:loadTiles` and its `extraResources` copy removed (see the table above). | `src/ipc.ts`, `src/preload.ts`, `electron-builder.yml` |
+
+New channel: `planner:status` → `{ ready, modulePath, error }`, registered in both
+shells' `phase3Host.ts` and reachable only through `ipcMain` (no preload surface
+yet — nothing in the renderer needs it, and an unused preload method is exactly
+what FM-148 was).
+
+### Sync status (re-audited after the FMEA wave)
+- `src/recorder.ts`, `src/settingsStore.ts`, `src/phase3Host.ts`, `tsconfig.json` — **IDENTICAL**.
+- `src/main.ts` — identical except the two `ground/app/{windows,linux}` path-comment lines.
 - `src/ipc.ts` / `src/preload.ts` — divergence is still **exactly** the Linux-only
-  `power:inhibit/release` blocks; the new site/satellite blocks are byte-identical
-  in both trees (verified by diff).
+  `power:inhibit/release` blocks (verified by `diff`).
 - Typecheck: windows `npm run typecheck` ✅; linux via the documented
-  `node_modules` junction ✅ (junction removed afterwards).
+  `node_modules` junction ✅.
 
 ---
 

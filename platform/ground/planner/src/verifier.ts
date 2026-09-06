@@ -29,7 +29,8 @@ import {
 import { SiteModel } from './site';
 import { validateMissionPlan } from './validate';
 import {
-  DECONFLICTION_POLICY, PROFILE_POLICY, UNATTENDED_ENVELOPE, VERIFIER_POLICY, canonicalProfile,
+  DECONFLICTION_POLICY, OBSERVATION_POLICY, PROFILE_POLICY, RF_POLICY, UNATTENDED_ENVELOPE,
+  VERIFIER_POLICY, canonicalProfile,
 } from './policy';
 
 export const HARD_MIN_STANDOFF_M = VERIFIER_POLICY.hardMinStandoffM;
@@ -41,6 +42,10 @@ export const DRAIN_PCT_PER_S = 100 / NOMINAL_ENDURANCE_S;
 export const WIND_TIME_FACTOR_PER_MPS = VERIFIER_POLICY.windTimeFactorPerMps;
 export const MAX_WIND_MPS = VERIFIER_POLICY.maxWindMps;
 export const ANOMALY_PROXIMITY_M = VERIFIER_POLICY.anomalyProximityM;
+/** How far an observation-class target (an orbit centre) may sit from the cue. */
+export const ORBIT_CENTRE_TOLERANCE_M = OBSERVATION_POLICY.orbitCentreToleranceM;
+/** Seconds an RF event is part of the CURRENT airspace picture (FM-51). */
+export const RF_EVENT_WINDOW_S = RF_POLICY.eventWindowS;
 export const DEFAULT_MAX_SORTIE_S = VERIFIER_POLICY.maxSortieS;
 export const DEFAULT_DISPATCH_MIN_SOC_PCT = VERIFIER_POLICY.dispatchMinSocPct;
 export const DEFAULT_CELL_IMBALANCE_MAX_V = VERIFIER_POLICY.cellImbalanceMaxV;
@@ -76,6 +81,16 @@ export interface VerificationContext {
   currentAltitudeM?: number;
   readiness?: { ready: boolean; reasons: string[] };
   windMps?: number;
+  /**
+   * Where `windMps` came from. `measured` is a wind report from the vehicle or
+   * the site; `assumed` is the ground station's documented stand-in when no
+   * report has arrived yet (FM-72). An assumed wind is good enough to fly
+   * ATTENDED on — a human is watching the aircraft and the sky — and is never
+   * good enough to dispatch UNATTENDED, where the wind limit is the only thing
+   * standing between an unwatched aircraft and a gust. Absent means `measured`,
+   * so every existing caller that supplies a real wind keeps its behaviour.
+   */
+  windSource?: 'measured' | 'assumed';
   anomaly?: Anomaly;
   rfEvents?: RfEventMessage[];
   sdrState?: 'warming' | 'nominal' | 'degraded' | 'no_device' | 'saturated';
@@ -161,6 +176,28 @@ function startPosition(context: VerificationContext, site: SiteModel): LatLon {
 function startAltitude(context: VerificationContext): number | null {
   const value = context.currentAltitudeM ?? context.telemetry?.position?.relAlt;
   return finite(value) ? value : null;
+}
+
+/**
+ * RF events that are part of the CURRENT airspace picture (FM-51).
+ *
+ * An RF report describes a moment. Without a window one hostile-drone report at
+ * the top of a session refuses every mission for the rest of it, which is both
+ * wrong and — because the operator cannot clear it — unrecoverable in place.
+ * The window is `RF_POLICY.eventWindowS`, the same 60 s
+ * `rf_adapter.CORRELATION_WINDOW_MS` uses to call an RF hit and a GPS loss the
+ * same event.
+ *
+ * A caller that supplies no `now` gets every event treated as current: not
+ * knowing what time it is must never LOOSEN airspace, only tighten it. Events
+ * dated in the future (clock skew between the SDR host and the ground station)
+ * are current for the same reason.
+ */
+export function currentRfEvents(context: VerificationContext): RfEventMessage[] {
+  const events = context.rfEvents ?? [];
+  if (context.now === undefined) return events;
+  const oldest = context.now - RF_POLICY.eventWindowS * 1000;
+  return events.filter((event) => !finite(event.ts) || event.ts >= oldest);
 }
 
 /** The plan walk, anchored at the vehicle's reported position and altitude. */
@@ -254,25 +291,45 @@ function checkReadiness(walk: Walk, site: SiteModel, context: VerificationContex
 function checkWind(context: VerificationContext): VerificationCheck {
   const wind = context.windMps;
   if (!finite(wind) || wind < 0) return fail('wind', 'wind speed must be a finite non-negative number');
-  return wind <= MAX_WIND_MPS ? ok('wind', `wind ${fmt(wind)} m/s is within ${MAX_WIND_MPS} m/s`) :
-    fail('wind', `wind ${fmt(wind)} m/s exceeds ${MAX_WIND_MPS} m/s; hold then RTL`);
+  const provenance = context.windSource === 'assumed'
+    ? ' (assumed: no wind report has been received)' : '';
+  return wind <= MAX_WIND_MPS
+    ? ok('wind', `wind ${fmt(wind)} m/s is within ${MAX_WIND_MPS} m/s${provenance}`)
+    : fail('wind', `wind ${fmt(wind)} m/s exceeds ${MAX_WIND_MPS} m/s; hold then RTL${provenance}`);
 }
 
+/**
+ * `rf_environment` — is the RF picture good enough to fly on?
+ *
+ * Three outcomes, and "clear" is the narrowest of them (FM-50). Asserting "no
+ * blocking RF interference" requires a receiver that could have SEEN the
+ * interference: a saturated front end, a degraded one, or one still warming up
+ * is blind, and a blind receiver reports UNKNOWN. Unknown is not a refusal —
+ * a missing SDR never grounded the aircraft and an impaired one must not
+ * either — but it must never read as an all-clear the hardware cannot support.
+ */
 function checkRfEnvironment(context: VerificationContext): VerificationCheck {
   if (!Array.isArray(context.rfEvents) || context.sdrState === undefined) {
     return fail('rf_environment', 'RF events and SDR health state are required before execution');
   }
-  const interference = (context.rfEvents ?? []).filter((event) => event.kind === 'gnss_interference');
+  const interference = currentRfEvents(context).filter((event) => event.kind === 'gnss_interference');
   if (interference.length && !context.rfOverride) {
     return fail('rf_environment', 'GNSS interference detected; operator override required');
   }
-  if (context.sdrState === 'no_device') return ok('rf_environment', 'SDR unavailable; RF environment unknown (no override required)');
-  return ok('rf_environment', interference.length ? 'operator accepted RF override' : 'no blocking RF interference');
+  if (interference.length) return ok('rf_environment', 'operator accepted RF override');
+  if (context.sdrState === 'no_device') {
+    return ok('rf_environment', 'SDR unavailable; RF environment unknown (no override required)');
+  }
+  if ((RF_POLICY.impairedSdrStates as readonly string[]).includes(context.sdrState)) {
+    return ok('rf_environment',
+      `SDR front end is ${context.sdrState}; RF environment unknown — no interference can be ruled out`);
+  }
+  return ok('rf_environment', 'no blocking RF interference');
 }
 
 function checkAirspace(walk: Walk, site: SiteModel, context: VerificationContext): VerificationCheck {
   const conflicts: string[] = [];
-  (context.rfEvents ?? []).filter((event) => event.kind === 'hostile_drone').forEach((event) => {
+  currentRfEvents(context).filter((event) => event.kind === 'hostile_drone').forEach((event) => {
     if (!finite(event.lat) || !finite(event.lon)) {
       conflicts.push('hostile drone has no trusted position');
       return;
@@ -286,12 +343,47 @@ function checkAirspace(walk: Walk, site: SiteModel, context: VerificationContext
   return conflicts.length ? fail('airspace', conflicts.join('; ')) : ok('airspace', 'no hostile-drone conflict');
 }
 
+/**
+ * `anomaly_proximity` — does this mission actually look at the cue it answers?
+ *
+ * Two bounds, because the two questions are different (FM-73):
+ *
+ *  1. SOME target must be within `ANOMALY_PROXIMITY_M` of the cue: the mission
+ *     goes to the right part of the site at all.
+ *  2. Every OBSERVATION-class target — an orbit centre is the observation
+ *     point — must be within `ORBIT_CENTRE_TOLERANCE_M` of the cue. The outer
+ *     bound is far too loose here: an orbit centre 150 m from the cue, with a
+ *     25 m radius, produces a mission that flies, orbits an empty field, sees
+ *     nothing relevant, and hands the operator a report that names the cue's
+ *     location. That plan passed every check before this bound existed.
+ *
+ * The measured distances are in the reason so the operator reads metres, not
+ * a verdict, on the plan they are about to approve.
+ */
 function checkAnomalyProximity(walk: Walk, context: VerificationContext): VerificationCheck {
   if (!context.anomaly) return fail('anomaly_proximity', 'anomaly location is required before execution');
+  const anomaly = context.anomaly;
   const nearest = walk.targets.length ? Math.min(...walk.targets.map((target) =>
-    haversineMeters(target.pos, context.anomaly as Anomaly))) : Infinity;
-  return nearest <= ANOMALY_PROXIMITY_M ? ok('anomaly_proximity', `nearest mission target is ${fmt(nearest)} m from the anomaly`) :
-    fail('anomaly_proximity', `no mission target is within ${ANOMALY_PROXIMITY_M} m of the anomaly`);
+    haversineMeters(target.pos, anomaly))) : Infinity;
+  if (nearest > ANOMALY_PROXIMITY_M) {
+    return fail('anomaly_proximity',
+      `no mission target is within ${ANOMALY_PROXIMITY_M} m of the anomaly (nearest ${fmt(nearest)} m)`);
+  }
+  const strays = walk.targets
+    .filter((target) => target.kind === 'orbit_point')
+    .map((target) => ({ index: target.toolIndex, distance: haversineMeters(target.pos, anomaly) }))
+    .filter((entry) => entry.distance > ORBIT_CENTRE_TOLERANCE_M);
+  if (strays.length) {
+    return fail('anomaly_proximity', strays.map((entry) =>
+      `tool ${entry.index} orbit centre is ${fmt(entry.distance)} m from the anomaly; ` +
+      `an observation point must be within ${ORBIT_CENTRE_TOLERANCE_M} m of the cue it answers`).join('; '));
+  }
+  const centres = walk.targets.filter((target) => target.kind === 'orbit_point');
+  const observation = centres.length
+    ? `; nearest observation centre ${fmt(Math.min(...centres.map((target) =>
+      haversineMeters(target.pos, anomaly))))} m` : '';
+  return ok('anomaly_proximity',
+    `nearest mission target is ${fmt(nearest)} m from the anomaly${observation}`);
 }
 
 function checkAltitude(walk: Walk, plan: MissionPlan, site: SiteModel, context: VerificationContext): VerificationCheck {
@@ -443,12 +535,17 @@ function unattendedFailures(walk: Walk, plan: MissionPlan, site: SiteModel,
   const wind = context.windMps;
   if (!finite(wind) || wind > envelope.maxWindMps) {
     failures.push(`wind ${finite(wind) ? fmt(wind) : 'unknown'} m/s exceeds the ${envelope.maxWindMps} m/s unattended limit`);
+  } else if (context.windSource === 'assumed') {
+    // Attended, an assumed wind is a human's problem to watch. Unattended, the
+    // wind limit is the whole control, and a stand-in number is not a
+    // measurement (FM-72).
+    failures.push('wind is assumed, not measured; unattended dispatch needs a real wind report');
   }
   if (navSourceOf(context) !== 'gps') failures.push('unattended dispatch requires a GPS navigation source');
-  if ((context.rfEvents ?? []).some((event) => event.kind === 'gnss_interference')) {
+  if (currentRfEvents(context).some((event) => event.kind === 'gnss_interference')) {
     failures.push('RF interference is present; GNSS integrity is unverifiable');
   }
-  if ((context.rfEvents ?? []).some((event) => event.kind === 'hostile_drone')) {
+  if (currentRfEvents(context).some((event) => event.kind === 'hostile_drone')) {
     failures.push('a hostile drone is detected; airspace is yielded, never contested');
   }
   if (context.isNight && context.sensors?.thermal !== 'ok') {
@@ -836,5 +933,10 @@ export function verifyMission(inputPlan: MissionPlan, site: SiteModel,
       ...(correction.holdUntil === undefined ? {} : { holdUntil: correction.holdUntil }),
     };
   }
-  return { requestId: plan.requestId, verdict: 'rejected', checks: checksWithEdits };
+  // REJECTED: the repair attempt was abandoned, so nothing was applied. The
+  // edits above describe a plan that does not exist and would read to the
+  // operator as repairs made to the plan in front of them (FM-60) — an `edit`
+  // annotation belongs only to a verdict that actually released a corrected
+  // plan. The original checks, unannotated, are what the operator sees.
+  return { requestId: plan.requestId, verdict: 'rejected', checks: original };
 }

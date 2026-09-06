@@ -8,13 +8,28 @@ import type {
 import type { VerificationContext } from '@planner/verifier';
 import type { ObservationSummary } from '@planner/report';
 
+/**
+ * Mirror of `eis-planner/service.PlannerProposeResult` — what the Electron
+ * host's `planner:propose` actually resolves to.
+ *
+ * The LLM plan path was REMOVED (ADR D20): `source` is always
+ * `'deterministic'`, there is exactly one attempt, and the rule table can
+ * refuse a task outright, in which case there is no plan and no verdict —
+ * only `infeasibleReason`. This declaration had drifted from the host and
+ * still promised a non-optional `plan`/`verification` and an LLM `source`,
+ * so the renderer typechecked against a shape the host cannot return
+ * (FM-181).
+ */
 export interface PlannerProposeResult {
   vehicleId: string;
-  plan: MissionPlan;
+  plan?: MissionPlan;
   effectivePlan?: MissionPlan;
-  verification: Verification;
-  source: 'scripted' | 'live';
-  attempts: 1 | 2;
+  verification?: Verification;
+  source: 'deterministic';
+  attempts: 1;
+  /** Present when the deterministic rule table refused the task outright. */
+  infeasibleReason?: string;
+  /** Retained for compatibility; the deterministic planner never sets it. */
   fallbackReason?: string;
   escalationReason?: string;
 }
@@ -63,18 +78,9 @@ export interface ElectronBridge {
    * siteFilePlugin). Always call via `window.eis?.loadSiteFile?.()`.
    */
   loadSiteFile?(): Promise<unknown>;
-  /**
-   * Optional (Electron shells): baked satellite change-detection assets from
-   * ground/satellite/data — base64 PNGs + raw JSON text — or null when absent
-   * (the renderer's bundled copies are the default path and remain the
-   * fallback). Call via `window.eis?.loadSatelliteTiles?.()`.
-   */
-  loadSatelliteTiles?(): Promise<{
-    beforePng: string;
-    afterPng: string;
-    tilesJson: string;
-    anomaliesJson: string | null;
-  } | null>;
+  /* There is deliberately no `loadSatelliteTiles` (FM-148): the baked tiles
+     reach the renderer through the `@satdata` Vite alias in every build, and
+     the IPC handler that claimed to be a fallback was never called. */
   /** Constrained image resolver for paths declared by the selected site file. */
   resolveSiteAsset?(path: string): Promise<string | null>;
   plannerPropose?(input: {

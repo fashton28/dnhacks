@@ -28,6 +28,7 @@ import type {
   Telemetry,
 } from '@/contract';
 import type { SiteModel } from '@/site';
+import { RAIL_PIN_COLOUR, pinColourFor } from '@/cues';
 
 const M_PER_DEG_LAT = 111320;
 
@@ -448,7 +449,9 @@ function MapSvg({
       {anomalies.map((a) => {
         const dragging = drag?.id === a.id;
         const q = dragging ? { x: drag.x, y: drag.y } : pj(a.lat, a.lon);
-        const pin = a.source === 'sdr' ? '#ff6b66' : a.source === 'rf_drone' ? '#c47dff' : a.source === 'drone_survey' ? '#58d68d' : '#ffc24b';
+        // One colour table for every rail (FM-180): the map pin, the cue list
+        // and the rail badge cannot disagree about which rail raised a cue.
+        const pin = pinColourFor(a.source);
         const movable = !!onMoveAnomaly;
         return (
           <g
@@ -611,7 +614,10 @@ function centroid(pts: XY[]): XY {
 
 function Legend({ metersAcross, corridor }: { metersAcross: number; corridor: boolean }): React.ReactElement {
   const rows: Array<[string, string, boolean]> = [
-    ['#ffc24b', 'Vehicle / anomaly', false],
+    ['#ffc24b', 'Vehicle / optical cue', false],
+    [RAIL_PIN_COLOUR.sar, 'SAR cue', false],
+    [RAIL_PIN_COLOUR.cctv, 'CCTV cue', false],
+    [RAIL_PIN_COLOUR.fence_sensor, 'Fence cue', false],
     ['rgba(47,129,247,0.8)', 'Perimeter fence', true],
     ['rgba(240,68,56,0.8)', 'No-fly zone', false],
     ['rgba(90,160,255,0.9)', 'Planned route', true],

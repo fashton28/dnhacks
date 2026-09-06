@@ -2,31 +2,36 @@
  * SCRIPTED DEMO RAILS — ground-side stand-ins for producers that do not exist
  * yet on the vehicle/planner side.
  * ----------------------------------------------------------------------------
- * WHAT THIS IS
- *   Phase 3 needs four things the seam does not yet deliver:
- *     1. `MissionPlan.corridor`   — the flight tube a verified plan may occupy.
- *     2. `MissionPlan.planTrace`  — the ordered rule record behind the plan.
- *     3. `attended` verification check      (ADR D23 · UNATTENDED_ENVELOPE).
- *     4. `deconfliction` check + `holdUntil` (ADR D21 · separation).
- *   Both are declared OPTIONAL in the frozen contract, and `ground/planner`
- *   emits neither today (its deterministic planner is `ScriptedPlanner`, and
- *   `verifyMission` has no attendance/separation checks). This module derives
- *   them from what the REAL planner and verifier already produced.
+ * WHAT THIS IS, NOW
+ *   Two of the four things this file once supplied have real producers, and the
+ *   stand-ins for them are DELETED (FM-181):
+ *
+ *     1. `MissionPlan.corridor`   — still derived here, for one plan only.
+ *     2. `MissionPlan.planTrace`  — still derived here, for one plan only.
+ *     3. `attended` check         — REMOVED: `verifier.ts` emits it from the
+ *                                   attendance mode in the runtime context.
+ *     4. `deconfliction` + `holdUntil` — REMOVED: `verifier.ts` emits both from
+ *                                   the fleet and `fleetTs` in that context.
+ *
+ *   Folding scripted copies of 3 and 4 in over the verifier's own output
+ *   REPLACED the real verdict with a re-derivation of it, which is a second
+ *   opinion wearing the first one's name. The deterministic planner emits its
+ *   own corridor and trace, so `withCorridorAndTrace` is a no-op for its output
+ *   and dresses only the deliberately-invalid scripted plan the verifier must
+ *   refuse (docs/DEMO_RUNBOOK.md R1).
  *
  * WHAT THIS IS NOT
  *   It is NOT a second planner. It never chooses a route, an altitude, a tool,
  *   a profile or a coordinate: every geometric input here comes out of a plan
- *   the deterministic planner already emitted, or out of the loaded site model.
- *   Corridor derivation is a mechanical projection of `plan.tools`; the trace
- *   is a reason-for-record (no coordinates, tools or altitudes, per contract).
+ *   the planner already emitted, or out of the loaded site model. Corridor
+ *   derivation is a mechanical projection of `plan.tools`; the trace is a
+ *   reason-for-record (no coordinates, tools or altitudes, per contract).
  *
- * WHEN `ground/planner` GAINS `corridor` / `planTrace` AND THE VERIFIER GAINS
- * `attended` / `deconfliction`, DELETE THIS FILE and pass the producer's own
- * values through unchanged. Consumers already read `plan.corridor`,
- * `plan.planTrace` and `verification.checks` and nothing else.
+ * WHEN THE SCRIPTED BAD-PLAN RAIL GAINS A REAL PRODUCER, DELETE THIS FILE.
+ * Consumers already read `plan.corridor`, `plan.planTrace` and
+ * `verification.checks` and nothing else.
  * ========================================================================== */
 import type {
-  AttendanceMode,
   Corridor,
   CorridorLeg,
   CorridorOrbit,
@@ -34,8 +39,6 @@ import type {
   MissionProfile,
   PlanTraceEntry,
   Task,
-  Verification,
-  VerificationCheck,
 } from '@/contract';
 import type { LatLon, SiteModel } from '@planner/site';
 import {
@@ -61,16 +64,6 @@ export const LATERAL_TOL_M: Record<MissionProfile, number> = {
 };
 
 export const ORBIT_RADIAL_TOL_M = 5;
-
-/** Inter-vehicle separation, metres (D21). Doubles when peer data is stale. */
-export const SEPARATION_M = 40;
-export const SEPARATION_STALE_M = 80;
-/** Peer data older than this is stale; older than HOLD_AGE_MS, the answer is hold. */
-export const SEPARATION_STALE_AGE_MS = 3000;
-export const SEPARATION_HOLD_AGE_MS = 10000;
-
-/** How long a deconfliction hold defers dispatch, ms. */
-export const DECONFLICTION_HOLD_MS = 20000;
 
 /**
  * ADR D23 — UNATTENDED_ENVELOPE. The authority for these numbers is the
@@ -328,194 +321,20 @@ export function nearestCorridorPoint(pos: LatLon, corridor: Corridor): LatLon | 
   return best ? back(best.xy) : null;
 }
 
-/**
- * Departure/return clearance around the launch point, metres. Two vehicles
- * that share a pad necessarily share the first and last stretch of their
- * corridors; that overlap is sequenced by the pad, not by corridor separation,
- * so it is excluded from the comparison. Everything beyond it is compared.
- */
-export const PAD_CLEARANCE_M = 60;
-
-/** Minimum separation between two corridors, metres (sampled along the legs). */
-export function corridorSeparationM(a: Corridor, b: Corridor): number {
-  const ref: LatLon = a.legs[0]?.from ?? a.orbits[0]?.center ?? { lat: 0, lon: 0 };
-  const padOf = (c: Corridor): XY | null =>
-    c.legs[0] ? toXY(ref, c.legs[0].from) : null;
-  const pads = [padOf(a), padOf(b)].filter((p): p is XY => p !== null);
-  const nearAPad = (p: XY): boolean =>
-    pads.some((pad) => Math.hypot(p.x - pad.x, p.y - pad.y) <= PAD_CLEARANCE_M);
-
-  const samples = (c: Corridor): XY[] => {
-    const out: XY[] = [];
-    for (const leg of c.legs) {
-      const from = toXY(ref, leg.from);
-      const to = toXY(ref, leg.to);
-      for (let i = 0; i <= 20; i += 1) {
-        out.push({ x: from.x + ((to.x - from.x) * i) / 20, y: from.y + ((to.y - from.y) * i) / 20 });
-      }
-    }
-    for (const orbit of c.orbits) {
-      const centre = toXY(ref, orbit.center);
-      for (let i = 0; i < 16; i += 1) {
-        const th = (i / 16) * Math.PI * 2;
-        out.push({ x: centre.x + orbit.radius_m * Math.cos(th), y: centre.y + orbit.radius_m * Math.sin(th) });
-      }
-    }
-    return out.filter((p) => !nearAPad(p));
-  };
-  const sa = samples(a);
-  const sb = samples(b);
-  if (sa.length === 0 || sb.length === 0) return Number.POSITIVE_INFINITY;
-  let min = Number.POSITIVE_INFINITY;
-  for (const pa of sa) {
-    for (const pb of sb) {
-      const d = Math.hypot(pa.x - pb.x, pa.y - pb.y);
-      if (d < min) min = d;
-    }
-  }
-  return min;
-}
-
 /* ---------------------------------------------------------------------------
- * The two checks the verifier does not produce yet.
+ * The `attended` and `deconfliction` checks that used to live here are GONE
+ * (FM-181). `verifier.ts` produces both itself now, from the fleet, the
+ * attendance mode and `now` in the runtime context, and folding scripted
+ * stand-ins in over the top REPLACED the real verifier's verdict with a
+ * re-derivation of it — a second opinion masquerading as the first.
+ *
+ * The one thing the verifier cannot know is whether a HUMAN is at the console:
+ * attendance mode is the vehicle's, operator presence is the ground station's.
+ * That single rule is overlaid in `MockDataProvider.dressVerification`, where
+ * it can only ever make a verdict stricter.
+ *
+ * What remains in this file is the corridor/trace derivation for the ONE plan
+ * that still has no producer: the deliberately-invalid scripted plan the
+ * verifier must refuse (docs/DEMO_RUNBOOK.md R1). When that beat gains a real
+ * producer, delete this file.
  * ------------------------------------------------------------------------- */
-export interface AttendanceInput {
-  mode: AttendanceMode;
-  operatorPresent: boolean;
-  plan: MissionPlan;
-  site: SiteModel;
-  navSourceIsGps: boolean;
-  rfInterference: boolean;
-  hostileDrone: boolean;
-  nightWithoutThermal: boolean;
-  windMps?: number;
-}
-
-/** `attended` — does the mission's attendance mode permit this dispatch? */
-export function attendedCheck(input: AttendanceInput): VerificationCheck {
-  const name = 'attended';
-  if (input.mode === 'attended') {
-    return input.operatorPresent
-      ? { name, ok: true, reason: 'operator is on the loop; attended dispatch permitted' }
-      : { name, ok: false, reason: 'operator is not present and the mission is attended — approval has expired' };
-  }
-
-  // Unattended: every condition of ADR D23's UNATTENDED_ENVELOPE must hold.
-  const refusals: string[] = [];
-  if (!UNATTENDED_ENVELOPE.profiles.includes(input.plan.profile)) {
-    refusals.push(`profile ${input.plan.profile} is outside the unattended envelope (inspect only)`);
-  }
-  if (!input.navSourceIsGps) refusals.push('navigation source is not GPS');
-  if (input.rfInterference) refusals.push('RF interference present — GNSS integrity unverifiable');
-  if (input.hostileDrone) refusals.push('hostile drone detected — airspace is yielded, never contested');
-  if (input.nightWithoutThermal) refusals.push('night operation without healthy thermal');
-  if (input.windMps !== undefined && input.windMps > UNATTENDED_ENVELOPE.maxWindMps) {
-    refusals.push(`wind ${input.windMps.toFixed(1)} m/s exceeds the ${UNATTENDED_ENVELOPE.maxWindMps} m/s unattended limit`);
-  }
-
-  for (const tool of input.plan.tools) {
-    if (tool.tool === 'goto_gps') {
-      const alt = tool.alt_m ?? tool.alt;
-      if (alt < UNATTENDED_ENVELOPE.altMinM || alt > UNATTENDED_ENVELOPE.altMaxM) {
-        refusals.push(`a leg leaves the ${UNATTENDED_ENVELOPE.altMinM}–${UNATTENDED_ENVELOPE.altMaxM} m unattended altitude band`);
-      }
-      if (!pointInPolygon({ lat: tool.lat, lon: tool.lon }, input.site.perimeter)) {
-        refusals.push('a waypoint lies outside the site perimeter');
-      }
-    } else if (tool.tool === 'orbit_point') {
-      if ((tool.laps ?? 1) > UNATTENDED_ENVELOPE.maxLaps) {
-        refusals.push(`more than ${UNATTENDED_ENVELOPE.maxLaps} orbit lap`);
-      }
-    } else if (tool.tool === 'hold') {
-      const held = tool.duration_s ?? tool.durationS ?? 0;
-      if (held > UNATTENDED_ENVELOPE.maxHoldS) {
-        refusals.push(`hold of ${held} s exceeds the ${UNATTENDED_ENVELOPE.maxHoldS} s unattended limit`);
-      }
-    }
-  }
-
-  const unique = [...new Set(refusals)];
-  return unique.length === 0
-    ? { name, ok: true, reason: 'inside UNATTENDED_ENVELOPE; unattended dispatch permitted' }
-    : { name, ok: false, reason: `outside UNATTENDED_ENVELOPE: ${unique.join('; ')}` };
-}
-
-export interface DeconflictionInput {
-  corridor?: Corridor;
-  peerCorridor?: Corridor;
-  /** Epoch ms of the newest peer fleet row; omitted when there is no peer. */
-  peerDataTs?: number;
-  now: number;
-}
-
-export interface DeconflictionResult {
-  check: VerificationCheck;
-  /** Epoch ms before which dispatch must not happen, when a wait was applied. */
-  holdUntil?: number;
-}
-
-/** `deconfliction` — no other vehicle's corridor conflicts in space and time. */
-export function deconflictionCheck(input: DeconflictionInput): DeconflictionResult {
-  const name = 'deconfliction';
-  if (!input.corridor || !input.peerCorridor) {
-    return { check: { name, ok: true, reason: 'no other vehicle holds a cleared corridor' } };
-  }
-  const age = input.peerDataTs === undefined ? Number.POSITIVE_INFINITY : input.now - input.peerDataTs;
-  if (age > SEPARATION_HOLD_AGE_MS) {
-    return {
-      check: {
-        name, ok: false,
-        reason: `peer telemetry is ${(age / 1000).toFixed(0)} s old — a stale peer position is an unknown peer position`,
-      },
-    };
-  }
-  const required = age > SEPARATION_STALE_AGE_MS ? SEPARATION_STALE_M : SEPARATION_M;
-  const separation = corridorSeparationM(input.corridor, input.peerCorridor);
-  if (separation >= required) {
-    return {
-      check: {
-        name, ok: true,
-        reason: `closest approach to the peer corridor is ${separation.toFixed(0)} m (${required} m required)`,
-      },
-    };
-  }
-  const holdUntil = input.now + DECONFLICTION_HOLD_MS;
-  return {
-    holdUntil,
-    check: {
-      name, ok: true,
-      reason: `closest approach to the peer corridor is ${separation.toFixed(0)} m, below the ${required} m separation`,
-      edit: `dispatch held for ${(DECONFLICTION_HOLD_MS / 1000).toFixed(0)} s until the peer corridor clears`,
-    },
-  };
-}
-
-/**
- * Fold the two scripted checks into a verification the REAL verifier produced.
- * A failing check can only ever make the verdict stricter, never looser.
- */
-export function withAttendanceChecks(
-  verification: Verification,
-  attendance: AttendanceInput,
-  deconfliction: DeconflictionInput,
-): Verification {
-  const attended = attendedCheck(attendance);
-  const decon = deconflictionCheck(deconfliction);
-  const checks = [
-    ...verification.checks.filter((c) => c.name !== 'attended' && c.name !== 'deconfliction'),
-    attended,
-    decon.check,
-  ];
-  const failed = checks.some((c) => !c.ok);
-  const verdict: Verification['verdict'] = verification.verdict === 'rejected' || failed
-    ? 'rejected'
-    : decon.holdUntil
-      ? 'corrected'
-      : verification.verdict;
-  return {
-    ...verification,
-    checks,
-    verdict,
-    ...(decon.holdUntil && verdict !== 'rejected' ? { holdUntil: decon.holdUntil } : {}),
-  };
-}

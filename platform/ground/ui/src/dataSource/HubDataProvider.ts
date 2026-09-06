@@ -94,6 +94,17 @@ export interface FleetEntry {
   batteryPct: number;
   altM: number;
   mode: string;
+  /**
+   * The drone's reported position. `HubDroneState` carries lat/lon on every
+   * frame; the row used to drop them and the contract mapper then filled the
+   * hole with `{lat: 0, lon: 0}` — a real coordinate in the Gulf of Guinea
+   * that deconfliction and separation logic consumed as fact (FM-179).
+   * Absent (rather than zero) when the Hub has not reported one.
+   */
+  lat?: number;
+  lon?: number;
+  /** Hub mission this drone is flying, when any — the sortie's identity. */
+  missionId?: string | null;
 }
 
 type Listeners<T> = Set<(v: T) => void>;
@@ -183,21 +194,36 @@ export class HubDataProvider implements MissionDataSource {
   /* ---- Fleet extension (beyond the frozen contract) ------------------------- */
   /** Hub-native fleet rows (ARGUS panels). */
   onFleetRows = sub(this.lFleet);
-  /** Contract-shaped fleet stream, derived from the Hub rows so contract consumers keep working. */
+  /**
+   * Contract-shaped fleet stream, derived from the Hub rows so contract
+   * consumers keep working.
+   *
+   * `FleetVehicle.position` is a REQUIRED field that deconfliction and
+   * separation logic reads as the peer's true location, so a vehicle whose
+   * position the Hub has not reported is OMITTED from the contract fleet
+   * rather than published at `{lat: 0, lon: 0}` (FM-179). A vehicle missing
+   * from the list is visibly missing; a vehicle at a fabricated coordinate is
+   * a peer the separation check believes in. The Hub-native `onFleetRows`
+   * stream still carries every row, so the vehicle selector is unaffected.
+   */
   onFleet(cb: (m: FleetMessage) => void): ContractUnsubscribe {
     const inner = (rows: FleetEntry[]): void => cb({
       type: 'fleet', ts: Date.now(), vehicleId: this.getVehicle(),
-      vehicles: rows.map((r) => ({
-        vehicleId: r.vehicleId,
-        battery: { soc_pct: r.batteryPct } as FleetMessage['vehicles'][number]['battery'],
-        controlSource: r.status === 'manual_control' ? 'manual' : r.status === 'on_mission' ? 'planner' : 'auto',
-        failsafe: { state: 'none' as FailsafeState, reason: '' },
-        readiness: { ready: r.status !== 'offline', reasons: r.status === 'offline' ? ['offline'] : [], eta_ready_s: 0 },
-        // The Hub's fleet rows carry altitude but no lat/lon and no sortie
-        // clock: unknown fields stay at their zero/null values, never invented.
-        position: { lat: 0, lon: 0, relAlt: r.altM },
-        sortie: null,
-      })),
+      vehicles: rows
+        .filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lon))
+        .map((r) => ({
+          vehicleId: r.vehicleId,
+          battery: { soc_pct: r.batteryPct } as FleetMessage['vehicles'][number]['battery'],
+          controlSource: r.status === 'manual_control' ? 'manual' : r.status === 'on_mission' ? 'planner' : 'auto',
+          failsafe: { state: 'none' as FailsafeState, reason: '' },
+          readiness: { ready: r.status !== 'offline', reasons: r.status === 'offline' ? ['offline'] : [], eta_ready_s: 0 },
+          position: { lat: r.lat as number, lon: r.lon as number, relAlt: r.altM },
+          // The Hub reports which mission a drone is flying but not when that
+          // mission must be home by, and `must_rtl_by` is a hard deadline the
+          // deconfliction time-overlap test reads. An unknown deadline is
+          // reported as no sortie clock, never as a guessed one.
+          sortie: null,
+        })),
     });
     this.lFleet.add(inner); return () => this.lFleet.delete(inner);
   }
@@ -464,7 +490,13 @@ export class HubDataProvider implements MissionDataSource {
   private publishFleet(): void {
     const rows: FleetEntry[] = [...this.states.values()]
       .sort((a, b) => a.drone_id.localeCompare(b.drone_id))
-      .map((s) => ({ vehicleId: s.drone_id, status: s.status, batteryPct: s.battery_pct, altM: s.alt, mode: s.mode }));
+      .map((s) => ({
+        vehicleId: s.drone_id, status: s.status, batteryPct: s.battery_pct, altM: s.alt, mode: s.mode,
+        // Carried, not dropped: this is the same lat/lon the Hub puts in every
+        // `HubDroneState`, and it is what the contract fleet mapper needs.
+        ...(Number.isFinite(s.lat) && Number.isFinite(s.lon) ? { lat: s.lat, lon: s.lon } : {}),
+        missionId: s.mission_id,
+      }));
     emit(this.lFleet, rows);
   }
 

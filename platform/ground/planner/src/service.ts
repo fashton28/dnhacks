@@ -127,6 +127,11 @@ export class PlannerService {
     return {
       ...input.context,
       anomaly: input.anomaly,
+      // The host always knows what time it is, and the RF window is only
+      // enforced for a caller that says so (FM-51). Defaulting it here means
+      // every proposal that reaches a real ground station gets the live
+      // airspace picture instead of every RF report ever received.
+      now: input.context.now ?? Date.now(),
       vehicleId: input.context.vehicleId ?? input.vehicleId,
       ...(telemetry ? {
         telemetry: {

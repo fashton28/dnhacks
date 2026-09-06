@@ -19,7 +19,7 @@
  *   app:defaultConfig  invoke → Promise<Partial<ConnectionConfig>>
  *
  *   site:load            invoke → Promise<string>   (site JSON text, EIS_SITE_FILE)
- *   satellite:loadTiles  invoke → Promise<SatelliteTilesPayload | null>
+ *   site:resolveAsset    invoke → Promise<string | null>  (site image as a data URL)
  *
  *   power:inhibit      invoke → Promise<void>  (Linux: hold a powerSaveBlocker)
  *   power:release      invoke → Promise<void>  (Linux: drop the powerSaveBlocker)
@@ -38,18 +38,6 @@ interface DefaultConnectionConfig {
   controlPort?: number;
   videoUrl?: string;
   sitl?: boolean;
-}
-
-/** Payload returned by satellite:loadTiles (baked change-detection assets). */
-interface SatelliteTilesPayload {
-  /** before.png, base64-encoded (no data: prefix) */
-  beforePng: string;
-  /** after.png, base64-encoded (no data: prefix) */
-  afterPng: string;
-  /** raw JSON text of tiles.json (bounds + pixel dims) */
-  tilesJson: string;
-  /** raw JSON text of anomalies.json (baked detections), null if absent */
-  anomaliesJson: string | null;
 }
 
 /**
@@ -155,32 +143,16 @@ export function registerIpcHandlers(): void {
     return `data:${mime};base64,${fs.readFileSync(resolved).toString('base64')}`;
   });
 
-  // Baked before/after change-detection PNGs + metadata from
-  // ground/satellite/data (identical relative path when packaged, via
-  // extraResources). Returns null when the assets are absent so the renderer
-  // can fall back to a dev-server fetch.
-  ipcMain.handle('satellite:loadTiles', (): SatelliteTilesPayload | null => {
-    const dir = resolveAsset(path.join('ground', 'satellite', 'data'));
-    const beforePath = path.join(dir, 'before.png');
-    const afterPath = path.join(dir, 'after.png');
-    const tilesPath = path.join(dir, 'tiles.json');
-    if (
-      !fs.existsSync(beforePath) ||
-      !fs.existsSync(afterPath) ||
-      !fs.existsSync(tilesPath)
-    ) {
-      return null;
-    }
-    const anomaliesPath = path.join(dir, 'anomalies.json');
-    return {
-      beforePng: fs.readFileSync(beforePath).toString('base64'),
-      afterPng: fs.readFileSync(afterPath).toString('base64'),
-      tilesJson: fs.readFileSync(tilesPath, 'utf8'),
-      anomaliesJson: fs.existsSync(anomaliesPath)
-        ? fs.readFileSync(anomaliesPath, 'utf8')
-        : null,
-    };
-  });
+  // NOTE (FM-148): there is no `satellite:loadTiles` handler.
+  //
+  // It existed, and nothing ever called it. `SatellitePanel.tsx` imports the
+  // baked tiles through the `@satdata` Vite alias, so they are already in the
+  // renderer bundle in every build — dev, preview and packaged alike. The
+  // handler's own comment described a "renderer can fall back to a dev-server
+  // fetch" contract that the renderer does not implement and does not need,
+  // and its `extraResources` entry copied ~870 KB of PNG into every installer
+  // for a handler that was never invoked. Both are gone rather than left as a
+  // recovery path an operator might one day be told to rely on.
 
   // ── Power management (LINUX_PRD §7) ─────────────────────────────────────────
   // Inhibit screen-blank / suspend while the vehicle is armed or

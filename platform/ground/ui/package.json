@@ -9,7 +9,8 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "lint": "eslint . --ext .ts,.tsx"
+    "lint": "eslint . --ext .ts,.tsx",
+    "test": "node ../planner/node_modules/vitest/vitest.mjs run"
   },
   "dependencies": {
     "@fontsource-variable/geist": "5.2.9",

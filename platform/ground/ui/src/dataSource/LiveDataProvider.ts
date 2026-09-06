@@ -40,6 +40,9 @@ import type {
   VerificationMessage,
 } from '@/contract';
 import { DEFAULT_VEHICLE_ID } from '@/contract';
+import { getRawSite, getSiteModel } from '@/site';
+import { createRendererCueBus } from '@/cues';
+import type { CueBus, RailHealth } from '@/cues';
 import type { MissionDataSource } from './types';
 
 const ACK_TIMEOUT_MS = 4000;
@@ -110,17 +113,57 @@ export class LiveDataProvider implements MissionDataSource {
   private intentionalClose = false;
   private latencyMs = 0;
 
+  /* ---- cue rails (eis-cues CueBus) --------------------------------------
+   * The cue rails are GROUND-side producers: the satellite tiles, the SDR, the
+   * fixed cameras and the fence loop are all watched from the ground station,
+   * not from the aircraft. They run on the same bus the mock uses (FM-180) and
+   * emit onto the same `anomaly` / `healthEvent` channels the companion does,
+   * so a cue reaches the map identically whichever end raised it.
+   *
+   * They are independent of the vehicle link on purpose: a cue rail that went
+   * quiet because a drone was on the ground would be a rail that cannot raise
+   * the alarm that launches it. */
+  private cueBus: CueBus | null = null;
+
   /* ---- DataSource: lifecycle ------------------------------------------- */
   connect(config: ConnectionConfig): Promise<void> {
     this.config = config;
     this.intentionalClose = false;
     this.reconnectAttempts = 0;
     this.open();
+    this.startCueRails();
     return Promise.resolve();
+  }
+
+  private startCueRails(): void {
+    if (this.cueBus) return;
+    // The site is loaded asynchronously; the rails that need it wait for it,
+    // and the rails that do not start immediately.
+    void getSiteModel()
+      .catch(() => null)
+      .then(() => {
+        if (this.cueBus || this.intentionalClose) return;
+        const bus = createRendererCueBus({
+          vehicleId: DEFAULT_VEHICLE_ID,
+          site: getRawSite(),
+        });
+        this.cueBus = bus;
+        bus.onAnomaly((m) => this.cbs.anom.forEach((f) => f(m)));
+        bus.onHealth((m) => this.cbs.health.forEach((f) => f(m)));
+        void bus.start();
+      });
+  }
+
+  /** Per-rail badges: what each cue rail is doing right now. */
+  railHealth(): RailHealth[] {
+    return this.cueBus?.health() ?? [];
   }
 
   disconnect(): void {
     this.intentionalClose = true;
+    void this.cueBus?.stop();
+    this.cueBus?.dispose();
+    this.cueBus = null;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;

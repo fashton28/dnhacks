@@ -14,14 +14,29 @@ This package is a pixel-faithful port of the HTML/JSX prototype in
 
 ```bash
 npm install
-npm run dev      # Vite dev server (browser) — uses the mock data source by default
-npm run build    # type-check + production bundle
-npm run preview  # serve the production build locally
+npm run dev        # Vite dev server (browser) — uses the mock data source by default
+npm run build      # type-check + production bundle
+npm run preview    # serve the production build locally
+npm run typecheck  # tsc --noEmit
+npm run lint       # eslint
+npm test           # renderer logic tests (test/*.test.ts)
 ```
 
 Open the printed `http://localhost:5173`. With the default (mock) data source the
 app boots fully populated — synthetic telemetry, a moving target, a mock video
 scene, and a live map — with **no backend required**.
+
+The port is **strict**: if 5173 is taken, Vite refuses to start rather than
+sliding to 5174 and leaving the Electron shell rendering whatever else answered
+(FM-131). Set `EIS_UI_PORT` to move both the dev server and the shell together.
+
+`npm test` borrows Vitest from `ground/planner` (`node
+../planner/node_modules/vitest/vitest.mjs run`) rather than adding it to this
+package: the CI job here runs `npm ci`, which fails on a `package.json` its lock
+does not match, and regenerating the lock needs the registry. `scripts/setup-
+ground.*` installs the planner before anything here runs. The suites cover the
+mission store, the Hub fleet mapper, the wind context and the whole offline
+mission scenario end to end; see `test/setup.ts`.
 
 ---
 

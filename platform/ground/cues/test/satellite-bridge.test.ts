@@ -73,6 +73,10 @@ describe('ground/satellite bridge', () => {
     await rail.start();
     expect(seen).toHaveLength(1);
     expect(seen[0].anomaly.source).toBe('sar');
-    expect(seen[0].anomaly.type).toBe('sar_log_ratio_change');
+    // The baked chips brighten (fill 20 -> patch 80), so the cue names the
+    // DIRECTION of the change rather than collapsing both to one kind.
+    expect(seen[0].anomaly.type).toBe('sar_backscatter_increase');
+    // ...and it never ships the intensity chip's JSON path as image evidence.
+    expect(seen[0].anomaly.thumbnail).not.toMatch(/\.json$/);
   });
 });

@@ -78,6 +78,57 @@ export function triagePrompt(file: string = TRIAGE_PROMPT_FILE): string {
   }
 }
 
+/**
+ * Longest evidence REFERENCE that is worth sending to the model. A path or an
+ * id under this length is information; anything longer is a payload wearing a
+ * string's clothes (FM-79).
+ */
+export const EVIDENCE_REF_MAX_CHARS = 160;
+
+/**
+ * Replace an image payload with a description of it. A data URL is inert to a
+ * text model — the baked anomaly's thumbnail alone is a 10,010-character
+ * base64 blob, ~2.9k tokens of nothing, on the demo's critical path — and a
+ * long opaque string is untrusted input the model should not be reading either
+ * way. `report.ts` has done this for the operator-facing markdown since it was
+ * written; this is its counterpart on the prompt side.
+ */
+export function describeEvidenceRef(value?: string): string | null {
+  if (!value) return null;
+  if (/^data:[a-z0-9.+/-]+;base64,/i.test(value)) {
+    const kind = /^data:(image\/[a-z0-9.+-]+)/i.exec(value)?.[1] ?? 'binary';
+    return `embedded ${kind} attachment (${value.length} chars, omitted)`;
+  }
+  const normalized = value.replaceAll('\\', '/');
+  if (normalized.length <= EVIDENCE_REF_MAX_CHARS && !normalized.includes('..') &&
+      /^[a-zA-Z0-9._/-]+$/.test(normalized)) return normalized;
+  return 'evidence reference supplied and omitted';
+}
+
+/**
+ * What the model is shown for an incident report: the plan and the observation
+ * verbatim (they are all numbers and enums), and every image payload reduced to
+ * a description of itself. No behaviour depends on the omitted bytes — the
+ * report writer cites the reference, never the pixels.
+ */
+export function reportPayload(anomaly: Anomaly, plan: MissionPlan,
+  observation: ObservationSummary): Record<string, unknown> {
+  const frames = observation.frames;
+  return {
+    anomaly: { ...anomaly, thumbnail: describeEvidenceRef(anomaly.thumbnail) },
+    plan,
+    observation: {
+      ...observation,
+      ...(frames ? {
+        frames: {
+          ...(frames.rgb === undefined ? {} : { rgb: describeEvidenceRef(frames.rgb) }),
+          ...(frames.thermal === undefined ? {} : { thermal: describeEvidenceRef(frames.thermal) }),
+        },
+      } : {}),
+    },
+  };
+}
+
 export class LlmClient {
   private readonly client: ResponsesClient;
   readonly model: string;
@@ -110,7 +161,7 @@ export class LlmClient {
     const response = await this.parse({
       model: this.model,
       instructions: 'Return exactly one schema-bound incident report. Low confidence or missing observation must escalate for human review.',
-      input: JSON.stringify({ anomaly, plan, observation }),
+      input: JSON.stringify(reportPayload(anomaly, plan, observation)),
       text: { format: zodOutputFormat(INCIDENT_REPORT_INPUT_SCHEMA, 'incident_report') },
     });
     const parsed = INCIDENT_REPORT_INPUT_SCHEMA.parse(response.output_parsed);

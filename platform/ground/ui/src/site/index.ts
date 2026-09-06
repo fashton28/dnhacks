@@ -55,6 +55,18 @@ export type { SiteModel, SiteNfz, SiteStagingPoint, LatLon } from '@planner/site
 
 let sitePromise: Promise<SiteModel> | null = null;
 
+/**
+ * The RAW site JSON the validated model above was built from.
+ *
+ * `SiteModel` is the planner's slice of the site file — it has no `cameras`,
+ * no `no_image_zones` and no `pads`, because the planner does not need them.
+ * The cue rails do: `cctv` resolves a camera zone and `fence_sensor` a fence
+ * segment against the site's own declarations, and a rail that cannot place
+ * its cue would be inventing coordinates. Captured here rather than re-fetched
+ * so both views come from ONE load of ONE file (docs/SITE_CONTRACT.md).
+ */
+let rawSite: unknown = null;
+
 async function resolveSite(): Promise<SiteModel> {
   // 0. ARGUS Hub: the Site the fleet actually flies over.
   if (isHubMode()) {
@@ -66,7 +78,10 @@ async function resolveSite(): Promise<SiteModel> {
   if (bridge) {
     try {
       const raw: unknown = await bridge();
-      return validateSite(typeof raw === 'string' ? JSON.parse(raw) : raw);
+      const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+      const model = validateSite(parsed);
+      rawSite = parsed;
+      return model;
     } catch (err) {
       console.warn('[eis-site] window.eis.loadSiteFile failed, falling back:', err);
     }
@@ -74,14 +89,21 @@ async function resolveSite(): Promise<SiteModel> {
   // 2. Dev server route (vite.config.ts siteFilePlugin, EIS_SITE_FILE).
   try {
     const res = await fetch('/site.json');
-    if (res.ok) return validateSite(await res.json());
+    if (res.ok) {
+      const parsed: unknown = await res.json();
+      const model = validateSite(parsed);
+      rawSite = parsed;
+      return model;
+    }
     console.warn(`[eis-site] /site.json responded ${res.status}, falling back to bundled stub`);
   } catch {
     /* offline / file:// — fall through */
   }
   // 3. Bundled stub (still real site-file data, just frozen at build time).
   console.warn('[eis-site] using bundled site/site.stub.json fallback');
-  return validateSite(stubSite);
+  const model = validateSite(stubSite);
+  rawSite = stubSite;
+  return model;
 }
 
 /** Load (once) and memoize the site model. Never rejects twice in a row with
@@ -90,8 +112,18 @@ export function getSiteModel(): Promise<SiteModel> {
   if (!sitePromise) {
     sitePromise = resolveSite().catch((err) => {
       sitePromise = null;
+      rawSite = null;
       throw err;
     });
   }
   return sitePromise;
+}
+
+/**
+ * The raw site JSON behind the loaded model, for consumers that need fields
+ * the planner's `SiteModel` does not carry (cameras, fence segments). Null
+ * until `getSiteModel()` has resolved — call it first, or `await` it.
+ */
+export function getRawSite(): unknown {
+  return rawSite;
 }

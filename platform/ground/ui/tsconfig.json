@@ -22,6 +22,8 @@
       "@planner/*": ["../planner/src/*"],
       "@satellite/*": ["../satellite/src/*"],
       "@satdata/*": ["../satellite/data/*"],
+      "@cues/*": ["../cues/src/*"],
+      "@cuefixtures/*": ["../cues/fixtures/*"],
       "fs": ["src/lib/nodeShims.ts"],
       "path": ["src/lib/nodeShims.ts"]
     }

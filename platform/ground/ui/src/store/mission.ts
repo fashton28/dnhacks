@@ -44,6 +44,24 @@ export interface PlanProposal {
   verification?: Verification;
   approvedAt?: number;
   deniedAt?: number;
+  /**
+   * Which proposal this is for its `requestId` — 1 for the first, incremented
+   * every time a fresh plan supersedes it. Request ids are DETERMINISTIC
+   * (`plan-task-<anomalyId>`), so re-planning the same cue produces the same
+   * id and the store used to drop the newer plan and its verdict on the floor
+   * while the toast announced the fresh result (FM-43).
+   */
+  revision: number;
+  /** Epoch ms the operator's `executePlan` went out, before any ack. */
+  approvalSentAt?: number;
+  /** Epoch ms the VEHICLE refused the dispatch, with the reason it gave. */
+  refusedAt?: number;
+  refusedReason?: string;
+}
+
+/** Is this proposal waiting on an `executePlan` ack from the vehicle? */
+export function approvalPending(p: PlanProposal): boolean {
+  return p.approvalSentAt !== undefined && p.approvedAt === undefined && p.refusedAt === undefined;
 }
 
 export type ReportResolution = 'escalated' | 'logged' | 'dismissed';
@@ -213,19 +231,58 @@ function createMissionStore() {
       });
     },
 
+    /**
+     * A proposed plan.
+     *
+     * Request ids are deterministic, so a second `propose` for the same cue
+     * arrives under the SAME id. Dropping it (what this did before) left the
+     * panel showing the stale plan and the stale verdict while the toast
+     * announced the fresh one — and approving sent the stale `effectivePlan`
+     * to the vehicle (FM-43). A fresh plan now SUPERSEDES the stored one and
+     * takes its verification with it, so nothing can be approved against a
+     * verdict that was never rendered for it.
+     *
+     * The one thing that is never overwritten is a proposal the operator has
+     * already dispatched: that is the record of what flew. A collision there
+     * is a producer bug, and it is recorded as one rather than papered over.
+     */
     ingestPlan(p: MissionPlan, vehicleId: string = DEFAULT_VEHICLE_ID): void {
-      if (state.proposals.some((x) => x.plan.requestId === p.requestId)) return;
+      const idx = state.proposals.findIndex((x) => x.plan.requestId === p.requestId);
+      if (idx === -1) {
+        set({
+          proposals: [...state.proposals, { plan: p, revision: 1 }],
+          selectedRequestId: p.requestId,
+          audit: audit('plan',
+            `Plan ${shortId(p.requestId)} proposed — ${p.tools.length} step(s), profile ${p.profile}`, vehicleId),
+        });
+        return;
+      }
+      const existing = state.proposals[idx];
+      if (existing.approvedAt !== undefined || approvalPending(existing)) {
+        set({
+          audit: audit('plan',
+            `Plan ${shortId(p.requestId)} re-proposed after dispatch — KEPT the plan that was sent; ` +
+            'a re-plan needs a new requestId', vehicleId),
+        });
+        return;
+      }
+      const proposals = state.proposals.slice();
+      proposals[idx] = { plan: p, revision: existing.revision + 1 };
       set({
-        proposals: [...state.proposals, { plan: p }],
+        proposals,
         selectedRequestId: p.requestId,
         audit: audit('plan',
-          `Plan ${shortId(p.requestId)} proposed — ${p.tools.length} step(s), profile ${p.profile}`, vehicleId),
+          `Plan ${shortId(p.requestId)} re-proposed (revision ${existing.revision + 1}) — ` +
+          `${p.tools.length} step(s), profile ${p.profile}; the previous plan and its verdict are superseded`,
+          vehicleId),
       });
     },
 
     ingestVerification(v: Verification, vehicleId: string = DEFAULT_VEHICLE_ID): void {
       const idx = state.proposals.findIndex((x) => x.plan.requestId === v.requestId);
       if (idx === -1) return; // verification for an unknown plan — drop
+      // A second verdict for the SAME plan revision is a duplicate; a verdict
+      // for a superseded plan cannot arrive, because superseding clears it.
       if (state.proposals[idx].verification) return;
       const proposals = state.proposals.slice();
       proposals[idx] = { ...proposals[idx], verification: v };
@@ -243,15 +300,60 @@ function createMissionStore() {
       set({ selectedRequestId: requestId });
     },
 
+    /**
+     * The operator approved and `executePlan` has been SENT. Nothing is
+     * recorded as flown yet: the vehicle can still refuse for any of its six
+     * reasons, and until its ack arrives the only true statement is that a
+     * command is in flight (FM-42).
+     */
+    noteApprovalSent(requestId: string, vehicleId: string = state.vehicleId): void {
+      const proposals = state.proposals.map((p) =>
+        p.plan.requestId === requestId
+          ? { ...p, approvalSentAt: Date.now(), refusedAt: undefined, refusedReason: undefined }
+          : p);
+      set({
+        proposals,
+        audit: audit('approval',
+          `Operator APPROVED plan ${shortId(requestId)} — executePlan sent, awaiting the vehicle's ack`,
+          vehicleId),
+      });
+    },
+
+    /**
+     * The vehicle ACCEPTED the dispatch. Only now is the mission record opened
+     * and the approve gate closed for good — before the ack, "Mission approved"
+     * was a claim about someone else's state that the UI had not checked.
+     */
     noteApproval(requestId: string, vehicleId: string = state.vehicleId): void {
       const proposals = state.proposals.map((p) =>
         p.plan.requestId === requestId ? { ...p, approvedAt: Date.now() } : p);
       set({
         proposals,
         executedRequestId: requestId,
-        audit: audit('approval', `Operator APPROVED plan ${shortId(requestId)} — executePlan sent`, vehicleId),
+        audit: audit('approval',
+          `Vehicle ACCEPTED plan ${shortId(requestId)} — mission dispatched`, vehicleId),
       });
       openRecord(requestId, vehicleId);
+    },
+
+    /**
+     * The vehicle REFUSED the dispatch. The proposal returns to approvable so
+     * the operator can fix the cause and try again, the reason is on the
+     * audit trail, and no mission record is opened for a mission that never
+     * launched.
+     */
+    noteExecuteRefused(requestId: string, reason: string, vehicleId: string = state.vehicleId): void {
+      const proposals = state.proposals.map((p) =>
+        p.plan.requestId === requestId
+          ? { ...p, approvalSentAt: undefined, refusedAt: Date.now(), refusedReason: reason }
+          : p);
+      set({
+        proposals,
+        executedRequestId: state.executedRequestId === requestId ? null : state.executedRequestId,
+        audit: audit('denial',
+          `Vehicle REFUSED plan ${shortId(requestId)} — ${reason || 'no reason given'}; nothing was dispatched`,
+          vehicleId),
+      });
     },
 
     noteDenial(requestId: string): void {
