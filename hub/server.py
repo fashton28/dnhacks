@@ -119,7 +119,10 @@ class ManualEndBody(BaseModel):
     action: str = "resume"  # resume | abort | hover
 
 
-def _load_dotenv(path: Path = Path(__file__).resolve().parent.parent / ".env") -> None:
+ROOT = Path(__file__).resolve().parent.parent
+
+
+def _load_dotenv(path: Path | None = None) -> None:
     """Read KEY=value lines from the repo's .env into the environment without overriding what is already set.
 
     Secrets never live in source or config; the file is gitignored and read here so `make hub`

@@ -45,10 +45,25 @@ function siteFilePlugin(): Plugin {
   };
 }
 
+/**
+ * MapLibre 6 runs its GeoJSON and symbol work in a Web Worker. We hand it the worker as a hashed
+ * `?url` asset, but the worker itself imports `./maplibre-gl-shared.mjs` by its plain name, so the
+ * production bundle needs that exact file next to the hashed worker. Without it every vector layer
+ * silently never renders (the style never finishes loading) while raster tiles still show.
+ */
+function maplibreSharedChunk(): Plugin {
+  const shared = fileURLToPath(new URL('./node_modules/maplibre-gl/dist/maplibre-gl-shared.mjs', import.meta.url));
+  return {
+    name: 'maplibre-shared-chunk',
+    apply: 'build',
+    generateBundle() { this.emitFile({ type: 'asset', fileName: 'assets/maplibre-gl-shared.mjs', source: fs.readFileSync(shared) }); },
+  };
+}
+
 // base: './' so the production bundle loads from file:// inside the Electron shell.
 export default defineConfig({
   base: './',
-  plugins: [react(), siteFilePlugin()],
+  plugins: [react(), siteFilePlugin(), maplibreSharedChunk()],
   resolve: {
     dedupe: ['react', 'react-dom', 'react/jsx-runtime'],
     preserveSymlinks: true,

@@ -8,6 +8,7 @@
  * batched to ~6 Hz so 30 Hz telemetry never touches MapLibre directly.
  * ========================================================================== */
 import React, { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import * as maplibregl from 'maplibre-gl';
 import maplibreWorkerUrl from 'maplibre-gl/dist/maplibre-gl-worker.mjs?url';
 import 'maplibre-gl/dist/maplibre-gl.css';
@@ -39,7 +40,10 @@ const battColor = (pct: number) => (pct > 50 ? '#3fb950' : pct > 25 ? '#f0883e' 
 
 type Entry = { marker: maplibregl.Marker; el: HTMLDivElement; label: HTMLDivElement; track: [number, number][]; state: HubDroneState };
 
-export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: string; onSelect: (id: string) => void; compact?: boolean }): React.ReactElement {
+/** A React node pinned to a coordinate on the map (the Detection card, anchored on its polygon). */
+export interface MapAnchor { lat: number; lon: number; node: React.ReactNode }
+
+export function SiteMap({ hubBase, onSelect, compact = false, bare = false, anchor = null }: { hubBase: string; onSelect: (id: string) => void; compact?: boolean; bare?: boolean; anchor?: MapAnchor | null }): React.ReactElement {
   const holder = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const ready = useRef(false);
@@ -53,6 +57,8 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
   const [follow, setFollow] = useState(false);
   const followRef = useRef(false); followRef.current = follow;
   const [siteName, setSiteName] = useState('Site');
+  const anchorMarker = useRef<maplibregl.Marker | null>(null);
+  const [anchorEl, setAnchorEl] = useState<HTMLDivElement | null>(null);
 
   const fleet = useArgus((s) => s.fleet);
   const selected = useArgus((s) => s.selected);
@@ -84,6 +90,7 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
       },
     });
     mapRef.current = map;
+    (window as unknown as { __argusMap?: maplibregl.Map }).__argusMap = map;  // debug hook for Playwright checks
     map.addControl(new maplibregl.AttributionControl({ compact: true }), 'bottom-right');
     map.addControl(new maplibregl.ScaleControl({ maxWidth: 90, unit: 'metric' }), 'bottom-left');
     map.on('dragstart', () => setFollow(false));
@@ -233,6 +240,35 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
     }
   }, [envelope]);
 
+  /* ---- anchored card: a Marker whose element React renders into ---- */
+  useEffect(() => {
+    const map = mapRef.current; if (!map) return;
+    if (!anchor) { anchorMarker.current?.remove(); anchorMarker.current = null; setAnchorEl(null); return; }
+    if (!anchorMarker.current) {
+      const el = document.createElement('div');
+      anchorMarker.current = new maplibregl.Marker({ element: el, anchor: 'left', offset: [22, 0] }).setLngLat([anchor.lon, anchor.lat]).addTo(map);
+      setAnchorEl(el);
+    } else {
+      anchorMarker.current.setLngLat([anchor.lon, anchor.lat]);
+    }
+  }, [anchor?.lat, anchor?.lon, !!anchor]);   // eslint-disable-line react-hooks/exhaustive-deps
+  const portal = anchor && anchorEl ? createPortal(anchor.node, anchorEl) : null;
+
+  if (bare) {
+    return (
+      <>
+        <div className="a-sitemap" style={{ position: 'absolute', inset: 0 }}>
+          <div ref={holder} style={{ position: 'absolute', inset: 0 }} />
+          <div className="a-mapvignette" />
+        </div>
+        <div className="a-mapctl">
+          <button className="a-icobtn" data-on={follow || undefined} title="Follow the selected Drone" aria-pressed={follow} onClick={() => { setFollow((f) => !f); const e = selected ? entries.current.get(selected) : null; if (e && mapRef.current) mapRef.current.easeTo({ center: [e.state.lon, e.state.lat], duration: 400 }); }}><Crosshair size={14} /></button>
+          <button className="a-icobtn" title="Fit the Site" onClick={fitSite}><Maximize2 size={14} /></button>
+        </div>
+        {portal}
+      </>
+    );
+  }
   return (
     <Panel title="Site map" icon={<MapIcon size={13} />} variant="sunken" pad={false} style={{ minHeight: 0 }} bodyStyle={{ position: 'relative', height: '100%', minHeight: 0 }}
       status={mission ? <Badge tone="accent" mono>MISSION</Badge> : <Badge tone="neutral" mono>{siteName.toUpperCase()}</Badge>}
@@ -246,6 +282,7 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
         <div ref={holder} style={{ position: 'absolute', inset: 0 }} />
         <div className="a-mapvignette" />
       </div>
+      {portal}
     </Panel>
   );
 }
