@@ -425,7 +425,7 @@ window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
 const rc = new RcController();
 const rcPill = $("rc-pill");
 rc.onConnect = (id) => { rcPill.textContent = `RC ${id.replace(/\(.*\)/, "").trim().slice(0, 28)}`; rcPill.className = "pill ok"; log(`RC controller connected: ${id}`, "good"); };
-rc.onDisconnect = (id) => { rcPill.textContent = "no RC"; rcPill.className = "pill"; log(`RC controller disconnected: ${id}`, "warn"); };
+rc.onDisconnect = (id) => { rcPill.textContent = "no RC · press a button"; rcPill.className = "pill"; log(`RC controller disconnected: ${id}`, "warn"); };
 const RC_SPEED = 6.0, RC_CLIMB = 2.5, RC_YAW_RATE = 90;  // full stick: metres per second, metres per second, degrees per second
 let manualPhase = "live";
 let rcSeen: string | null = null;
