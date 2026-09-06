@@ -16,6 +16,8 @@
   --a-refused: var(--red-bright);
   --a-select: var(--gray-11);
   --a-ink: var(--gray-1);
+  /* one action colour across the console: the ARGUS green of the mark, not the shared kit's blue */
+  --accent: var(--green); --accent-hover: var(--green-bright); --accent-active: var(--green-deep); --accent-text: var(--green-bright); --accent-subtle: var(--green-tint); --accent-border: var(--green-line); --text-on-accent: #06140c;
   font-size: 12px;
 }
 
@@ -143,3 +145,81 @@
 .a-mapdrone .batt { fill: none; stroke-width: 3; stroke-linecap: round; }
 .a-maplabel { position: absolute; left: 50%; top: 100%; transform: translate(-50%, 1px); white-space: nowrap; font: 600 9.5px/1.3 var(--font-mono); color: var(--text-primary); background: rgba(8, 11, 16, 0.78); padding: 1px 5px; border-radius: 3px; border: 1px solid rgba(255,255,255,0.12); pointer-events: none; }
 .a-maplabel small { color: var(--text-tertiary); font-weight: 500; margin-left: 4px; }
+
+/* ============================================================================
+ * Shell v2: the render is the canvas. Glass panels float over a full-bleed
+ * camera, World view or Site map; an icon rail on the left, context pills on
+ * top, fleet and trust cards along the bottom.
+ * ========================================================================== */
+.a-shell { position: relative; height: 100vh; overflow: hidden; background: var(--bg-app); color: var(--text-primary); }
+.a-stage { position: absolute; inset: 0; background: #000; }
+.a-shade { position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, rgba(11,13,17,0.62) 0%, rgba(11,13,17,0) 18%, rgba(11,13,17,0) 66%, rgba(11,13,17,0.78) 100%); }
+.a-glass { background: rgba(11,13,17,0.66); backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border: 1px solid rgba(255,255,255,0.10); border-radius: var(--radius-lg); box-shadow: 0 8px 30px rgba(0,0,0,0.35); }
+.a-glasswrap > section { background: rgba(11,13,17,0.66) !important; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px); border-color: rgba(255,255,255,0.10) !important; box-shadow: 0 8px 30px rgba(0,0,0,0.35); flex: 1 1 0; min-height: 0; }
+.a-glasswrap > section > header { background: transparent !important; }
+
+.a-topbar { position: absolute; left: 0; right: 0; top: 0; height: 64px; display: flex; align-items: center; gap: 16px; padding: 0 20px; z-index: 20; pointer-events: none; }
+.a-topbar > * { pointer-events: auto; }
+.a-pill { display: flex; align-items: center; gap: 10px; height: 40px; padding: 0 14px 0 12px; border-radius: 999px; color: var(--text-secondary); }
+.a-pill .a-title { font-size: 12px; white-space: nowrap; }
+.a-pill .a-label { font-size: 9px; white-space: nowrap; }
+.a-pillbtn { display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 12px; border-radius: 999px; color: var(--text-secondary); font: 600 10px/1 var(--font-sans); letter-spacing: 0.12em; text-transform: uppercase; border: 1px solid rgba(255,255,255,0.10); background: rgba(11,13,17,0.66); backdrop-filter: blur(16px); cursor: default; }
+.a-pillbtn[data-icon="true"] { width: 34px; padding: 0; justify-content: center; cursor: pointer; }
+.a-pillbtn[data-icon="true"]:hover { color: var(--text-primary); border-color: var(--border-strong); }
+
+.a-rail { position: absolute; left: 14px; top: 50%; transform: translateY(-50%); display: flex; flex-direction: column; gap: 6px; padding: 8px; z-index: 20; }
+.a-railbtn { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; width: 60px; height: 56px; border-radius: 8px; border: 0; background: transparent; color: var(--text-secondary); font: 600 9.5px/1 var(--font-sans); letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; transition: background 120ms var(--ease-out), color 120ms var(--ease-out); }
+.a-railbtn:hover { color: var(--text-primary); background: rgba(255,255,255,0.06); }
+.a-railbtn[data-on="true"] { background: rgba(230,234,240,0.12); color: #ffffff; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.14); }
+.a-railbtn[data-badge]::after { content: attr(data-badge); position: absolute; top: 6px; right: 8px; min-width: 14px; height: 14px; padding: 0 4px; border-radius: 999px; background: var(--amber); color: #1a1200; font: 700 9px/14px var(--font-mono); text-align: center; }
+.a-railbtn { position: relative; }
+.a-railsep { height: 1px; margin: 2px 8px; background: rgba(255,255,255,0.10); }
+
+.a-strip { position: absolute; left: 104px; right: 20px; bottom: 16px; display: flex; gap: 10px; align-items: stretch; z-index: 15; }
+.a-strip .a-glass { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px 12px; min-width: 0; }
+.a-strip .a-card { width: 190px; padding: 8px 10px; background: rgba(255,255,255,0.04); }
+.a-strip .a-card[data-selected="true"] { border-color: var(--a-select); }
+.a-strip .a-card[data-selected="true"]::before { display: none; }
+.a-strip .a-card[data-selected="true"] { box-shadow: inset 2px 0 0 var(--a-select); }
+.a-segpills { display: flex; gap: 4px; }
+.a-segpills button { height: 18px; padding: 0 7px; border-radius: 999px; border: 1px solid var(--text-tertiary); background: transparent; color: var(--text-tertiary); font: 600 10px/1 var(--font-sans); letter-spacing: 0.08em; text-transform: uppercase; cursor: pointer; }
+.a-segpills button[data-on="true"] { background: var(--text-primary); border-color: var(--text-primary); color: var(--a-ink); }
+.a-segpills button:disabled { opacity: 0.45; cursor: default; }
+.a-wps { display: flex; gap: 4px; }
+.a-wps > span { flex: 1; height: 4px; border-radius: 2px; background: var(--gray-6); }
+.a-wps > span[data-done="true"] { background: var(--green); }
+.a-wps > span[data-cur="true"] { background: var(--green-bright); box-shadow: 0 0 8px rgba(78,224,138,0.8); }
+
+.a-drawer { position: absolute; right: 20px; top: 76px; bottom: 196px; width: 340px; z-index: 30; display: flex; flex-direction: column; min-height: 0; }
+.a-drawer > header { display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 8px 0 14px; border-bottom: 1px solid rgba(255,255,255,0.08); flex: none; }
+.a-drawer > .a-drawerbody { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.a-drawer > .a-drawerbody > section { background: transparent !important; border: 0 !important; border-radius: 0 !important; }
+.a-drawer > .a-drawerbody > section > header { display: none !important; }
+.a-trust { position: absolute; right: 20px; top: 76px; bottom: 196px; width: 320px; display: flex; flex-direction: column; gap: 10px; z-index: 10; }
+
+/* HUD instruments over the camera */
+.a-hud-big { font: 500 46px/1 var(--font-mono); letter-spacing: -0.02em; color: #ffffff; text-shadow: 0 2px 6px rgba(0,0,0,0.8); font-variant-numeric: tabular-nums; }
+.a-hud-unit { font: 500 11px/1 var(--font-sans); letter-spacing: 0.08em; color: rgba(232,238,245,0.85); text-transform: uppercase; text-shadow: 0 1px 3px rgba(0,0,0,0.9); }
+.a-hud-tick { position: absolute; right: 0; width: 10px; height: 1px; background: rgba(255,255,255,0.75); box-shadow: 0 0 2px rgba(0,0,0,0.9); }
+.a-hud-tick[data-major="true"] { width: 16px; }
+
+/* detection card anchored on the map or floating on the video */
+.a-detcard { width: 300px; display: flex; flex-direction: column; gap: 10px; padding: 12px 14px 14px; border-color: rgba(240,68,56,0.45) !important; }
+.a-detcard .a-btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 6px; font: 600 11px/1 var(--font-sans); color: var(--text-primary); background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.12); cursor: pointer; }
+.a-detcard .a-btn:hover { background: rgba(255,255,255,0.14); }
+.a-detcard .a-btn[data-primary="true"] { background: var(--green); border-color: var(--green); color: #06140c; flex: 1; }
+.a-detcard .a-btn[data-primary="true"]:hover { background: var(--green-bright); }
+.a-detcard .a-btn:disabled { opacity: 0.5; cursor: default; }
+.a-mapctl { position: absolute; right: 20px; bottom: 210px; display: flex; gap: 4px; z-index: 12; }
+.a-mapctl .a-icobtn { width: 34px; height: 34px; border-radius: 999px; background: rgba(11,13,17,0.66); backdrop-filter: blur(16px); }
+
+/* the anchored card chooses the side of its point that has room: data-q is the screen quadrant of the point */
+.a-anchor { position: relative; width: 0; height: 0; }
+.a-anchor .a-detcard { position: absolute; }
+.a-anchor[data-q="tl"] .a-detcard { left: 22px; top: -20px; }
+.a-anchor[data-q="tr"] .a-detcard { right: 22px; top: -20px; }
+.a-anchor[data-q="bl"] .a-detcard { left: 22px; bottom: -20px; }
+.a-anchor[data-q="br"] .a-detcard { right: 22px; bottom: -20px; }
+.a-anchor::before { content: ''; position: absolute; left: -7px; top: -7px; width: 14px; height: 14px; border-radius: 999px; border: 2px solid var(--red-bright); box-shadow: 0 0 0 5px rgba(240,68,56,0.18), 0 0 18px rgba(240,68,56,0.45); }
+.a-detcard .a-id { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.a-detcard .a-chip { white-space: nowrap; flex: none; }

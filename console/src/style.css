@@ -203,6 +203,8 @@ body.embed #app { grid-template-rows: 1fr !important; }
 body.embed main { grid-row: 1 / -1 !important; }
 body.embed main { grid-template-columns: 1fr !important; grid-template-rows: 1fr !important; padding: 0 !important; gap: 0 !important; }
 body.embed #world { grid-column: 1 / -1 !important; grid-row: 1 / -1 !important; border-radius: 0 !important; border: 0 !important; }
+/* inside the dashboard the World view has no chrome of its own: the dashboard's rail and pills frame it */
+body.embed #world .surface-label, body.embed #world .surface-controls, body.embed #world .surface-hint { display: none !important; }
 
 /* Camera gimbal control in the Drone view header */
 .gimbal { display: inline-flex; align-items: center; gap: 6px; margin-right: 8px; color: var(--muted); }
