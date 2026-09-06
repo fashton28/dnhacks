@@ -238,6 +238,35 @@ class Observation(Strict):
     looking_for: str | None = None
 
 
+class SightingLabel(StrEnum):
+    hot_spot = "hot_spot"
+    smoke = "smoke"
+    steam = "steam"
+
+
+class Sighting(Strict):
+    """One measured thing in one camera frame: a hot blob in the radiometric thermal map, or a plume column.
+
+    Produced by the Hub's perception pass (hub/perception.py) from the Renderer's per-pixel temperature map, not by a vision model.
+    bbox is in frame pixels [x0, y0, x1, y1] with the origin top-left; lat, lon and range_m come from casting the box's foot pixel
+    through the camera pose to ground level.
+    """
+
+    id: str
+    drone_id: str
+    mission_id: str | None = None
+    ts: datetime
+    label: SightingLabel
+    confidence: Annotated[float, Field(ge=0, le=1)]
+    bbox: Annotated[list[int], Field(min_length=4, max_length=4, description="[x0, y0, x1, y1] in frame pixels, origin top-left")]
+    camera_mode: str
+    lat: float
+    lon: float
+    range_m: float = Field(description="slant range from the camera to the georeferenced ground point, metres")
+    temp_max_c: float | None = Field(default=None, description="peak temperature inside the box, degrees C (thermal frames)")
+    frame_ref: str | None = None
+
+
 class IncidentReport(Strict):
     """The written outcome of a Mission for the Operator."""
 

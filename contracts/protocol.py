@@ -41,6 +41,7 @@ class Frame(Strict):
     gimbal_pitch_deg: float
     ts: str
     cmd_id: str | None = Field(default=None, description="set when this frame answers a capture_frame")
+    temp_png_b64: str | None = Field(default=None, description="thermal frames only: grayscale PNG of the per-pixel temperature before the palette; byte 0 = -10 C, 255 = 700 C, linear")
 
 
 class Ack(Strict):

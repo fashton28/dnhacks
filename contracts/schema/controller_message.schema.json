@@ -214,6 +214,19 @@
           "default": null,
           "description": "set when this frame answers a capture_frame",
           "title": "Cmd Id"
+        },
+        "temp_png_b64": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "thermal frames only: grayscale PNG of the per-pixel temperature before the palette; byte 0 = -10 C, 255 = 700 C, linear",
+          "title": "Temp Png B64"
         }
       },
       "required": [
