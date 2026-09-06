@@ -129,9 +129,9 @@ class Bridge:
                 self.lat, self.lon = msg.lat / 1e7, msg.lon / 1e7
                 self.alt = msg.relative_alt / 1000.0
                 self.hdg = msg.hdg / 100.0 if msg.hdg != 65535 else self.hdg
+                self.vned = (msg.vx / 100.0, msg.vy / 100.0, msg.vz / 100.0)
             elif t == "ATTITUDE":
                 self.roll, self.pitch = math.degrees(msg.roll), math.degrees(msg.pitch)
-                self.vned = (msg.vx / 100.0, msg.vy / 100.0, msg.vz / 100.0)
             elif t == "HEARTBEAT" and msg.get_srcComponent() == 1:
                 self.armed = bool(msg.base_mode & mavutil.mavlink.MAV_MODE_FLAG_SAFETY_ARMED)
                 self.mode = mavutil.mode_string_v10(msg)
