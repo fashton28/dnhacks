@@ -182,7 +182,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             """The demo's foundation starts itself: once a Drone and a Renderer are connected, run the startup Scenario
             (ARGUS_STARTUP_SCENARIO, e.g. transformer_fire; empty, the default, disables it) after ARGUS_STARTUP_DELAY_S (default 20).
             With the autonomy mode at its default, the plant alarm it raises dispatches a Drone with nobody at the keyboard."""
-            kind = os.environ.get("ARGUS_STARTUP_SCENARIO", "").strip()  # off by default: the dashboard's Start gate lights the fire on cue
+            kind = os.environ.get("ARGUS_STARTUP_SCENARIO", "transformer_fire").strip()  # the fire is the demo: it is burning from launch (empty disables)
             print(f"[startup] scenario task running, kind={kind!r}", flush=True)
             if not kind:
                 return

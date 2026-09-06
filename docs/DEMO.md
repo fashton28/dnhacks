@@ -14,7 +14,7 @@ One idea, told twice: the same picture from above gets a different answer depend
 
 3. Wait 45 seconds, then check `curl -s localhost:8000/autonomy` shows `"llm_mode":"live","flight_mode":"agent","mode":"autonomous"`.
    The default autonomy mode is autonomous: a plant signal dispatches with no countdown. Switch the top-bar pill to supervised for the 15 s veto window.
-   The dashboard opens on a Start gate; Start counts 3-2-1 and lights the transformer fire, so the demo begins on your cue. (`ARGUS_STARTUP_SCENARIO=transformer_fire` at launch makes the Hub light it by itself instead.)
+   The transformer fire is burning from launch: about 20 seconds after the fleet and the Renderer are ready the Hub lights it, raises the plant alarm, and in autonomous mode dispatches a Drone by itself. The dashboard's Start gate opens the console onto the story already under way. (`ARGUS_STARTUP_SCENARIO=` empty at launch disables the automatic fire.)
 4. Open the dashboard at http://localhost:8000/ and hard-reload it (Cmd+Shift+R). Close every other Console or dashboard tab; more than one full render halves the frame rate.
 5. Optional second screen: the Console World view with a chase camera, http://localhost:8000/console/?dist=6, then press F when a Drone is selected.
 6. Dashboard: Baseline once, so the overhead pass has a before image.
