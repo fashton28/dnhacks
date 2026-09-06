@@ -1,8 +1,10 @@
 # ARGUS: autonomous drone observability for critical infrastructure
 
-ARGUS watches a nuclear plant from two layers: an overhead pass that notices change, and an AI-flown drone that goes and finds out what the change is.
-Between the AI and the aircraft sits a trust layer that is not an AI: every plan, every flight step and every human stick input is checked against the site's geofence, no-fly zone and altitude limits before it reaches the flight controller.
-The flight controller is ArduPilot, the same open-source code that flies real multirotors, running in software-in-the-loop simulation.
+ARGUS watches a nuclear plant from two layers: an overhead pass that notices something has changed, and an AI-flown drone that goes and finds out what it is.
+
+Between the AI and the aircraft sits a trust layer with no AI in it. Every envelope the agent declares, every move it makes in flight and every stick input from a human is checked against the site's geofence, no-fly zones and altitude limits before it reaches the flight controller. The agent can be wrong, or manipulated, and still cannot reach a place the rules forbid.
+
+The flight controller is ArduPilot — the same open-source firmware that flies real multirotors — running in software-in-the-loop simulation. Only the airframe is missing.
 
 Built by a team of four for DNHacks (defense track) on a fictional site, Meridian Station.
 
@@ -10,13 +12,13 @@ Built by a team of four for DNHacks (defense track) on a fictional site, Meridia
 
 ## What happens on one anomaly
 
-1. **Detect.** The wide-area layer compares an overhead image before and after and flags a change: a rising column in the switchyard, a vehicle at the fence, an object where nothing should be.
-2. **Decide whether to fly.** The Triage Agent (Claude) reads the detection with the site context: which zone it is in, what is normally there, whether maintenance is declared. A contractor van in the service yard during a declared window is logged, no motor spins.
-3. **Declare an envelope.** The agent states where it intends to fly: a radius, a ceiling, a time budget. The Safety Validator checks the envelope against the site limits and refuses or shrinks it before takeoff.
-4. **Fly it.** Inside the envelope the agent is in control through tools: fly to, hold, tilt the camera, switch to thermal, zoom, capture. Every move is re-validated live, and hard stops in code (step budget, time, battery reserve, operator abort) bring the drone home no matter what the model says.
-5. **Report.** A written incident report with the frames, the agent's on-station assessment, a verdict and a recommended action. A transformer fire escalates as critical with de-energize and fire response; a steam release from a relief vent, identical from above, reads cool on thermal and is logged for maintenance.
+1. **Detect.** The wide-area layer compares an overhead image before and after, and flags what changed: a rising column in the switchyard, a vehicle at the fence, an object where nothing should be.
+2. **Decide whether to fly.** The Triage Agent reads the detection alongside the site context — which zone it fell in, what is normally there, whether maintenance is declared. A contractor van in the service yard during a declared window is logged and no motor spins. Not flying is an answer.
+3. **Declare an envelope.** The agent states where it intends to work: a radius, a ceiling, a time budget. It does not state waypoints. The Safety Validator checks that envelope against the site limits and shrinks it, or refuses it, before takeoff.
+4. **Fly it.** Inside the envelope the agent has control through tools — fly to, hold, tilt the camera, switch to thermal, zoom, capture. Every move is validated again in the air, and hard stops in code (step budget, time, battery reserve, operator abort) bring the drone home whatever the model says next.
+5. **Report.** A written incident report carrying the frames, the agent's on-station assessment, a verdict and a recommended action. A transformer fire escalates as critical: de-energize the bay, dispatch fire response. A steam release from a relief vent looks identical from above, reads cool on thermal, and becomes a maintenance ticket.
 
-Everything the agent does is a published event and an audit line, so the operator watches the decision being made, not just the result.
+Every step is a published event and an audit line, so the operator watches the decision being made rather than only its result.
 
 ## Subsystems
 
@@ -41,12 +43,14 @@ Everything the agent does is a published event and an audit line, so the operato
 - `hub/` FastAPI. Drone registry, mission runner, manual control clamping, scenario engine, wide-area detection, the autonomy layer (site context, triage, envelope, agent flight, incident reports), audit log, live WebSocket feed.
 - `sim/` The MAVLink bridge between ArduPilot and the Hub, the site generator (one source of truth for geometry, geofence, zones and posture), a fake drone for tests.
 - `console/` The Three.js world and drone camera, also the renderer that produces evidence frames and overhead images for the Hub.
-- `widearea/` Overhead change detection: numpy differencing and a Gemini vision detector, both returning the same Detection.
+- `widearea/` Overhead change detection, two implementations behind one contract: numpy differencing at `/widearea/detect`, which is what the dashboard's Detect button calls, and a Gemini vision detector at `/widearea/vision-detect`, which also classifies the change and describes it. Both return the same Detection, so they are interchangeable and comparable.
 - `platform/ground/ui/` The operator dashboard.
 - `contracts/` Pydantic models and JSON schemas shared by everything: Detection, MissionSpec, FlightPlan, ValidationResult, DroneState, IncidentReport.
-- AI: Claude Opus 5 for triage, envelope, the flight tool loop and vision. Every model call has a rule-based fallback so the pipeline runs identically with no API key.
+- AI: Claude Opus 5 for triage, the envelope, the flight tool loop and reading the drone's frames on station; Gemini for the overhead before-and-after comparison. Every model call has a rule-based fallback, so the pipeline runs identically with no API key and says on the trail when it has fallen back.
 
-**Trust layer, in three independent lines.** The agent's own verifier, the Hub's Safety Validator on real site geometry, and ArduPilot's onboard polygon fence, which refuses a destination outside it regardless of what the Hub sends. Red-team cases exercise all three: an illegal first plan, a prompt injection in detection metadata, a target outside the fence, a plan beyond endurance.
+**Trust layer, in three independent lines.** The Safety Validator checks the envelope before any motor turns, shrinking and re-checking it up to three times and naming the rule that refused it. It then checks every `fly_to` again while the drone is airborne, so approval is continuous rather than a single moment. Beneath both, ArduPilot's onboard polygon fence refuses a destination outside it regardless of what the Hub sends — firmware the agent cannot reach. The validator and the fence are configured from the same site geometry, so they cannot disagree about where the boundary is.
+
+Four red-team cases exercise those lines end to end: an illegal first envelope, a prompt injection buried in detection metadata, a change outside the flight envelope, and a plan beyond endurance. Each must end in a refusal that names its rule. On the plan-based path (`ARGUS_FLIGHT_MODE` set to anything other than `agent`) a fourth check applies, the agent's own verifier, but that path is the fallback and not what the demo runs.
 
 ## Run it
 
@@ -63,7 +67,7 @@ ArduPilot must be built once per [docs/sim-setup.md](docs/sim-setup.md); `make f
 Model keys go in a `.env` file at the repo root, which the Hub reads at startup: `ANTHROPIC_API_KEY` for triage, flight and reports, `GEMINI_API_KEY` for wide-area vision.
 Both are optional; without them the same pipeline runs on rules and says so.
 
-`uv run pytest` runs 105 tests, including full dispatches on a fake drone: detection, triage, envelope, flight, thermal confirmation, report.
+`uv run pytest` runs 105 tests, including full dispatches against a fake drone: detection, triage, envelope, flight, thermal confirmation, report. One manual-control test is timing-sensitive and fails intermittently; everything else is stable. CI covers `platform/` only, so these suites, `hub/`, `widearea/`, `rails/` and the console build are run by hand.
 
 ## Read more
 
