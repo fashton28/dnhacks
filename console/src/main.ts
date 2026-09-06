@@ -437,6 +437,19 @@ const vrc = new VirtualRc($("vrc"), {
   home: () => { if (selected) returnHome(selected); },
   camera: cycleCamera,
 });
+// The transmitter shows itself whenever Manual Control is active, and otherwise only when the Operator switches it on
+// from the header toggle (remembered per browser).
+const TX_KEY = "argus.console.transmitter";
+let txPinned = (() => { try { return localStorage.getItem(TX_KEY) === "1"; } catch { return false; } })();
+const txToggle = $("tx-toggle") as HTMLButtonElement;
+function refreshTransmitter(): void {
+  const show = manual || txPinned;
+  $("vrc").hidden = !show;
+  txToggle.setAttribute("aria-pressed", String(txPinned));
+  txToggle.classList.toggle("on", txPinned);
+}
+txToggle.onclick = () => { txPinned = !txPinned; try { localStorage.setItem(TX_KEY, txPinned ? "1" : "0"); } catch { /* private mode */ } refreshTransmitter(); };
+refreshTransmitter();
 let manualPhase = "live";
 let rcSeen: string | null = null;
 setInterval(() => {
@@ -458,6 +471,7 @@ setInterval(() => {
   if (sticks.id !== "virtual") vrc.reflect(sticks);
   if ((pad.buttons.take || sticks.active) && !manual && selected) manualStart(selected).catch((err) => log(String(err), "bad"));
   vrc.setPhase(manualPhase, manual);
+  if ($("vrc").hidden === manual) refreshTransmitter();  // appears on the tick that takes control, hides when it ends unless pinned
   if (!manual || !manualDrone) return;
   const s = drones.get(manualDrone); if (!s) return;
   // Velocities are recomputed from the current heading every tick, so forward plus yaw flies a curve and the airframe banks into it.

@@ -35,3 +35,7 @@ body.embed #drone-panel .vrc, body.headless .vrc { display: none; }
 #top nav::-webkit-scrollbar { display: none; }
 #top nav .btn { white-space: nowrap; flex: none; }
 #top .status { flex: none; }
+
+/* Transmitter toggle in the header: lit while pinned on */
+#tx-toggle.on { color: #3fb950; border-color: rgba(63,185,80,.55); background: rgba(63,185,80,.08); }
+#vrc[hidden] { display: none; }
