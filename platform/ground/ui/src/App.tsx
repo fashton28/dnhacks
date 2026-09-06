@@ -1,22 +1,26 @@
 /* ============================================================================
  * Drone Safety Platform — Ground Control Center · App shell
  * ----------------------------------------------------------------------------
- * Faithful TS port of ui_kits/ground-control/GroundControl.jsx, wired to the
- * real DataSource seam (useDataSource) and the shared SettingsStore.
+ * The one component that owns the DataSource seam (useDataSource) and the
+ * shared SettingsStore, and composes the panel grid. Everything that is not
+ * composition lives in a hook with a single job:
  *
- * Responsibilities:
- *   - Connect/disconnect the DataSource and subscribe to every stream
- *     (telemetry, tracking, statusText, ack, connection).
- *   - Hold all UI state: history/trail/flight-timer sampling, toasts, modals.
- *   - Drive the safety flows (checklist → arm, takeoff confirm, engage confirm,
- *     instant disarm/disengage) and manual (game-controller) engage/release.
- *   - Keyboard shortcuts (Space=disarm, T=engage, D=disengage, R=RTL).
- *   - Compose the full panel grid exactly as the prototype.
+ *   useToastQueue         transient operator notices with a fixed lifetime
+ *   useFlightRecorder     telemetry/tracking/status frames → Electron recorder
+ *                         or the in-memory fallback
+ *   useFlightSampler      1 Hz altitude/battery history, breadcrumb trail and
+ *                         the flight timer, sampled from the latest telemetry
+ *   useModalRouter        which modal (if any) is open
+ *   useCommandSender      the fire-and-forget `command` envelope for a vehicle
+ *   useOperatorFlows      the safety flows: checklist → arm, takeoff confirm,
+ *                         engage confirm, instant disarm, manual engage/release
+ *   useKeyboardShortcuts  Space=disarm, T=engage, D=disengage, R=RTL
+ *   useDisplayWakeLock    keep the display awake while the vehicle is active
  *
  * The default export wraps the shell in <DataSourceProvider> so main.tsx can
  * render <App /> directly.
  * ========================================================================== */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 
 import type {
   Telemetry,
@@ -37,6 +41,7 @@ import type {
   SpectrumMessage,
   CapabilitiesMessage,
   Anomaly,
+  Unsubscribe,
 } from '@/contract';
 import { DEFAULT_VEHICLE_ID } from '@/contract';
 
@@ -51,7 +56,7 @@ import {
 } from '@/store';
 import type { PlanProposal, ReportResolution } from '@/store';
 import { dataSource, isHubMode, consoleUrl, fleetCapable } from '@/dataSource';
-import type { DemoScenario, FleetRow } from '@/dataSource';
+import type { DemoScenario, FleetRow, MissionDataSource } from '@/dataSource';
 import { getSiteModel } from '@/site';
 import type { SiteModel } from '@/site';
 import type { RailHealth } from '@/cues';
@@ -108,6 +113,25 @@ const FALLBACK_HOME = { lat: 37.7699, lon: -122.4666 };
  */
 const RF_EVENT_WINDOW_MS = 60_000;
 
+/* ---- shell tunables ------------------------------------------------------ */
+
+/** How long a toast stays on screen, ms. */
+const TOAST_TTL_MS = 4200;
+/** History / trail / flight-timer sampling period, ms. */
+const SAMPLE_PERIOD_MS = 1000;
+/** Altitude and battery samples kept for the sparklines. */
+const HISTORY_SAMPLES = 60;
+/** Breadcrumb points kept on the map. */
+const TRAIL_POINTS = 120;
+/** Below this altitude the vehicle is on the pad and leaves no breadcrumb. */
+const TRAIL_MIN_ALT_M = 0.4;
+/** The airborne gate for engage / RTL. */
+const AIRBORNE_MIN_ALT_M = 0.5;
+/** Status lines kept in the console. */
+const LOG_LINES = 200;
+/** Altitude the takeoff dialog proposes, m. */
+const DEFAULT_TAKEOFF_ALT_M = 4;
+
 /* Center-column view: classic flight ops, the mission (security) workspace, or the ARGUS 3D World view. */
 type CenterView = 'flight' | 'mission' | 'world';
 
@@ -128,8 +152,6 @@ function liveDemoAnomaly(site: SiteModel): Anomaly {
     lon: staging?.lon ?? site.home.lon,
   };
 }
-
-/* Center-column view: classic flight ops vs the mission (security) workspace. */
 
 /* Which modal (if any) is currently open. */
 type ModalKind =
@@ -152,33 +174,455 @@ interface ToastItem {
   title: string;
   message?: string;
 }
+type PushToast = (toast: Omit<ToastItem, 'id'>) => void;
 
 /* SendCmd shape shared across panels (see contract). */
 type SendCmd = (command: CommandName, params?: Command['params']) => void;
 
-/* ----------------------------------------------------------------------------
- * In-memory flight recorder — the browser fallback used when the Electron
- * bridge (window.eis.recorder) is absent. While recording, every telemetry /
- * tracking / statusText frame is appended in memory. The Electron build swaps
- * this for the on-disk recorder transparently.
- * -------------------------------------------------------------------------- */
-interface MemoryRecorder {
-  start(): void;
-  stop(): void;
-  append(record: unknown): void;
-  active(): boolean;
+type LatLon = { lat: number; lon: number };
+
+/** Append `item`, keeping at most `max` entries (the oldest fall off). */
+function pushBounded<T>(list: T[], item: T, max: number): T[] {
+  const kept = list.length >= max ? list.slice(list.length - max + 1) : list;
+  return [...kept, item];
 }
-function createMemoryRecorder(): MemoryRecorder {
-  let frames: unknown[] = [];
-  let on = false;
+
+/* ============================================================================
+ * Toasts — a queue with a fixed lifetime per entry. Ids are monotonic so a
+ * dismissed toast can never collide with a new one; expiry timers are owned
+ * by the hook and cleared when the shell unmounts.
+ * ========================================================================== */
+type ToastAction = { kind: 'push'; toast: ToastItem } | { kind: 'dismiss'; id: number };
+
+function toastReducer(list: ToastItem[], action: ToastAction): ToastItem[] {
+  switch (action.kind) {
+    case 'push':
+      return [...list, action.toast];
+    case 'dismiss':
+      return list.filter((t) => t.id !== action.id);
+  }
+}
+
+function useToastQueue(ttlMs = TOAST_TTL_MS): {
+  toasts: ToastItem[];
+  pushToast: PushToast;
+  dismissToast: (id: number) => void;
+} {
+  const [toasts, dispatch] = useReducer(toastReducer, []);
+  const nextId = useRef(1);
+  const timers = useRef(new Map<number, ReturnType<typeof setTimeout>>());
+
+  const dismissToast = useCallback((id: number) => {
+    const timer = timers.current.get(id);
+    if (timer) {
+      clearTimeout(timer);
+      timers.current.delete(id);
+    }
+    dispatch({ kind: 'dismiss', id });
+  }, []);
+
+  const pushToast = useCallback<PushToast>((toast) => {
+    const id = nextId.current;
+    nextId.current += 1;
+    dispatch({ kind: 'push', toast: { ...toast, id } });
+    timers.current.set(id, setTimeout(() => dismissToast(id), ttlMs));
+  }, [dismissToast, ttlMs]);
+
+  useEffect(() => {
+    const pending = timers.current;
+    return () => {
+      pending.forEach((timer) => clearTimeout(timer));
+      pending.clear();
+    };
+  }, []);
+
+  return { toasts, pushToast, dismissToast };
+}
+
+/* ============================================================================
+ * Flight recorder — the Electron bridge (window.eis.recorder) when present,
+ * otherwise an in-memory sink. While recording, every telemetry / tracking /
+ * statusText / mission frame is appended; the active sink is a ref so the
+ * subscription handlers never re-subscribe when recording toggles.
+ * ========================================================================== */
+interface RecorderSink {
+  append(record: unknown): void;
+}
+
+class MemoryFlightRecorder implements RecorderSink {
+  private frames: unknown[] = [];
+  private live = false;
+
+  start(): void {
+    this.frames = [];
+    this.live = true;
+  }
+  stop(): void {
+    this.live = false;
+  }
+  append(record: unknown): void {
+    if (this.live) this.frames.push(record);
+  }
+  active(): boolean {
+    return this.live;
+  }
+  count(): number {
+    return this.frames.length;
+  }
+}
+const memoryRecorder = new MemoryFlightRecorder();
+
+function useFlightRecorder(): {
+  recording: boolean;
+  toggleRecording: () => void;
+  appendFrame: (record: unknown) => void;
+} {
+  const [recording, setRecording] = useState(false);
+  const recordingRef = useRef(false);
+  const sinkRef = useRef<RecorderSink | null>(null);
+
+  const appendFrame = useCallback((record: unknown) => {
+    sinkRef.current?.append(record);
+  }, []);
+
+  const toggleRecording = useCallback(() => {
+    const next = !recordingRef.current;
+    recordingRef.current = next;
+    const bridge = window.eis?.recorder;
+    if (next) {
+      if (bridge) {
+        void bridge.start();
+        sinkRef.current = bridge;
+      } else {
+        memoryRecorder.start();
+        sinkRef.current = memoryRecorder;
+      }
+    } else {
+      sinkRef.current = null;
+      if (bridge) void bridge.stop();
+      else memoryRecorder.stop();
+    }
+    setRecording(next);
+  }, []);
+
+  return { recording, toggleRecording, appendFrame };
+}
+
+/* ============================================================================
+ * Flight sampler — once a second, the latest telemetry frame contributes an
+ * altitude and battery sample, a breadcrumb (only once airborne) and one
+ * second on the flight timer (only while armed). Switching vehicles resets
+ * the history and the trail; the timer keeps counting.
+ * ========================================================================== */
+interface FlightSamples {
+  history: { alt: number[]; bat: number[] };
+  trail: LatLon[];
+  elapsed: number;
+}
+type SampleAction = { kind: 'sample'; tel: Telemetry } | { kind: 'reset' };
+
+const EMPTY_SAMPLES: FlightSamples = { history: { alt: [], bat: [] }, trail: [], elapsed: 0 };
+
+function samplesReducer(state: FlightSamples, action: SampleAction): FlightSamples {
+  if (action.kind === 'reset') return { ...EMPTY_SAMPLES, elapsed: state.elapsed };
+  const { tel } = action;
+  const airborne = tel.position.relAlt > TRAIL_MIN_ALT_M;
   return {
-    start() { frames = []; on = true; },
-    stop() { on = false; },
-    append(record) { if (on) frames.push(record); },
-    active() { return on; },
+    history: {
+      alt: pushBounded(state.history.alt, tel.position.relAlt, HISTORY_SAMPLES),
+      bat: pushBounded(state.history.bat, tel.battery.remaining, HISTORY_SAMPLES),
+    },
+    trail: airborne
+      ? pushBounded(state.trail, { lat: tel.position.lat, lon: tel.position.lon }, TRAIL_POINTS)
+      : state.trail,
+    elapsed: tel.armed ? state.elapsed + 1 : state.elapsed,
   };
 }
-const memoryRecorder = createMemoryRecorder();
+
+function useFlightSampler(latest: React.MutableRefObject<Telemetry | null>): FlightSamples & {
+  resetSamples: () => void;
+} {
+  const [samples, dispatch] = useReducer(samplesReducer, EMPTY_SAMPLES);
+  useEffect(() => {
+    const id = setInterval(() => {
+      const tel = latest.current;
+      if (tel) dispatch({ kind: 'sample', tel });
+    }, SAMPLE_PERIOD_MS);
+    return () => clearInterval(id);
+  }, [latest]);
+  const resetSamples = useCallback(() => dispatch({ kind: 'reset' }), []);
+  return { ...samples, resetSamples };
+}
+
+/* ============================================================================
+ * Modal router — at most one modal is open.
+ * ========================================================================== */
+function useModalRouter(): {
+  modal: ModalKind | null;
+  openModal: (kind: ModalKind) => void;
+  closeModal: () => void;
+} {
+  const [modal, setModal] = useState<ModalKind | null>(null);
+  const openModal = useCallback((kind: ModalKind) => setModal(kind), []);
+  const closeModal = useCallback(() => setModal(null), []);
+  return { modal, openModal, closeModal };
+}
+
+/* ============================================================================
+ * Command sender — the `command` envelope for the vehicle being followed.
+ * Fire-and-forget: acks arrive on the ack channel and failures toast there.
+ * ========================================================================== */
+function useCommandSender(ds: MissionDataSource, vehicleId: string): SendCmd {
+  return useCallback<SendCmd>((command, params) => {
+    void ds.sendCommand({ type: 'command', vehicleId, command, params });
+  }, [ds, vehicleId]);
+}
+
+/* ============================================================================
+ * Operator flows — the safety-relevant operator actions and the local state
+ * they read. Arming is gated by the pre-flight checklist; takeoff needs an
+ * explicit altitude confirmation; engaging tracking pushes the current
+ * standoff and speed cap with it; disarm is instant and always available.
+ * ========================================================================== */
+interface OperatorFlowState {
+  checklistDone: boolean;
+  standoff: number;
+  maxSpeed: number;
+  manualActive: boolean;
+}
+type OperatorFlowAction =
+  | { kind: 'checklist' }
+  | { kind: 'standoff'; meters: number }
+  | { kind: 'maxSpeed'; mps: number }
+  | { kind: 'manual'; active: boolean };
+
+const INITIAL_FLOWS: OperatorFlowState = { checklistDone: false, standoff: 4, maxSpeed: 3, manualActive: false };
+
+function operatorFlowReducer(state: OperatorFlowState, action: OperatorFlowAction): OperatorFlowState {
+  switch (action.kind) {
+    case 'checklist':
+      return state.checklistDone ? state : { ...state, checklistDone: true };
+    case 'standoff':
+      return { ...state, standoff: action.meters };
+    case 'maxSpeed':
+      return { ...state, maxSpeed: action.mps };
+    case 'manual':
+      return state.manualActive === action.active ? state : { ...state, manualActive: action.active };
+  }
+}
+
+function useOperatorFlows(
+  cmd: SendCmd,
+  pushToast: PushToast,
+  openModal: (kind: ModalKind) => void,
+  closeModal: () => void,
+): OperatorFlowState & {
+  setManualActive: (active: boolean) => void;
+  arm: () => void;
+  completeChecklist: () => void;
+  requestTakeoff: () => void;
+  confirmTakeoff: (alt: number) => void;
+  engageTracking: () => void;
+  disarm: () => void;
+  setStandoff: (meters: number) => void;
+  setMaxSpeed: (mps: number) => void;
+  engageManual: () => void;
+  releaseManual: () => void;
+} {
+  const [state, dispatch] = useReducer(operatorFlowReducer, INITIAL_FLOWS);
+  const { checklistDone, standoff, maxSpeed } = state;
+
+  const setManualActive = useCallback((active: boolean) => dispatch({ kind: 'manual', active }), []);
+
+  /* The first arm request opens the checklist; completing it arms. */
+  const arm = useCallback(() => {
+    if (!checklistDone) {
+      openModal('checklist');
+      return;
+    }
+    cmd('arm');
+    pushToast({ severity: 'success', title: 'Armed' });
+  }, [checklistDone, cmd, pushToast, openModal]);
+
+  const completeChecklist = useCallback(() => {
+    dispatch({ kind: 'checklist' });
+    closeModal();
+    cmd('arm');
+    pushToast({ severity: 'success', title: 'Checklist complete — Armed' });
+  }, [cmd, pushToast, closeModal]);
+
+  const requestTakeoff = useCallback(() => openModal('takeoff'), [openModal]);
+
+  const confirmTakeoff = useCallback((alt: number) => {
+    cmd('takeoff', { altitude: alt });
+    closeModal();
+    pushToast({ severity: 'success', title: 'Takeoff acknowledged', message: `Climbing to ${alt} m` });
+  }, [cmd, pushToast, closeModal]);
+
+  /* Engaging tracking hands the vehicle to the tracker with the operator's
+     current standoff and speed cap; manual is released locally first because
+     exactly one controlSource is ever active. */
+  const engageTracking = useCallback(() => {
+    setManualActive(false);
+    cmd('engageTracking');
+    cmd('setStandoff', { meters: standoff });
+    cmd('setMaxSpeed', { mps: maxSpeed });
+    pushToast({ severity: 'warning', title: 'Tracking engaged', message: `Standoff ${standoff} m` });
+  }, [cmd, pushToast, setManualActive, standoff, maxSpeed]);
+
+  /* Disarm is the emergency stop: no confirmation, no gate. */
+  const disarm = useCallback(() => {
+    setManualActive(false);
+    cmd('emergencyStop');
+    pushToast({ severity: 'error', title: 'Disarmed' });
+  }, [cmd, pushToast, setManualActive]);
+
+  const setStandoff = useCallback((meters: number) => {
+    dispatch({ kind: 'standoff', meters });
+    cmd('setStandoff', { meters });
+  }, [cmd]);
+
+  const setMaxSpeed = useCallback((mps: number) => {
+    dispatch({ kind: 'maxSpeed', mps });
+    cmd('setMaxSpeed', { mps });
+  }, [cmd]);
+
+  const engageManual = useCallback(() => {
+    cmd('engageManual');
+    setManualActive(true);
+    pushToast({ severity: 'warning', title: 'Manual control engaged', message: 'Operator has the sticks' });
+  }, [cmd, pushToast, setManualActive]);
+
+  const releaseManual = useCallback(() => {
+    cmd('disengageManual');
+    setManualActive(false);
+    pushToast({ severity: 'info', title: 'Manual released', message: 'Position hold' });
+  }, [cmd, pushToast, setManualActive]);
+
+  return {
+    ...state,
+    setManualActive,
+    arm,
+    completeChecklist,
+    requestTakeoff,
+    confirmTakeoff,
+    engageTracking,
+    disarm,
+    setStandoff,
+    setMaxSpeed,
+    engageManual,
+    releaseManual,
+  };
+}
+
+/* ============================================================================
+ * Keyboard shortcuts — a key → action table. The listener is registered once
+ * and reads the latest table through a ref, so the handlers always see the
+ * current flight state without re-subscribing every render. Keystrokes while
+ * typing in a field are ignored, as are auto-repeats.
+ * ========================================================================== */
+interface Shortcut {
+  /** Guard evaluated at keypress; the action runs only when it holds. */
+  when?: () => boolean;
+  run: () => void;
+  preventDefault?: boolean;
+}
+type ShortcutTable = Record<string, Shortcut>;
+
+const EDITABLE_TAGS = new Set(['INPUT', 'TEXTAREA', 'SELECT']);
+
+function shortcutKey(e: KeyboardEvent): string {
+  if (e.code === 'Space') return 'space';
+  return e.key.length === 1 ? e.key.toLowerCase() : e.key;
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  return !!el && (EDITABLE_TAGS.has(el.tagName) || el.isContentEditable === true);
+}
+
+function useKeyboardShortcuts(table: ShortcutTable): void {
+  const latest = useRef(table);
+  latest.current = table;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.repeat || isTypingTarget(e.target)) return;
+      const shortcut = latest.current[shortcutKey(e)];
+      if (!shortcut) return;
+      if (shortcut.preventDefault) e.preventDefault();
+      if (shortcut.when && !shortcut.when()) return;
+      shortcut.run();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+}
+
+/* ============================================================================
+ * Display wake lock (Linux only) — keep the display awake while the vehicle
+ * is armed or tracking/manual/planner is active (LINUX_PRD §7).
+ * window.eis.power exists only in the Linux Electron shell; on the Windows
+ * shell and the browser dev server it's undefined and this is a no-op.
+ * ========================================================================== */
+function useDisplayWakeLock(shouldInhibit: boolean): void {
+  const inhibited = useRef(false);
+  useEffect(() => {
+    const power = window.eis?.power;
+    if (!power || inhibited.current === shouldInhibit) return;
+    inhibited.current = shouldInhibit;
+    void (shouldInhibit ? power.inhibit() : power.release());
+  }, [shouldInhibit]);
+  useEffect(() => () => {
+    if (inhibited.current) void window.eis?.power?.release();
+  }, []);
+}
+
+/* ============================================================================
+ * Presentational helpers for the shell.
+ * ========================================================================== */
+function ToastStack({ toasts, onDismiss }: { toasts: ToastItem[]; onDismiss: (id: number) => void }): JSX.Element {
+  return (
+    <div style={{ position: 'fixed', top: 56, right: 14, display: 'flex', flexDirection: 'column', gap: 8, zIndex: 1200 }}>
+      {toasts.map((t) => (
+        <Toast
+          key={t.id}
+          severity={t.severity}
+          title={t.title}
+          message={t.message}
+          onDismiss={() => onDismiss(t.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
+interface ModalHostProps {
+  modal: ModalKind | null;
+  onClose: () => void;
+  onChecklistComplete: () => void;
+  onConfirmTakeoff: (alt: number) => void;
+  onEnterUnattended: (operatorId: string) => void;
+  operatorId: string;
+}
+
+function ModalHost(p: ModalHostProps): JSX.Element {
+  return (
+    <>
+      <ChecklistModal open={p.modal === 'checklist'} onClose={p.onClose} onComplete={p.onChecklistComplete} />
+      <TakeoffModal open={p.modal === 'takeoff'} onClose={p.onClose} onConfirm={p.onConfirmTakeoff} defaultAlt={DEFAULT_TAKEOFF_ALT_M} />
+      <SettingsModal open={p.modal === 'settings'} onClose={p.onClose} />
+      <FailsafeModal open={p.modal === 'failsafe'} onClose={p.onClose} />
+      <PidModal open={p.modal === 'pid'} onClose={p.onClose} />
+      <LogBrowserModal open={p.modal === 'logbrowser'} onClose={p.onClose} />
+      <UnattendedModal
+        open={p.modal === 'unattended'}
+        onClose={p.onClose}
+        onConfirm={p.onEnterUnattended}
+        defaultOperatorId={p.operatorId}
+      />
+    </>
+  );
+}
 
 /* ========================================================================== */
 function GroundControl(): JSX.Element {
@@ -186,14 +630,10 @@ function GroundControl(): JSX.Element {
   const settings = useSettings();
 
   const [tel, setTel] = useState<Telemetry | null>(null);
+  const latestTel = useRef<Telemetry | null>(null);
   const [tracking, setTracking] = useState<TrackingStatus | null>(null);
   const [connState, setConnState] = useState<ConnectionState>('connecting');
   const [logs, setLogs] = useState<StatusText[]>([]);
-  const [toasts, setToasts] = useState<ToastItem[]>([]);
-  const [history, setHistory] = useState<{ alt: number[]; bat: number[] }>({ alt: [], bat: [] });
-  const [trail, setTrail] = useState<{ lat: number; lon: number }[]>([]);
-  const [elapsed, setElapsed] = useState(0);
-  const [recording, setRecording] = useState(false);
   const [observation, setObservation] = useState<ObservationMessage | null>(null);
   const [readiness, setReadiness] = useState<ReadinessMessage | null>(null);
   const [health, setHealth] = useState<Partial<Record<HealthEventMessage['component'], HealthEventMessage>>>({});
@@ -208,11 +648,6 @@ function GroundControl(): JSX.Element {
     ...ds.getSimulationToggles?.(),
   }));
 
-  const [standoff, setStandoff] = useState(4);
-  const [maxSpeed, setMaxSpeed] = useState(3);
-  const [checklistDone, setChecklistDone] = useState(false);
-  const [modal, setModal] = useState<ModalKind | null>(null);
-  const [manualActive, setManualActive] = useState(false);
   const [controllerOn, setControllerOn] = useState(false);
   const [centerView, setCenterView] = useState<CenterView>('flight');
   const [sideView, setSideView] = useState<SideView>('observation');
@@ -224,6 +659,13 @@ function GroundControl(): JSX.Element {
   /** Per-vehicle breadcrumb tracks, sampled from the fleet stream. */
   const [trailsByVehicle, setTrailsByVehicle] =
     useState<Record<string, { lat: number; lon: number }[]>>({});
+
+  const { toasts, pushToast, dismissToast } = useToastQueue();
+  const { recording, toggleRecording, appendFrame } = useFlightRecorder();
+  const { history, trail, elapsed, resetSamples } = useFlightSampler(latestTel);
+  const { modal, openModal, closeModal } = useModalRouter();
+  const cmd = useCommandSender(ds, vehicleId);
+  const flows = useOperatorFlows(cmd, pushToast, openModal, closeModal);
 
   /* Mission (anomaly → plan → verification → report) state + audit trail. */
   const mission = useMission();
@@ -247,24 +689,6 @@ function GroundControl(): JSX.Element {
      bar mirrors it; SITL collapses the host label to 'sitl'. */
   const config: ConnectionConfig = settings.connection;
   const [activeConfig, setActiveConfig] = useState<ConnectionConfig>(config);
-
-  const pushToast = useCallback((t: Omit<ToastItem, 'id'>) => {
-    const id = Math.random();
-    setToasts(ts => [...ts, { ...t, id }]);
-    setTimeout(() => setToasts(ts => ts.filter(x => x.id !== id)), 4200);
-  }, []);
-
-  /* Keep a live recording flag for the sampling effect without re-subscribing. */
-  const recordingRef = useRef(false);
-  recordingRef.current = recording;
-
-  /* Resolve the active recorder: Electron bridge first, in-memory fallback. */
-  const appendFrame = useCallback((record: unknown) => {
-    if (!recordingRef.current) return;
-    const bridge = window.eis?.recorder;
-    if (bridge) bridge.append(record);
-    else memoryRecorder.append(record);
-  }, []);
 
   /* ----- site model: load once, feed the mission store -------------------- */
   useEffect(() => {
@@ -290,30 +714,35 @@ function GroundControl(): JSX.Element {
       await ds.connect(selected);
     })().catch(() => { if (!cancelled) setConnState('error'); });
 
-    const offC = ds.onConnectionChange(s => setConnState(s));
-    const offT = ds.onTelemetry(t => {
+    /* Every stream subscription is collected so teardown is one loop. */
+    const subscriptions: Unsubscribe[] = [];
+    const on = (off: Unsubscribe): void => { subscriptions.push(off); };
+
+    on(ds.onConnectionChange((s) => setConnState(s)));
+    on(ds.onTelemetry((t) => {
+      latestTel.current = t;
       setTel(t);
       appendFrame(t);
       missionStore.noteControlSource(t.controlSource, t.vehicleId);
-    });
-    const offK = ds.onTracking(t => { setTracking(t); appendFrame(t); });
-    const offTxt = ds.onStatusText(s => {
-      setLogs(l => [...l.slice(-200), s]);
+    }));
+    on(ds.onTracking((t) => { setTracking(t); appendFrame(t); }));
+    on(ds.onStatusText((s) => {
+      setLogs((lines) => pushBounded(lines, s, LOG_LINES));
       appendFrame(s);
       // While a mission executes, status lines (waypoints, observation, RTL)
       // belong in the mission audit trail too.
       if (missionStore.get().executing) missionStore.addAudit('status', s.text, s.vehicleId);
       if (s.severity === 'critical') pushToast({ severity: 'critical', title: s.text });
-    });
-    const offAck = ds.onAck((a: CommandAck) => {
+    }));
+    on(ds.onAck((a: CommandAck) => {
       if (!a.success) pushToast({ severity: 'error', title: `${a.command} failed`, message: a.message });
-    });
-    const offFleet = fleetCapable(ds)
-      ? ds.onFleetRows((rows) => { setFleet(rows); setVehicleId(ds.getVehicle()); })
-      : () => {};
+    }));
+    if (fleetCapable(ds)) {
+      on(ds.onFleetRows((rows) => { setFleet(rows); setVehicleId(ds.getVehicle()); }));
+    }
 
     /* mission channels (anomaly → plan → verification → incident report) */
-    const offAn = ds.onAnomaly(m => {
+    on(ds.onAnomaly(m => {
       missionStore.ingestAnomaly(m.anomaly, m.vehicleId);
       appendFrame(m);
       if (ds.railHealth) setRailHealth(ds.railHealth());
@@ -322,12 +751,12 @@ function GroundControl(): JSX.Element {
         autoSwitchedRef.current = true;
         setCenterView('mission');
       }
-    });
-    const offPl = ds.onMissionPlan(m => { missionStore.ingestPlan(m.plan, m.vehicleId); appendFrame(m); });
-    const offVf = ds.onVerification(m => {
+    }));
+    on(ds.onMissionPlan(m => { missionStore.ingestPlan(m.plan, m.vehicleId); appendFrame(m); }));
+    on(ds.onVerification(m => {
       missionStore.ingestVerification(m.verification, m.vehicleId); appendFrame(m);
-    });
-    const offRp = ds.onIncidentReport(m => {
+    }));
+    on(ds.onIncidentReport(m => {
       missionStore.ingestReport(m.report, m.vehicleId);
       appendFrame(m);
       pushToast({
@@ -335,8 +764,8 @@ function GroundControl(): JSX.Element {
         title: `Incident report: ${m.report.verdict.replace('_', ' ')}`,
         message: m.report.missionId,
       });
-    });
-    const offOb = ds.onObservation(m => {
+    }));
+    on(ds.onObservation(m => {
       setObservation(m);
       appendFrame(m);
       missionStore.addAudit('observation', `Observation ${m.scene}: ${m.tracks.length} track(s), RGB ${m.sensors.rgb}, thermal ${m.sensors.thermal}, LiDAR ${m.sensors.lidar}`, m.vehicleId);
@@ -388,18 +817,18 @@ function GroundControl(): JSX.Element {
             });
         }
       }
-    });
-    const offCa = ds.onCapabilities(m => { setCapabilities(m); appendFrame(m); });
-    const offRe = ds.onReadiness(m => { setReadiness(m); appendFrame(m); });
-    const offHe = ds.onHealthEvent(m => {
+    }));
+    on(ds.onCapabilities(m => { setCapabilities(m); appendFrame(m); }));
+    on(ds.onReadiness(m => { setReadiness(m); appendFrame(m); }));
+    on(ds.onHealthEvent(m => {
       setHealth(current => ({ ...current, [m.component]: m }));
       appendFrame(m);
       missionStore.addAudit('health', `${m.component}: ${m.state} — ${m.detail}`, m.vehicleId);
       // A rail's health changed; re-read the bus's own per-rail view for the
       // cue badges (a HealthComponent is coarser than a rail — FM-180).
       if (ds.railHealth) setRailHealth(ds.railHealth());
-    });
-    const offRf = ds.onRfEvent(m => {
+    }));
+    on(ds.onRfEvent(m => {
       // Bounded by AGE as well as count: an RF report describes a moment, and
       // one that has aged out of the window is history, not airspace (FM-51).
       setRfEvents(current => [...current, m]
@@ -407,9 +836,9 @@ function GroundControl(): JSX.Element {
         .slice(-20));
       appendFrame(m);
       missionStore.addAudit('rf', `${m.source}/${m.kind} ${m.band} (${(m.confidence * 100).toFixed(0)}%)`, m.vehicleId);
-    });
-    const offSp = ds.onSpectrum(m => { setSpectrum(m); appendFrame(m); });
-    const offFl = ds.onFleet(m => {
+    }));
+    on(ds.onSpectrum(m => { setSpectrum(m); appendFrame(m); }));
+    on(ds.onFleet(m => {
       appendFrame(m);
       missionStore.ingestFleet(m);
       // Per-vehicle tracks: one sample per fleet frame, so a peer that only
@@ -425,13 +854,13 @@ function GroundControl(): JSX.Element {
         }
         return next;
       });
-    });
+    }));
 
     /* Phase 3 rails: tasking, envelope monitor, attendance, escalations. */
-    const offTk = ds.onTask(m => { missionStore.ingestTask(m.task, m.vehicleId); appendFrame(m); });
-    const offEn = ds.onEnvelope(m => { missionStore.ingestEnvelope(m); appendFrame(m); });
-    const offMd = ds.onMode(m => { missionStore.ingestMode(m); appendFrame(m); });
-    const offEs = ds.onEscalation(m => {
+    on(ds.onTask(m => { missionStore.ingestTask(m.task, m.vehicleId); appendFrame(m); }));
+    on(ds.onEnvelope(m => { missionStore.ingestEnvelope(m); appendFrame(m); }));
+    on(ds.onMode(m => { missionStore.ingestMode(m); appendFrame(m); }));
+    on(ds.onEscalation(m => {
       missionStore.ingestEscalation(m);
       appendFrame(m);
       pushToast({
@@ -439,13 +868,11 @@ function GroundControl(): JSX.Element {
         title: m.deliveredAt ? 'Escalation raised' : 'Escalation UNDELIVERED',
         message: `${m.missionId} · ${m.channel}`,
       });
-    });
+    }));
 
     return () => {
       cancelled = true;
-      offC(); offT(); offK(); offTxt(); offAck(); offFleet();
-      offAn(); offPl(); offVf(); offRp(); offOb(); offCa(); offRe(); offHe(); offRf(); offSp(); offFl();
-      offTk(); offEn(); offMd(); offEs();
+      for (const off of subscriptions) off();
       ds.disconnect();
     };
     // Reconnect when the user changes connection in Settings.
@@ -476,34 +903,6 @@ function GroundControl(): JSX.Element {
     return () => { off(); void bridge.sdrStop?.(); };
   }, [appendFrame, activeConfig.sitl, ds]);
 
-  /* ----- history + trail + flight-timer sampling (1 Hz) ------------------- */
-  useEffect(() => {
-    const id = setInterval(() => {
-      setTel(cur => {
-        if (cur) {
-          setHistory(h => ({
-            alt: [...h.alt.slice(-59), cur.position.relAlt],
-            bat: [...h.bat.slice(-59), cur.battery.remaining],
-          }));
-          if (cur.position.relAlt > 0.4) {
-            setTrail(tr => [...tr.slice(-120), { lat: cur.position.lat, lon: cur.position.lon }]);
-          }
-          if (cur.armed) setElapsed(e => e + 1);
-        }
-        return cur;
-      });
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  /* ----- command helper --------------------------------------------------- */
-  const cmd: SendCmd = useCallback(
-    (command, params) => {
-      void ds.sendCommand({ type: 'command', vehicleId, command, params });
-    },
-    [ds, vehicleId],
-  );
-
   /* Fleet: follow another vehicle (telemetry, video and commands switch
      together). Works for the ARGUS Hub and for the offline two-vehicle mock —
      both expose the same FleetCapable surface. */
@@ -511,37 +910,8 @@ function GroundControl(): JSX.Element {
     if (fleetCapable(ds)) ds.setVehicle(id);
     setVehicleId(id);
     missionStore.setVehicle(id);
-    setTrail([]);
-    setHistory({ alt: [], bat: [] });
-  }, [ds]);
-
-  /* ----- safety flows ----------------------------------------------------- */
-  const doArm = () => {
-    if (!checklistDone) { setModal('checklist'); return; }
-    cmd('arm');
-    pushToast({ severity: 'success', title: 'Armed' });
-  };
-  const doTakeoff = () => setModal('takeoff');
-  const confirmTakeoff = (alt: number) => {
-    cmd('takeoff', { altitude: alt });
-    setModal(null);
-    pushToast({ severity: 'success', title: 'Takeoff acknowledged', message: `Climbing to ${alt} m` });
-  };
-  const doEngage = () => {
-    setManualActive(false);
-    cmd('engageTracking');
-    cmd('setStandoff', { meters: standoff });
-    cmd('setMaxSpeed', { mps: maxSpeed });
-    pushToast({ severity: 'warning', title: 'Tracking engaged', message: `Standoff ${standoff} m` });
-  };
-  const doDisarm = () => {
-    setManualActive(false);
-    cmd('emergencyStop');
-    pushToast({ severity: 'error', title: 'Disarmed' });
-  };
-
-  const onStandoff = (v: number) => { setStandoff(v); cmd('setStandoff', { meters: v }); };
-  const onMaxSpeed = (v: number) => { setMaxSpeed(v); cmd('setMaxSpeed', { mps: v }); };
+    resetSamples();
+  }, [ds, resetSamples]);
 
   /* ----- mission flow: approve / deny / abort / report disposition -------- */
   /**
@@ -562,7 +932,7 @@ function GroundControl(): JSX.Element {
     }
     const plan = effectivePlan(proposal);
     const requestId = proposal.plan.requestId;
-    setManualActive(false); // exactly one controlSource — planner takes over
+    flows.setManualActive(false); // exactly one controlSource — planner takes over
     missionStore.noteApprovalSent(requestId, vehicleId);
     pushToast({ severity: 'info', title: 'Mission sent', message: `Awaiting the vehicle's ack for ${plan.requestId}` });
     void ds.sendCommand({ type: 'command', vehicleId, command: 'executePlan', params: { plan } })
@@ -652,54 +1022,25 @@ function GroundControl(): JSX.Element {
     ds.runScenario?.(name);
   };
 
-  /* ----- manual (game-controller) piloting -------------------------------- */
-  const doManualEngage = () => {
-    cmd('engageManual');
-    setManualActive(true);
-    pushToast({ severity: 'warning', title: 'Manual control engaged', message: 'Operator has the sticks' });
-  };
-  const doManualRelease = () => {
-    cmd('disengageManual');
-    setManualActive(false);
-    pushToast({ severity: 'info', title: 'Manual released', message: 'Position hold' });
-  };
+  /* ----- manual (game-controller) stick stream ---------------------------- */
   const onStickInput = useCallback((v: ManualInput) => ds.setManualInput(v), [ds]);
 
-  /* ----- recording toggle ------------------------------------------------- */
-  const onToggleRecord = useCallback(() => {
-    setRecording(r => {
-      const next = !r;
-      const bridge = window.eis?.recorder;
-      if (next) { if (bridge) void bridge.start(); else memoryRecorder.start(); }
-      else { if (bridge) void bridge.stop(); else memoryRecorder.stop(); }
-      return next;
-    });
-  }, []);
-
-  /* ----- keyboard shortcuts ----------------------------------------------- */
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (target && target.tagName === 'INPUT') return;
-      if (e.code === 'Space') { e.preventDefault(); doDisarm(); }
-      else if (e.key === 't' || e.key === 'T') {
-        if (tracking?.state === 'idle' && (tel?.position?.relAlt ?? 0) > 0.5) doEngage();
-      }
-      else if (e.key === 'd' || e.key === 'D') {
-        if (tracking && tracking.state !== 'idle') cmd('disengageTracking');
-      }
-      else if (e.key === 'r' || e.key === 'R') {
-        if ((tel?.position?.relAlt ?? 0) > 0.5) cmd('rtl');
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  });
-
+  /* ----- derived flight state --------------------------------------------- */
   const trackingActive = !!tracking && tracking.state !== 'idle';
-  const flying = (tel?.position?.relAlt ?? 0) > 0.5;
+  const flying = (tel?.position?.relAlt ?? 0) > AIRBORNE_MIN_ALT_M;
   const hostLabel = activeConfig.sitl ? 'sitl' : activeConfig.host;
   const plannerActive = tel?.controlSource === 'planner';
+
+  /* ----- keyboard shortcuts ----------------------------------------------- */
+  useKeyboardShortcuts({
+    space: { preventDefault: true, run: flows.disarm },
+    t: { when: () => tracking?.state === 'idle' && flying, run: flows.engageTracking },
+    d: { when: () => trackingActive, run: () => cmd('disengageTracking') },
+    r: { when: () => flying, run: () => cmd('rtl') },
+  });
+
+  useDisplayWakeLock(!!tel?.armed || flows.manualActive || trackingActive || plannerActive);
+
   const sensorState = (state?: string): SensorHealth | undefined => {
     if (state === 'ok' || state === 'ready' || state === 'nominal') return 'ok';
     if (state === 'degraded') return 'degraded';
@@ -817,22 +1158,6 @@ function GroundControl(): JSX.Element {
     : selectedProposal ? effectivePlan(selectedProposal) : null;
   const envelope = envelopeOf(mission);
 
-  /* ----- power management (Linux only) ------------------------------------
-   * Keep the display awake while the vehicle is armed or tracking/manual is
-   * active (LINUX_PRD §7). window.eis.power exists only in the Linux Electron
-   * shell; on the Windows shell and the browser dev server it's undefined and
-   * this whole effect is a no-op. */
-  const powerInhibitedRef = useRef(false);
-  useEffect(() => {
-    const power = window.eis?.power;
-    if (!power) return;
-    const shouldInhibit = !!tel?.armed || manualActive || trackingActive || plannerActive;
-    if (shouldInhibit === powerInhibitedRef.current) return;
-    powerInhibitedRef.current = shouldInhibit;
-    if (shouldInhibit) void power.inhibit();
-    else void power.release();
-  }, [tel?.armed, manualActive, trackingActive, plannerActive]);
-
   return (
     <div
       className="eis-root"
@@ -846,14 +1171,14 @@ function GroundControl(): JSX.Element {
         host={hostLabel}
         elapsed={elapsed}
         controllerOn={controllerOn}
-        manualActive={manualActive}
+        manualActive={flows.manualActive}
         health={health}
         spectrum={spectrum}
-        onDisarm={doDisarm}
-        onOpenSettings={() => setModal('settings')}
-        onOpenFailsafe={() => setModal('failsafe')}
-        onOpenPid={() => setModal('pid')}
-        onOpenLogs={() => setModal('logbrowser')}
+        onDisarm={flows.disarm}
+        onOpenSettings={() => openModal('settings')}
+        onOpenFailsafe={() => openModal('failsafe')}
+        onOpenPid={() => openModal('pid')}
+        onOpenLogs={() => openModal('logbrowser')}
         fleet={fleet}
         selectedVehicle={vehicleId}
         onSelectVehicle={selectVehicle}
@@ -862,14 +1187,14 @@ function GroundControl(): JSX.Element {
         escalationCount={mission.escalations.length}
         undeliveredCount={mission.escalations.filter((e) => !e.deliveredAt).length}
         onOpenOutbox={() => { setCenterView('mission'); setReportTab('outbox'); }}
-        onEnterUnattended={() => setModal('unattended')}
+        onEnterUnattended={() => openModal('unattended')}
         onExitUnattended={doExitUnattended}
       />
 
       {trackingActive && (
-        <TrackingBanner standoff={standoff} maxSpeed={maxSpeed} onDisengage={() => cmd('disengageTracking')} />
+        <TrackingBanner standoff={flows.standoff} maxSpeed={flows.maxSpeed} onDisengage={() => cmd('disengageTracking')} />
       )}
-      {manualActive && <ManualBanner onRelease={doManualRelease} />}
+      {flows.manualActive && <ManualBanner onRelease={flows.releaseManual} />}
       {plannerActive && <PlannerBanner requestId={mission.executedRequestId} onAbort={doAbortPlan} />}
 
       <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: 'var(--leftpanel-w) 1fr var(--rightpanel-w)', gap: 10, padding: 10 }}>
@@ -879,24 +1204,24 @@ function GroundControl(): JSX.Element {
             tel={tel}
             tracking={tracking}
             connState={connState}
-            standoff={standoff}
-            maxSpeed={maxSpeed}
+            standoff={flows.standoff}
+            maxSpeed={flows.maxSpeed}
             onCmd={cmd}
-            onSetStandoff={onStandoff}
-            onSetMaxSpeed={onMaxSpeed}
-            onArm={doArm}
-            onTakeoff={doTakeoff}
-            onEngage={doEngage}
-            checklistDone={checklistDone}
+            onSetStandoff={flows.setStandoff}
+            onSetMaxSpeed={flows.setMaxSpeed}
+            onArm={flows.arm}
+            onTakeoff={flows.requestTakeoff}
+            onEngage={flows.engageTracking}
+            checklistDone={flows.checklistDone}
             gimbalPitch={gimbalPitch}
             onSetGimbal={onSetGimbal}
           />
           <ManualControl
             armed={!!tel?.armed}
             flying={flying}
-            manualActive={manualActive}
-            onEngage={doManualEngage}
-            onRelease={doManualRelease}
+            manualActive={flows.manualActive}
+            onEngage={flows.engageManual}
+            onRelease={flows.releaseManual}
             onInput={onStickInput}
             onControllerChange={setControllerOn}
           />
@@ -957,7 +1282,7 @@ function GroundControl(): JSX.Element {
                 <VideoPanel
                   tracking={tracking}
                   connState={connState}
-                  standoff={standoff}
+                  standoff={flows.standoff}
                   onSelectTarget={(id: number) => cmd('selectTarget', { targetId: id })}
                   videoUrl={ds.getVideoUrl()}
                 />
@@ -973,8 +1298,8 @@ function GroundControl(): JSX.Element {
                 <LogConsole
                   logs={logs}
                   recording={recording}
-                  onToggleRecord={onToggleRecord}
-                  onOpenBrowser={() => setModal('logbrowser')}
+                  onToggleRecord={toggleRecording}
+                  onOpenBrowser={() => openModal('logbrowser')}
                 />
               </div>
             </div>
@@ -1068,40 +1393,15 @@ function GroundControl(): JSX.Element {
         <TelemetryPanel tel={tel} tracking={tracking} history={history} />
       </div>
 
-      {/* toasts */}
-      <div style={{ position: 'fixed', top: 56, right: 14, display: 'flex', flexDirection: 'column', gap: 8, zIndex: 1200 }}>
-        {toasts.map(t => (
-          <Toast
-            key={t.id}
-            severity={t.severity}
-            title={t.title}
-            message={t.message}
-            onDismiss={() => setToasts(ts => ts.filter(x => x.id !== t.id))}
-          />
-        ))}
-      </div>
+      <ToastStack toasts={toasts} onDismiss={dismissToast} />
 
-      {/* modals */}
-      <ChecklistModal
-        open={modal === 'checklist'}
-        onClose={() => setModal(null)}
-        onComplete={() => {
-          setChecklistDone(true);
-          setModal(null);
-          cmd('arm');
-          pushToast({ severity: 'success', title: 'Checklist complete — Armed' });
-        }}
-      />
-      <TakeoffModal open={modal === 'takeoff'} onClose={() => setModal(null)} onConfirm={confirmTakeoff} defaultAlt={4} />
-      <SettingsModal open={modal === 'settings'} onClose={() => setModal(null)} />
-      <FailsafeModal open={modal === 'failsafe'} onClose={() => setModal(null)} />
-      <PidModal open={modal === 'pid'} onClose={() => setModal(null)} />
-      <LogBrowserModal open={modal === 'logbrowser'} onClose={() => setModal(null)} />
-      <UnattendedModal
-        open={modal === 'unattended'}
-        onClose={() => setModal(null)}
-        onConfirm={doEnterUnattended}
-        defaultOperatorId={operatorId}
+      <ModalHost
+        modal={modal}
+        onClose={closeModal}
+        onChecklistComplete={flows.completeChecklist}
+        onConfirmTakeoff={flows.confirmTakeoff}
+        onEnterUnattended={doEnterUnattended}
+        operatorId={operatorId}
       />
     </div>
   );

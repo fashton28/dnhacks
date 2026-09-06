@@ -1,22 +1,22 @@
-# Threat model — Komati Power Station
+# Threat model — Meridian Station
 
 Runtime paths in this document are relative to [`platform/`](..), this file's
 parent directory.
 
 ## Site and framing
 
-The modelled site is **Komati Power Station, Mpumalanga** — an Eskom coal station
-whose last unit was retired in 2022 and which is designated critical
-infrastructure (the National Key Point regime carried into the Critical
-Infrastructure Protection Act). Decommissioning changes the threat picture rather
-than removing it: generation plant becomes a very large quantity of unattended
-copper, aluminium, steel and instrumentation, the guard force shrinks, and the
-switchyard and its transmission connections remain live and operationally
-important.
+The modelled site is **Meridian Station** — a FICTIONAL generating station: a
+reactor building, a turbine hall, cooling towers, a switchyard still connected to
+the grid, and an outer perimeter around them. It stands at no real place; the
+anchor (41.2000, -98.4000) exists only so the geodesic maths is real. The threat
+picture assumed here is that of a station wound down from generation rather than
+closed: plant becomes a very large quantity of unattended copper, aluminium,
+steel and instrumentation, the guard force shrinks, and the switchyard and its
+transmission connections remain live and operationally important.
 
 **Everything in this document is demonstrated in simulation.** No flight is
-performed at Komati, no Eskom system is connected to, and no site data other than
-publicly derivable geometry is used. Site geometry is the deterministic stub in
+performed anywhere, no operator's system is connected to, and no real site data
+is used. Site geometry is the deterministic stub in
 `site/site.stub.json` (see [`docs/SITE_CONTRACT.md`](SITE_CONTRACT.md)); the real
 survey is the site owner's to supply.
 
@@ -95,9 +95,9 @@ decommissioned station.
 
 ## A2 — Organised cable and metal theft
 
-**Likelihood: high.** Syndicate activity against South African electricity
-infrastructure is routine, resourced, night-preferring, vehicle-supported and
-often informed. This is the threat that drives the design.
+**Likelihood: high.** Organised metal theft from electricity infrastructure is
+routine, resourced, night-preferring, vehicle-supported and often informed. This
+is the threat that drives the design.
 
 | | |
 |---|---|
@@ -125,13 +125,13 @@ insider is inside the normalcy model, not outside the fence.
 
 ## A4 — Sabotage
 
-**Likelihood: lower, consequence highest.** Komati's switchyard and its
-transmission connections remain part of the grid even with generation retired, so
-the consequence tail here is disproportionate to the frequency.
+**Likelihood: lower, consequence highest.** The station's switchyard and its
+transmission connections remain part of the grid even with generation wound down,
+so the consequence tail here is disproportionate to the frequency.
 
 | | |
 |---|---|
-| **Asset targeted** | Switchyard equipment, transformers, control and protection cabling, remaining structures (chimney, boiler house), and the site's grid connection |
+| **Asset targeted** | Switchyard equipment, transformers, control and protection cabling, remaining structures (reactor building, turbine hall, cooling towers), and the site's grid connection |
 | **Attack path** | Deliberate entry aimed at damage rather than removal — cutting protection cabling, damaging bushings or a transformer, fire-setting in a cable basement, or structural attack |
 | **Detects** | Cue rails on the switchyard and structure zones; triage emits `structure`, which the planner maps to a **survey** profile. Critically, the switchyard is a **no-fly zone with a 120 m ceiling above the 20–80 m site band**, so it is a full no-go: the planner routes around the 25 m buffered polygon, the verifier refuses any plan that enters it, and the companion validator refuses it again. Observation is therefore standoff observation of the switchyard from outside its buffer, at survey lateral tolerance |
 | **Response** | `escalate` on a confirming report, at the top of the escalation chain in [`docs/CONOPS.md`](CONOPS.md). `refuse` for any plan or operator action that would put the vehicle inside the switchyard NFZ, including a manual drag of the target into it |

@@ -1,110 +1,177 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Drone Safety Platform -- Ground Station Setup (Linux)
+# Drone Safety Platform -- Linux ground-station bootstrap (LINUX_PRD §8)
 # ----------------------------------------------------------------------------
-# Idempotent bootstrap for a Linux ground-station dev box (LINUX_PRD §8).
-# The Linux counterpart of scripts/setup-ground.ps1.
+# The Linux counterpart of scripts/setup-ground.ps1. Idempotent: re-run it
+# whenever dependencies move or the TypeScript changes.
 #
-# What it does
-#   1. Verifies Node.js >= 20.
-#   2. npm install  in ground/planner     (deterministic planner + verifier)
-#   3. npm install  in ground/ui          (shared React renderer)
-#   4. npm install  in ground/app/linux   (Electron shell, Linux electron binary)
-#   5. Builds ground/planner -> ground/planner/dist   (FM-83)
-#   6. Builds the UI (tsc + vite build) into ground/ui/dist
-#   7. Builds the Electron shell -> ground/app/linux/dist-electron  (FM-132)
-#   8. Asserts every built artefact exists, then prints next steps.
+# THE PIPELINE IS A TABLE, NOT A SCRIPT. Three workspaces are declared once,
+# in the order the Electron shell loads them at RUNTIME, each with the build
+# script that produces its artefacts and the artefacts themselves:
 #
-# BUILD ORDER MATTERS. The Electron main process `require`s
-# ground/planner/dist/index.js at runtime and package.json's `main` is
-# dist-electron/main.js; both are gitignored, so a fresh clone has NEITHER
-# until this script produces them. Before FM-83/FM-132 this script installed
-# and built only ground/ui, so a fresh clone gave "Cannot find module
-# dist-electron/main.js" at launch, or a "Planning failed" toast the moment the
-# inspection button was pressed.
+#     ground/planner    npm run build           dist/index.js
+#     ground/ui         npm run build           dist/index.html
+#     ground/app/linux  npm run build:electron  dist-electron/{main,preload}.js
 #
-# Usage (from anywhere):
+# Everything below walks that table: install every workspace, then build every
+# workspace, then assert every artefact exists.
+#
+# WHY THE ORDER AND THE ASSERTIONS MATTER (FM-83, FM-132)
+# `ground/planner/dist` and `dist-electron/` are gitignored, and package.json's
+# `main` is `dist-electron/main.js` while the main process `require`s
+# `ground/planner/dist/index.js` on the first plan. A fresh clone has NEITHER.
+# Installing and building only ground/ui produced a tree that started and then
+# failed: "Cannot find module dist-electron/main.js" at launch, or a "Planning
+# failed" toast the moment the inspection button was pressed. A build that
+# "succeeds" without emitting its artefacts is the same failure deferred, so
+# the artefacts are asserted rather than assumed.
+#
+# USAGE
 #   bash scripts/setup-ground-linux.sh
+#   bash scripts/setup-ground-linux.sh --check   # report state, install nothing
+#   bash scripts/setup-ground-linux.sh --help
 #
-# Environment variables honoured:
-#   EIS_SKIP_BUILD=1   -- install deps but skip every build (artefact
-#                         assertions are skipped with it)
+# ENVIRONMENT
+#   EIS_SKIP_BUILD=1   install dependencies but skip every build (the artefact
+#                      assertions are skipped with it)
+#
+# EXIT CODES
+#   0  dependencies installed and (unless skipped) every artefact present
+#   1  Node/npm too old or missing, a workspace missing, or a build failed
 # ============================================================================
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PLANNER_DIR="$REPO_ROOT/ground/planner"
-UI_DIR="$REPO_ROOT/ground/ui"
-APP_DIR="$REPO_ROOT/ground/app/linux"
+readonly NODE_MIN_MAJOR=20
 
-cyan()  { printf '\033[36m==> %s\033[0m\n' "$1"; }
-ok()    { printf '    [OK] %s\n' "$1"; }
-fail()  { printf '\033[31m    [FAIL] %s\033[0m\n' "$1" >&2; exit 1; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-# 1. Node.js version check ----------------------------------------------------
-cyan "Checking Node.js version (require >= 20)"
-command -v node >/dev/null 2>&1 || fail "Node.js not found. Install Node >= 20 (e.g. via nvm or your distro)."
-NODE_MAJOR="$(node --version | sed 's/^v//' | cut -d. -f1)"
-[ "$NODE_MAJOR" -ge 20 ] || fail "Node.js $(node --version) is too old (need >= 20)."
-ok "Node.js $(node --version)"
-command -v npm >/dev/null 2>&1 || fail "npm not found (ships with Node)."
-ok "npm $(npm --version)"
+# label | path relative to the repo root | build script | artefacts (comma-sep)
+WORKSPACES=(
+  "ground/planner|ground/planner|build|dist/index.js"
+  "ground/ui|ground/ui|build|dist/index.html"
+  "ground/app/linux|ground/app/linux|build:electron|dist-electron/main.js,dist-electron/preload.js"
+)
 
-# 2. Planner deps -------------------------------------------------------------
-# The Electron main process loads ground/planner/dist at runtime; without its
-# node_modules there is nothing to build it with (FM-83).
-[ -d "$PLANNER_DIR" ] || fail "ground/planner not found at $PLANNER_DIR"
-cyan "Installing ground/planner dependencies"
-( cd "$PLANNER_DIR" && npm install --prefer-offline )
-ok "ground/planner node_modules ready"
+# What each artefact is FOR -- named in the failure message so a missing file
+# points at the thing that will break rather than at a path.
+artefact_purpose() {
+    case "$1" in
+        dist/index.js)              echo "planner bundle (phase3Host require)" ;;
+        dist/index.html)            echo "built UI (main.ts loadFile)" ;;
+        dist-electron/main.js)      echo "Electron main (package.json main)" ;;
+        dist-electron/preload.js)   echo "Electron preload (webPreferences)" ;;
+        *)                          echo "build output" ;;
+    esac
+}
 
-# 3. UI deps ------------------------------------------------------------------
-[ -d "$UI_DIR" ] || fail "ground/ui not found at $UI_DIR"
-cyan "Installing ground/ui dependencies"
-( cd "$UI_DIR" && npm install --prefer-offline )
-ok "ground/ui node_modules ready"
+cyan() { printf '\033[36m==> %s\033[0m\n' "$1"; }
+ok()   { printf '    [OK] %s\n' "$1"; }
+miss() { printf '    [--] %s\n' "$1"; }
+note() { printf '    %s\n' "$1"; }
+fail() { printf '\033[31m    [FAIL] %s\033[0m\n' "$1" >&2; exit 1; }
 
-# 4. App (linux) deps ---------------------------------------------------------
-[ -d "$APP_DIR" ] || fail "ground/app/linux not found at $APP_DIR"
-cyan "Installing ground/app/linux dependencies"
-( cd "$APP_DIR" && npm install --prefer-offline )
-ok "ground/app/linux node_modules ready"
+usage() {
+    cat <<EOF
+Drone Safety Platform -- Linux ground-station bootstrap
 
-# 5-7. Build everything the shell loads at runtime (unless skipped) -----------
-# Order: planner -> ui -> electron, the order they are loaded in, so a failure
-# points at the thing that failed.
-if [ "${EIS_SKIP_BUILD:-0}" = "1" ]; then
-  printf '    EIS_SKIP_BUILD=1: skipping every build (planner, UI, Electron shell).\n'
-  printf '    The ground station will NOT start until these are built.\n'
-else
-  cyan "Building ground/planner (deterministic planner + verifier) -> dist/"
-  ( cd "$PLANNER_DIR" && npm run build )
-  ok "ground/planner built -> ground/planner/dist/"
+  bash scripts/setup-ground-linux.sh [--check | --help]
 
-  cyan "Building ground/ui (TypeScript typecheck + Vite build)"
-  ( cd "$UI_DIR" && npm run build )
-  ok "ground/ui built -> ground/ui/dist/"
+    --check   report Node/npm, workspaces and built artefacts; install nothing
+    --help    this text
 
-  cyan "Building the Electron shell -> ground/app/linux/dist-electron/"
-  ( cd "$APP_DIR" && npm run build:electron )
-  ok "Electron main/preload built -> dist-electron/"
+Environment:
+  EIS_SKIP_BUILD=1   install dependencies only (artefact assertions skipped)
 
-  # Artefact assertions. Every path here is loaded at RUNTIME; a build that
-  # "succeeded" without producing them fails at launch instead — which is what
-  # FM-83 and FM-132 both were.
-  cyan "Verifying built artefacts"
-  assert_artefact() {
-    [ -f "$1" ] || fail "MISSING $2: $1"
-    ok "$2 -> $1"
-  }
-  assert_artefact "$PLANNER_DIR/dist/index.js"      "planner bundle (phase3Host require)"
-  assert_artefact "$UI_DIR/dist/index.html"         "built UI (main.ts loadFile)"
-  assert_artefact "$APP_DIR/dist-electron/main.js"    "Electron main (package.json main)"
-  assert_artefact "$APP_DIR/dist-electron/preload.js" "Electron preload (webPreferences)"
-fi
+Exit codes: 0 ready / 1 prerequisite missing or a build failed
+EOF
+}
 
-# 8. Next steps ---------------------------------------------------------------
-cat <<'EOF'
+# --- record accessors -------------------------------------------------------
+ws_label()     { printf '%s' "${1%%|*}"; }
+ws_dir()       { local r="${1#*|}"; printf '%s/%s' "$REPO_ROOT" "${r%%|*}"; }
+ws_script()    { local r="${1#*|}"; r="${r#*|}"; printf '%s' "${r%%|*}"; }
+ws_artefacts() { printf '%s' "${1##*|}"; }
+
+each_artefact() {
+    # each_artefact <record> -> one relative artefact path per line.
+    # The trailing newline is load-bearing: without it `read` drops the last
+    # entry, which is exactly the artefact whose absence must be reported.
+    printf '%s\n' "$(ws_artefacts "$1")" | tr ',' '\n'
+}
+
+# ---------------------------------------------------------------------------
+# 1. Toolchain
+# ---------------------------------------------------------------------------
+node_major() {
+    node --version 2>/dev/null | sed 's/^v//' | cut -d. -f1
+}
+
+require_toolchain() {
+    cyan "Checking Node.js version (require >= $NODE_MIN_MAJOR)"
+    command -v node >/dev/null 2>&1 || \
+        fail "Node.js not found. Install Node >= $NODE_MIN_MAJOR (e.g. via nvm or your distro)."
+
+    local major
+    major="$(node_major)"
+    [ -n "$major" ] || fail "could not read a version out of 'node --version'."
+    [ "$major" -ge "$NODE_MIN_MAJOR" ] || \
+        fail "Node.js $(node --version) is too old (need >= $NODE_MIN_MAJOR)."
+    ok "Node.js $(node --version)"
+
+    command -v npm >/dev/null 2>&1 || fail "npm not found (ships with Node)."
+    ok "npm $(npm --version)"
+}
+
+# ---------------------------------------------------------------------------
+# 2-4. Dependencies, one workspace at a time
+# ---------------------------------------------------------------------------
+install_workspaces() {
+    local record label dir
+    for record in "${WORKSPACES[@]}"; do
+        label="$(ws_label "$record")"
+        dir="$(ws_dir "$record")"
+        [ -d "$dir" ] || fail "$label not found at $dir"
+        cyan "Installing $label dependencies"
+        ( cd "$dir" && npm install --prefer-offline )
+        ok "$label node_modules ready"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# 5-7. Builds, in load order, so a failure names the thing that failed
+# ---------------------------------------------------------------------------
+build_workspaces() {
+    local record label dir script
+    for record in "${WORKSPACES[@]}"; do
+        label="$(ws_label "$record")"
+        dir="$(ws_dir "$record")"
+        script="$(ws_script "$record")"
+        cyan "Building $label (npm run $script)"
+        ( cd "$dir" && npm run "$script" ) || fail "$label build failed (npm run $script)"
+        ok "$label built"
+    done
+}
+
+# ---------------------------------------------------------------------------
+# 8. Artefact assertions -- every path here is loaded at RUNTIME
+# ---------------------------------------------------------------------------
+assert_artefacts() {
+    local record dir relative absolute
+    cyan "Verifying built artefacts"
+    for record in "${WORKSPACES[@]}"; do
+        dir="$(ws_dir "$record")"
+        while IFS= read -r relative; do
+            [ -n "$relative" ] || continue
+            absolute="$dir/$relative"
+            [ -f "$absolute" ] || fail "MISSING $(artefact_purpose "$relative"): $absolute"
+            ok "$(artefact_purpose "$relative") -> $absolute"
+        done < <(each_artefact "$record")
+    done
+}
+
+print_next_steps() {
+    cat <<'EOF'
 
 ============================================================
  Drone Safety Platform -- Linux ground station ready!
@@ -129,3 +196,64 @@ cat <<'EOF'
   (or rebuild by hand) — the shell loads the BUILT artefacts, so an unbuilt
   edit silently runs the previous build.
 EOF
+}
+
+# ---------------------------------------------------------------------------
+# --check: report, install nothing, build nothing.
+# ---------------------------------------------------------------------------
+report_state() {
+    local record label dir relative major
+    cyan "Ground-station report (--check: nothing will be installed or built)"
+
+    if command -v node >/dev/null 2>&1; then
+        major="$(node_major)"
+        if [ -n "$major" ] && [ "$major" -ge "$NODE_MIN_MAJOR" ]; then
+            ok "Node.js $(node --version)"
+        else
+            miss "Node.js $(node --version) is older than $NODE_MIN_MAJOR"
+        fi
+    else
+        miss "node not on PATH"
+    fi
+    if command -v npm >/dev/null 2>&1; then ok "npm $(npm --version)"; else miss "npm not on PATH"; fi
+
+    for record in "${WORKSPACES[@]}"; do
+        label="$(ws_label "$record")"
+        dir="$(ws_dir "$record")"
+        if [ -d "$dir" ]; then ok "workspace $label"; else miss "workspace missing: $dir"; continue; fi
+        if [ -d "$dir/node_modules" ]; then ok "  node_modules present"; else miss "  node_modules absent"; fi
+        while IFS= read -r relative; do
+            [ -n "$relative" ] || continue
+            if [ -f "$dir/$relative" ]; then
+                ok "  $relative"
+            else
+                miss "  $relative (not built)"
+            fi
+        done < <(each_artefact "$record")
+    done
+    echo
+}
+
+main() {
+    case "${1:-}" in
+        -h|--help) usage; return 0 ;;
+        --check)   report_state; return 0 ;;
+        "")        ;;
+        *)         usage >&2; printf 'unknown option: %s\n' "$1" >&2; return 1 ;;
+    esac
+
+    require_toolchain
+    install_workspaces
+
+    if [ "${EIS_SKIP_BUILD:-0}" = "1" ]; then
+        note "EIS_SKIP_BUILD=1: skipping every build (planner, UI, Electron shell)."
+        note "The ground station will NOT start until these are built."
+    else
+        build_workspaces
+        assert_artefacts
+    fi
+
+    print_next_steps
+}
+
+main "$@"

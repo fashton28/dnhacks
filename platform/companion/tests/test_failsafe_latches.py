@@ -17,7 +17,7 @@ from eis_companion.control.failsafe import FailsafeDecision
 from eis_companion.types import ControlSource, Limits, VehicleState
 
 STUB_SITE = "site/site.stub.json"
-HOME_LAT, HOME_LON = -26.0900, 29.4719
+HOME_LAT, HOME_LON = 41.1992364, -98.3995821
 
 
 class FakeVehicle:

@@ -1,8 +1,16 @@
-import React from 'react';
+import { useId } from 'react';
+import type { ChangeEvent, CSSProperties } from 'react';
+
+type StyleWithVars = CSSProperties & { [name: `--${string}`]: string | number };
 
 /**
- * Slider — labelled range control for tuning values (standoff distance, max
- * speed). Shows the live value in mono; fill + thumb track the position.
+ * Slider — labelled range control for tuning values (standoff, max speed,
+ * gimbal pitch). The live value is shown in tabular mono next to the label.
+ *
+ * The visible track, fill and thumb are drawn by CSS from two custom
+ * properties this component sets on the root — `--slider-pct` for position
+ * and `--slider-accent` for colour — while an invisible native
+ * <input type="range"> on top provides the pointer / keyboard behaviour.
  */
 
 export interface SliderProps {
@@ -16,7 +24,19 @@ export interface SliderProps {
   disabled?: boolean;
   accent?: string;
   ticks?: string[] | null;
-  style?: React.CSSProperties;
+  style?: CSSProperties;
+}
+
+/**
+ * Where `value` sits on the track, as a percentage clamped to [0, 100].
+ * A degenerate range (max <= min) or a non-finite value parks the thumb at 0
+ * instead of producing NaN / Infinity in the stylesheet.
+ */
+export function sliderPercent(value: number, min: number, max: number): number {
+  const span = max - min;
+  if (!(span > 0) || !Number.isFinite(value)) return 0;
+  const pct = ((value - min) / span) * 100;
+  return pct < 0 ? 0 : pct > 100 ? 100 : pct;
 }
 
 export function Slider({
@@ -30,64 +50,44 @@ export function Slider({
   disabled = false,
   accent = 'var(--accent)',
   ticks = null,
-  style = {},
+  style,
 }: SliderProps) {
-  const pct = ((value - min) / (max - min)) * 100;
-  const id = React.useId();
+  const inputId = useId();
+  const pct = sliderPercent(value, min, max);
+  const vars: StyleWithVars = { ...style, '--slider-pct': `${pct}%`, '--slider-accent': accent };
+
+  const emit = (e: ChangeEvent<HTMLInputElement>): void => {
+    onChange?.(Number(e.target.value));
+  };
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 7, opacity: disabled ? 0.5 : 1, ...style }}>
-      <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between' }}>
-        {label && (
-          <label
-            htmlFor={id}
-            style={{
-              fontFamily: 'var(--font-sans)',
-              fontSize: 'var(--text-2xs)',
-              fontWeight: 'var(--weight-semibold)',
-              letterSpacing: 'var(--tracking-label)',
-              textTransform: 'uppercase',
-              color: 'var(--text-tertiary)',
-            }}
-          >
-            {label}
-          </label>
-        )}
-        <span style={{ display: 'inline-flex', alignItems: 'baseline', gap: 3 }}>
-          <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-md)', fontWeight: 'var(--weight-medium)', color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
-            {value}
-          </span>
-          {unit && <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xs)', color: 'var(--text-tertiary)' }}>{unit}</span>}
+    <div className="eis-slider" data-disabled={disabled || undefined} style={vars}>
+      <div className="eis-slider-head">
+        {label && <label htmlFor={inputId} className="eis-label">{label}</label>}
+        <span className="eis-slider-value">
+          <span className="eis-readout">{value}</span>
+          {unit && <span className="eis-slider-unit">{unit}</span>}
         </span>
       </div>
 
-      <div style={{ position: 'relative', height: 20, display: 'flex', alignItems: 'center' }}>
-        <div style={{ position: 'absolute', left: 0, right: 0, height: 4, borderRadius: 999, background: 'var(--gray-5)' }} />
-        <div style={{ position: 'absolute', left: 0, width: `${pct}%`, height: 4, borderRadius: 999, background: accent }} />
-        <div
-          style={{
-            position: 'absolute',
-            left: `calc(${pct}% - 8px)`,
-            width: 16, height: 16, borderRadius: '50%',
-            background: '#fff',
-            border: `4px solid ${accent}`,
-            boxShadow: 'var(--shadow-raised)',
-            pointerEvents: 'none',
-          }}
-        />
+      <div className="eis-slider-track">
+        <span className="eis-slider-thumb" aria-hidden="true" />
         <input
-          id={id}
+          id={inputId}
           type="range"
-          min={min} max={max} step={step} value={value}
+          min={min}
+          max={max}
+          step={step}
+          value={value}
           disabled={disabled}
-          onChange={(e) => onChange && onChange(Number(e.target.value))}
-          style={{ position: 'absolute', left: 0, right: 0, width: '100%', height: 20, margin: 0, opacity: 0, cursor: disabled ? 'not-allowed' : 'pointer' }}
+          aria-label={label}
+          onChange={emit}
         />
       </div>
 
       {ticks && (
-        <div style={{ display: 'flex', justifyContent: 'space-between', fontFamily: 'var(--font-mono)', fontSize: 'var(--text-2xs)', color: 'var(--text-disabled)' }}>
-          {ticks.map((t, i) => <span key={i}>{t}</span>)}
+        <div className="eis-slider-ticks">
+          {ticks.map((tick, i) => <span key={i}>{tick}</span>)}
         </div>
       )}
     </div>

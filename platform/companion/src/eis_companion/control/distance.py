@@ -1,74 +1,124 @@
 """
-Monocular distance estimation from a person's bounding-box height.
+Monocular range from a person's bounding-box height.
 
-Pinhole-camera geometry
------------------------
-A pinhole camera maps a real-world object of height ``H`` (metres) at distance
-``Z`` (metres) onto an image of height ``h`` (pixels) according to similar
-triangles:
+Model
+-----
+A pinhole camera projects an object of physical height ``H`` standing ``Z``
+metres away onto ``h_px`` image rows:
 
-        h_px      f_px
-       ------  =  ------          =>     Z = (H * f_px) / h_px
-         H          Z
+    h_px / H = f_px / Z            =>   Z = H * f_px / h_px
 
-where ``f_px`` is the camera's focal length expressed in *pixels*. We do not
-usually know ``f_px`` directly, but we can derive it from the camera's vertical
-field of view (FOV) and the frame height in pixels. For a vertical FOV of
-``fov_v`` (radians) and a frame of ``frame_h`` pixels, the pinhole relation
-between half-FOV and half-sensor gives:
+The focal length in pixels follows from the vertical field of view and the
+sensor height: half the frame subtends half the FOV, so
 
-        tan(fov_v / 2) = (frame_h / 2) / f_px
-                  f_px = (frame_h / 2) / tan(fov_v / 2)
+    f_px = (frame_h_px / 2) / tan(vfov / 2)
 
-Combining:
+When the box height is NORMALISED (a fraction of the frame) the frame height
+cancels and the range depends on the FOV alone:
 
-        Z = (H * f_px) / h_px
-          = H * (frame_h / 2) / ( tan(fov_v/2) * h_px )
+    Z = H / (2 * tan(vfov / 2) * h_norm)
 
-Assumptions / caveats (documented for the operator):
-  * The subject is roughly upright and fully in-frame (bbox height ~ person
-    height). A crouching / partially-occluded subject reads as farther away.
-  * Default person height ``DEFAULT_PERSON_HEIGHT_M = 1.7 m``.
-  * Lens distortion is ignored (fine for the modest FOVs used here).
-  * This is a *size-based* estimate; a single camera is sufficient for the
-    standoff hold (PRD 6.1) but the absolute value is approximate.
+``PinholeCamera`` carries the intrinsics; the two public estimators are thin
+adapters over it -- one for normalised heights (what the tracker produces),
+one for pixel heights (external callers with a calibrated ``f_px``).
 
-The bbox height here is given NORMALISED (0..1 of the frame), so we convert to
-pixels with ``h_px = bbox_h_norm * frame_h`` -- which means ``frame_h`` cancels
-and the estimate depends only on the FOV and the normalised height:
+Every estimator answers ``None`` for "no usable measurement": a missing,
+non-finite, non-positive or sub-threshold height, a non-positive or non-finite
+camera parameter, or a non-positive range. NaN in particular must never leave
+this module as a number -- the guidance standoff predicates are comparisons
+and a comparison against NaN is False (FM-07). Ranges are capped at
+``max_distance_m`` so a one-pixel sliver cannot report kilometres.
 
-        Z = H / ( 2 * tan(fov_v/2) * bbox_h_norm )
+Assumptions: the subject is upright and fully framed (a crouching or partly
+occluded person reads as farther away), lens distortion is ignored, and the
+estimate is size-based -- adequate for the standoff hold, approximate in
+absolute terms.
 
-We still accept ``frame_h`` for clarity / future pixel-space callers.
-
-Pure stdlib + math only.
+stdlib only.
 """
 from __future__ import annotations
 
 import math
-from typing import Optional
+from typing import NamedTuple, Optional
 
 DEFAULT_PERSON_HEIGHT_M: float = 1.7
 DEFAULT_VFOV_DEG: float = 41.0   # typical IMX219-class CSI cam at 720p crop
 DEFAULT_FRAME_HEIGHT_PX: int = 720
 
-# Below this normalised bbox height the estimate is meaningless noise; treat as
-# "no usable measurement" rather than reporting an absurd distance.
-_MIN_BBOX_H_NORM: float = 1e-4
+# A normalised box height below this is detector noise, not a person: report
+# "no measurement" rather than an absurd range.
+_NOISE_FLOOR_H_NORM: float = 1e-4
+
+
+def _positive_finite(value) -> Optional[float]:
+    """float(value) if it is a finite, strictly positive number, else None."""
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number) or number <= 0.0:
+        return None
+    return number
+
+
+def _half_fov_tangent(vfov_deg) -> Optional[float]:
+    """tan(vfov/2) for a vertical FOV strictly inside (0, 180) degrees."""
+    fov = _positive_finite(vfov_deg)
+    if fov is None or fov >= 180.0:
+        return None
+    tangent = math.tan(math.radians(fov) / 2.0)
+    return tangent if math.isfinite(tangent) and tangent > 0.0 else None
+
+
+class PinholeCamera(NamedTuple):
+    """Intrinsics needed for size-based ranging.
+
+    ``frame_h_px`` is optional: a caller holding only a calibrated focal
+    length (the pixel-space estimator) has no use for it.
+    """
+    focal_px: float
+    frame_h_px: Optional[float] = None
+
+    @classmethod
+    def from_vfov(cls, vfov_deg, frame_h_px) -> Optional["PinholeCamera"]:
+        """Derive f_px from a vertical FOV and a frame height; None if invalid."""
+        rows = _positive_finite(frame_h_px)
+        tangent = _half_fov_tangent(vfov_deg)
+        if rows is None or tangent is None:
+            return None
+        return cls(focal_px=rows / (2.0 * tangent), frame_h_px=rows)
+
+    def range_to(
+        self,
+        object_height_m,
+        image_height_px,
+        max_distance_m: Optional[float] = None,
+    ) -> Optional[float]:
+        """Z = H * f_px / h_px, capped at ``max_distance_m`` when that is usable."""
+        height_m = _positive_finite(object_height_m)
+        height_px = _positive_finite(image_height_px)
+        focal = _positive_finite(self.focal_px)
+        if height_m is None or height_px is None or focal is None:
+            return None
+        z = height_m * focal / height_px
+        if not math.isfinite(z) or z <= 0.0:
+            return None
+        cap = _positive_finite(max_distance_m)
+        return z if cap is None else min(z, cap)
 
 
 def focal_px_from_vfov(vfov_deg: float, frame_h_px: int) -> float:
-    """Focal length in pixels from vertical FOV (degrees) and frame height (px).
+    """Focal length in pixels: f_px = (frame_h / 2) / tan(vfov / 2).
 
-    f_px = (frame_h / 2) / tan(vfov/2).
+    Raises ``ValueError`` for a non-positive frame height or a FOV outside
+    (0, 180) degrees -- this is the strict, configuration-time entry point.
     """
-    if frame_h_px <= 0:
+    if _positive_finite(frame_h_px) is None:
         raise ValueError("frame_h_px must be positive")
-    half = math.radians(vfov_deg) / 2.0
-    t = math.tan(half)
-    if t <= 0.0:
+    camera = PinholeCamera.from_vfov(vfov_deg, frame_h_px)
+    if camera is None:
         raise ValueError("vfov_deg must be in (0, 180)")
-    return (frame_h_px / 2.0) / t
+    return camera.focal_px
 
 
 def estimate_distance(
@@ -79,46 +129,28 @@ def estimate_distance(
     frame_h_px: int = DEFAULT_FRAME_HEIGHT_PX,
     max_distance_m: float = 100.0,
 ) -> Optional[float]:
-    """Estimate distance (m) to a person from their NORMALISED bbox height.
+    """Range (m) to a person from their NORMALISED bbox height, or None.
 
     Args:
-      bbox_h_norm: bbox height as a fraction of the frame height (0..1). If
-        None, <= 0, or implausibly tiny, returns None ("no measurement").
-      person_height_m: assumed real person height (default 1.7 m).
+      bbox_h_norm: box height as a fraction of the frame (0..1).
+      person_height_m: assumed real height of the subject.
       vfov_deg: camera vertical field of view in degrees.
-      frame_h_px: frame height in pixels (used to recover f_px; cancels for the
-        normalised path but kept explicit).
-      max_distance_m: clamp the upper end so a sliver bbox can't report 10 km.
+      frame_h_px: frame height in pixels (cancels for the normalised path but
+        defines the pixel space the intrinsics live in).
+      max_distance_m: upper cap on the reported range.
 
-    Returns:
-      Estimated distance in metres, clamped to (0, max_distance_m], or None when
-      there is no usable bbox.
+    Returns None whenever any input is unusable -- this runs once per frame
+    inside the tracker and must never raise.
     """
-    if bbox_h_norm is None:
+    height_norm = _positive_finite(bbox_h_norm)
+    if height_norm is None or height_norm < _NOISE_FLOOR_H_NORM:
         return None
-    try:
-        bbox_h_norm = float(bbox_h_norm)
-    except (TypeError, ValueError):
+    camera = PinholeCamera.from_vfov(vfov_deg, frame_h_px)
+    if camera is None:
         return None
-    # NaN/Infinity is "no measurement", NEVER a distance. Every guard below is
-    # a comparison, and every comparison is False for NaN -- a non-finite
-    # height would otherwise flow through as a non-finite distance, which the
-    # guidance standoff predicates (also comparisons) silently fail open on
-    # and the output clamps turn into +max_speed (FM-07).
-    if not math.isfinite(bbox_h_norm):
-        return None
-    if bbox_h_norm < _MIN_BBOX_H_NORM:
-        return None
-
-    f_px = focal_px_from_vfov(vfov_deg, frame_h_px)
-    h_px = bbox_h_norm * frame_h_px
-    if h_px <= 0.0:
-        return None
-
-    z = (person_height_m * f_px) / h_px
-    if not math.isfinite(z) or z <= 0.0:
-        return None
-    return min(z, max_distance_m)
+    return camera.range_to(
+        person_height_m, height_norm * camera.frame_h_px, max_distance_m
+    )
 
 
 def estimate_distance_px(
@@ -128,30 +160,17 @@ def estimate_distance_px(
     person_height_m: float = DEFAULT_PERSON_HEIGHT_M,
     max_distance_m: float = 100.0,
 ) -> Optional[float]:
-    """Pixel-space variant: distance from a pixel bbox height and known f_px.
-
-    Z = (person_height_m * focal_px) / bbox_h_px.
-    """
-    if bbox_h_px is None:
-        return None
-    try:
-        bbox_h_px = float(bbox_h_px)
-    except (TypeError, ValueError):
-        return None
-    if not (math.isfinite(bbox_h_px) and math.isfinite(focal_px)):
-        return None
-    if bbox_h_px <= 0.0 or focal_px <= 0.0:
-        return None
-    z = (person_height_m * focal_px) / float(bbox_h_px)
-    if not math.isfinite(z) or z <= 0.0:
-        return None
-    return min(z, max_distance_m)
+    """Pixel-space variant: Z = person_height_m * focal_px / bbox_h_px, or None."""
+    return PinholeCamera(focal_px=focal_px).range_to(
+        person_height_m, bbox_h_px, max_distance_m
+    )
 
 
 __all__ = [
     "DEFAULT_PERSON_HEIGHT_M",
     "DEFAULT_VFOV_DEG",
     "DEFAULT_FRAME_HEIGHT_PX",
+    "PinholeCamera",
     "focal_px_from_vfov",
     "estimate_distance",
     "estimate_distance_px",

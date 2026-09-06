@@ -31,7 +31,7 @@ report, or put on a slide.
 
 | Metric | Definition | Measured by | Target | Value |
 |---|---|---|---|---|
-| Planner pass rate | Share of task fixtures for which the deterministic planner produces a plan the verifier accepts on the first attempt (excluding fixtures whose expected outcome is `infeasible` or a refusal) | Planner fixture suite over the Komati stub site | — | `TBD` |
+| Planner pass rate | Share of task fixtures for which the deterministic planner produces a plan the verifier accepts on the first attempt (excluding fixtures whose expected outcome is `infeasible` or a refusal) | Planner fixture suite over the Meridian Station stub site | — | `TBD` |
 | Planner refusal correctness | Share of fixtures expected to yield `infeasible` or a verifier refusal that do so, **with the expected reason names** | Same suite | 100% | `TBD` |
 | Plan determinism | Share of task fixtures whose plan is byte-identical across repeated runs (D20 tie-break: lowest detour, then northernmost via-point) | Repeat-run comparison over the fixture set | 100% | `TBD` |
 | Verifier check coverage | Number of distinct named checks the verifier can emit, and the number exercised by at least one fixture | Fixture-to-check cross-reference | every check exercised | `TBD` |
@@ -97,7 +97,7 @@ These are inputs, listed so they are never mistaken for results. They are
 |---|---|---|
 | Standoff floor | 3 m | Companion hard safety envelope |
 | Maximum speed | 8 m/s | Companion hard safety envelope |
-| Site altitude band | 20–80 m AGL | `site/site.stub.json` |
+| Site altitude band | 5–60 m AGL | `site/site.stub.json` |
 | Unattended altitude band | 30–50 m AGL | ADR D23 |
 | NFZ route buffer | 25 m | `site/site.stub.json`, [`docs/SITE_CONTRACT.md`](SITE_CONTRACT.md) |
 | Corridor lateral tolerance | 10 m `inspect` / 15 m `survey` | ADR D21 |

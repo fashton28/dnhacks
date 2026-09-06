@@ -4,57 +4,68 @@ Drone Safety Platform -- COMPANION orchestrator + CLI entry point
 ----------------------------------------------------------------------------
     python -m eis_companion.app   [--config PATH] [--sitl]
 
-Wires the whole vehicle-side system together and runs it as a set of asyncio
-tasks. This is the *glue*: it owns no control math (that lives in the pure-logic
-``control`` package), no MAVLink protocol (``mavlink.Vehicle``), and no detector
-(``vision``) -- it composes them and enforces the safety invariants between them.
+This module is GLUE, and deliberately nothing else. The control math lives in
+the pure-logic ``control`` package, the MAVLink protocol in ``mavlink.Vehicle``,
+the detector in ``vision``. What is here is composition plus the invariants that
+only exist BETWEEN those components -- the ones no single component can enforce
+on its own, because each of them can only see itself.
 
-Components built here
-  * config            -> typed AppConfig (config.load_config)
-  * Vehicle           -> mavlink.Vehicle (FC link; UDP in SITL, UART on HW)
-  * vision source     -> Capture+PersonDetector (real cam) OR SimTargetSource
-  * Tracker           -> control.Tracker  (single-target lock)
-  * Guidance          -> control.Guidance (visual servoing)
-  * ManualPilot       -> control.ManualPilot (manualInput -> setpoint + watchdog)
-  * SafetyManager     -> mavlink.SafetyManager (deadman, arming, e-stop, fence)
-  * ApiServer         -> api.ApiServer (the control WebSocket contract)
-  * VideoStream       -> stream.VideoStream (RTSP/WebRTC)
+Structure
+---------
+``_Cadence`` + ``Companion._drive``
+    One scheduler behind all four loops. A loop body is the work it does; the
+    driver owns the stop condition, the tick delta and the promise that a
+    raising tick is contained and answered with that loop's safe state.
 
-asyncio tasks
-  (1) telemetry pump @10 Hz : read vehicle telemetry, stamp controlSource, push.
-  (2) perception+tracking   : frames -> detect -> tracker -> push 'tracking' @~10 Hz.
-        (+ staging-point still-image detections spliced in while a plan flies)
-  (2b) envelope monitor @20 Hz: an INDEPENDENT coroutine fed by telemetry and
-        the verified mission record. It checks the certified corridor, the
-        altitude band, the geofence margin, NFZ buffers, the standoff floor,
-        the sortie budget and inter-vehicle separation, and routes its action
-        requests to the FAILSAFE state machine -- never to guidance. Guidance
-        can neither read nor write monitor state; the monitor cannot be
-        disabled by anything it watches.
-  (3) control loop @10-20 Hz: pick the ONE active control source and emit a
-        clamped body-velocity setpoint:
-          manual active            -> ManualPilot setpoint (watchdog-gated)
-          plan engaged+armed+GUIDED -> PlannerExecutor output (velocity legs
-                                       through the same clamp path; goto legs
-                                       through Vehicle.goto_global, which
-                                       clamps again; rtl -> existing rtl path)
-          tracking engaged+armed+GUIDED -> Guidance setpoint
-          else                     -> hold (zero, valid=False)
-        then clamp + Vehicle.send_body_velocity.
-  (4) command dispatch (event-driven via the API handler).
+``Companion._ARBITRATION``
+    The control tick's priority ladder, written down as an ordered list of
+    gates: e-stop, ground-link deadman, hands-on manual, the failsafe ladder,
+    the takeoff window, then the SITL override hook. The first gate that
+    handles the tick ends it. Anything that clears the whole ladder reaches
+    source arbitration, which picks the ONE active source and emits one
+    clamped setpoint.
+
+``Companion._COMMANDS``
+    The command surface as a table: name -> method, whether it takes params,
+    and whether it is exempt from the failsafe gate. Adding a command is a row
+    plus a method, never another branch in a dispatch chain.
+
+``Companion._COMPONENT_SLOTS``
+    Every component ``setup()`` builds. Each one may legitimately be ``None``:
+    a companion with no camera, no FC and no video still boots, and it boots
+    HELD. Degrading is always preferred to refusing to start.
+
+The four tasks
+--------------
+  (1) telemetry pump @10 Hz -- read the FC, run the health ladder, stamp the
+      frame with the authoritative control source, push it.
+  (2) perception @~10 Hz -- frames -> detect -> tracker -> push 'tracking',
+      with staging-point still images spliced in while a plan is flying.
+  (2b) envelope monitor @20 Hz -- an INDEPENDENT coroutine fed by telemetry and
+      the verified mission record. It checks the certified corridor, the
+      altitude band, the geofence margin, NFZ buffers, the standoff floor, the
+      sortie budget and inter-vehicle separation, and routes its requests to
+      the FAILSAFE state machine -- never to guidance. Guidance can neither
+      read nor write monitor state, and the monitor cannot be disabled by
+      anything it watches.
+  (3) control loop @20 Hz -- the ladder above, then a clamped body-velocity
+      setpoint (or, for a goto leg, a global position target through
+      ``Vehicle.goto_global``, which clamps again on its own path).
+  (4) command dispatch -- event-driven, through the API handler.
 
 SAFETY INVARIANTS enforced here (PRD 11)
-  * Exactly one controlSource is ever active (auto | tracking | manual | planner).
+----------------------------------------
+  * Exactly one controlSource is ever active (auto | tracking | manual | planner),
+    and it is reported in every telemetry frame.
   * standoff is a hard limit -- delegated to Guidance, never overridden here.
   * Every setpoint is clamped to Limits before it reaches the FC.
-  * Manual + ground-link watchdogs zero-and-hold on input/link loss (the
-    ground-link deadman also covers planner flight).
-  * emergencyStop/disarm need no confirmation and override everything.
+  * Manual + ground-link watchdogs zero-and-hold on input/link loss; the
+    ground-link deadman covers planner flight too.
+  * emergencyStop/disarm need no confirmation and override everything, and the
+    e-stop LATCH clears only on an observed disarm on the ground.
   * Default to the safe (hold) state on startup and on ANY exception.
-  * The envelope monitor is INDEPENDENT: its own coroutine, its own inputs,
-    its requests reaching the flight state only through control/failsafe.py.
-    Manual engage suspends its ACTIONS (a hands-on operator wins) but never
-    its evaluation or its logging -- the audit trail stays unbroken.
+  * Manual engage suspends the monitor's ACTIONS (a hands-on operator wins) but
+    never its evaluation or its logging -- the audit trail stays unbroken.
   * Privileged commands (enterUnattended / exitUnattended / setGimbal) are
     refused unless signed, fresh and unreplayed. Unattended mode is entered
     only by a signed command and reverts the instant an operator connects.
@@ -72,7 +83,7 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .config import MAX_SPEED_CAP, AppConfig, load_config
 from .types import (
@@ -120,36 +131,88 @@ def _test_hook(config: AppConfig, name: str) -> bool:
 def _clamp(v: float, lo: float, hi: float) -> float:
     """Clamp to [lo, hi]; a NON-FINITE input collapses to 0.0, never to ``hi``.
 
-    Under CPython ``min(hi, NaN)`` returns ``hi`` (the comparison is False so
-    the first argument survives) and ``max(lo, hi)`` then returns ``hi``. The
-    naive clamp is therefore a NaN-to-full-throttle amplifier: one non-finite
-    axis becomes +max_speed / +max_climb_rate / +max_yaw_rate, on all four axes
-    at once (FM-06). Zero is the only defensible answer for a number we cannot
-    order.
+    Written as explicit comparisons rather than ``max(lo, min(hi, v))`` on
+    purpose. Every comparison against NaN is False, so the nested min/max form
+    silently returns ``hi``: it is a NaN-to-full-throttle amplifier, turning
+    one unusable axis into +max_speed / +max_climb_rate / +max_yaw_rate on all
+    four axes at once (FM-06). Zero is the only defensible answer for a number
+    we cannot order, so it is decided FIRST and the ordering never sees it.
     """
     if not math.isfinite(v):
         return 0.0
-    if lo > hi:
-        lo, hi = hi, lo
-    return max(lo, min(hi, v))
+    low, high = (lo, hi) if lo <= hi else (hi, lo)
+    if v < low:
+        return low
+    return high if v > high else v
+
+
+#: Mean Earth radius, metres. Fixed by the haversine formulation below.
+_EARTH_RADIUS_M = 6_371_000.0
+
+
+def _is_geographic(lat: float, lon: float) -> bool:
+    """True when (lat, lon) is a finite, in-range WGS-84 coordinate pair."""
+    return (
+        math.isfinite(lat) and math.isfinite(lon)
+        and -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0
+    )
 
 
 def _great_circle_distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    """Return surface distance in metres, or infinity for malformed positions."""
-    values = (lat1, lon1, lat2, lon2)
-    if not all(math.isfinite(float(value)) for value in values):
+    """Return surface distance in metres, or infinity for malformed positions.
+
+    ``inf`` for anything we cannot place on the globe is deliberate: every
+    caller compares the result against a radius or a margin, and an unplaceable
+    position must read as "further away than any limit", never as zero.
+    """
+    try:
+        a_lat, a_lon = float(lat1), float(lon1)
+        b_lat, b_lon = float(lat2), float(lon2)
+    except (TypeError, ValueError):
         return math.inf
-    if not (-90.0 <= lat1 <= 90.0 and -90.0 <= lat2 <= 90.0):
+    if not (_is_geographic(a_lat, a_lon) and _is_geographic(b_lat, b_lon)):
         return math.inf
-    if not (-180.0 <= lon1 <= 180.0 and -180.0 <= lon2 <= 180.0):
-        return math.inf
-    phi1, phi2 = math.radians(lat1), math.radians(lat2)
-    dphi = phi2 - phi1
-    dlambda = math.radians(lon2 - lon1)
-    hav = math.sin(dphi / 2.0) ** 2 + (
-        math.cos(phi1) * math.cos(phi2) * math.sin(dlambda / 2.0) ** 2
+    phi_a, phi_b = math.radians(a_lat), math.radians(b_lat)
+    half_dphi = 0.5 * (phi_b - phi_a)
+    half_dlambda = 0.5 * math.radians(b_lon - a_lon)
+    hav = (
+        math.sin(half_dphi) ** 2
+        + math.cos(phi_a) * math.cos(phi_b) * math.sin(half_dlambda) ** 2
     )
-    return 2.0 * 6_371_000.0 * math.asin(math.sqrt(min(1.0, max(0.0, hav))))
+    # Round-off can push hav a hair outside [0, 1]; asin would then raise.
+    return 2.0 * _EARTH_RADIUS_M * math.asin(math.sqrt(min(1.0, max(0.0, hav))))
+
+
+class _Cadence:
+    """The clock for one orchestrator loop: a fixed rate plus the tick delta.
+
+    Each of the four loops used to carry its own copy of ``t0 = monotonic();
+    tick; sleep(period - elapsed)``, and the control loop additionally tracked
+    ``last`` by hand to derive ``dt``. Both jobs live here so a loop body is
+    only the work it does, and so "how fast does this run" is a value that can
+    be read, logged and (for the envelope monitor) taken from config.
+    """
+
+    __slots__ = ("name", "period", "_previous")
+
+    def __init__(self, name: str, hz: float) -> None:
+        self.name = name
+        self.period = 1.0 / max(0.001, float(hz))
+        self._previous: Optional[float] = None
+
+    def tick(self, now: float) -> float:
+        """Seconds since the previous tick. The FIRST tick reports 0.0 -- there
+        is no elapsed interval before the loop started, and inventing one would
+        hand every PID a bogus first derivative."""
+        previous, self._previous = self._previous, now
+        return 0.0 if previous is None else max(0.0, now - previous)
+
+
+#: What one loop does when its tick raises. The orchestrator's rule is "default
+#: to the safe state on ANY exception", but the safe state differs per loop:
+#: telemetry/perception simply lose a frame, the control loop must hold, and
+#: the envelope monitor must request a hold it cannot otherwise justify.
+_TickFailure = Callable[[BaseException], Awaitable[None]]
 
 
 class Companion:
@@ -157,11 +220,67 @@ class Companion:
     (active control source, tracking-engaged flag, latest setpoint) and runs the
     asyncio task graph."""
 
+    #: Every component slot ``setup()`` fills, and what fills it. Declared as
+    #: data so "what does the orchestrator compose" is a list rather than a
+    #: scroll -- and so the degrade-to-None contract is stated once: EVERY
+    #: entry here may legitimately be ``None`` at runtime, and every caller
+    #: must cope. Nothing outside setup() creates one of these.
+    _COMPONENT_SLOTS: Dict[str, str] = {
+        "vehicle": "mavlink.Vehicle -- the FC link (None without pymavlink)",
+        "source": "vision source: SimTargetSource or _CameraSource",
+        "tracker": "control.Tracker -- single-target lock",
+        "guidance": "control.Guidance -- visual servoing",
+        "manual": "control.ManualPilot -- sticks -> setpoint",
+        "planner": "control.PlannerExecutor -- mission-plan legs",
+        "site": "site.Site -- perimeter, NFZ, staging (may be None)",
+        "staging_observer": "vision.StagingObserver -- still-image detections",
+        "sensor_suite": "vision.multimodal.StagedSensorSuite",
+        "battery_health": "control.BatteryHealth",
+        "nav_health": "control.NavHealth",
+        "failsafe": "control.FailsafeMachine -- the ladder",
+        "envelope": "control.envelope.EnvelopeMonitor -- independent monitor",
+        "attendance": "control.mode.AttendanceMachine",
+        "unattended_envelope": "control.mode.UnattendedEnvelope",
+        "gimbal": "control.gimbal.GimbalController -- pure pointing",
+        "verifier": "security.CommandVerifier -- signed commands",
+        "safety": "mavlink.SafetyManager -- deadman, arming, e-stop",
+        "api": "api.ApiServer -- the control WebSocket contract",
+        "video": "stream.VideoStream -- RTSP/WebRTC",
+    }
+
+    #: The SITL fault-injection rails, all OFF. The KEYS are the contract:
+    #: ``testFault`` names one of these and nothing else, and the health
+    #: ladder reads them by the same names.
+    _FAULT_RAILS = (
+        "gps_loss", "rf_interference", "hostile_drone", "link_loss",
+        "planner_heartbeat", "camera", "thermal", "lidar",
+        "battery_fault", "sortie_expiry", "charge", "wind",
+    )
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.limits: Limits = config.limits
+        # Runtime state is grouped by WHO WRITES IT, not by type: each group
+        # below has one owner, and that is what makes the invariants
+        # checkable. The components themselves are created empty here and
+        # filled by setup().
+        self._init_authority_state()
+        self._init_link_state()
+        self._init_health_state()
+        self._init_envelope_state()
+        self._init_mission_state()
+        self._stop = asyncio.Event()
+        self._tasks: List[asyncio.Task] = []
+        for slot in self._COMPONENT_SLOTS:
+            setattr(self, slot, None)
 
-        # ---- runtime state (the single source of truth for "who is flying") --
+    def _init_authority_state(self) -> None:
+        """Who is flying, and what the last thing we heard from them was.
+
+        ``_control_source`` is the single source of truth reported in every
+        telemetry frame; the three engagement flags are what elect it, and
+        exactly one of them may be set (PRD 11).
+        """
         self._control_source: str = ControlSource.AUTO.value
         self._tracking_engaged: bool = False
         self._manual_engaged: bool = False
@@ -173,45 +292,26 @@ class Companion:
         # goto-leg streaming state (re-send throttle for position targets)
         self._last_goto: Optional[Tuple[float, float, float, float]] = None
         self._last_goto_ts: float = 0.0
-        self._site_valid: bool = False
-        self._last_planner_heartbeat_ms: float = 0.0
-        self._last_fc_heartbeat_sent_s: float = 0.0
-        self._last_rf_interference_ms: float = 0.0
-        self._failsafe_decision: Any = None
-        self._battery_snapshot: Any = None
-        self._nav_snapshot: Any = None
-        self._last_readiness_signature: Optional[Tuple[Any, ...]] = None
-        self._last_readiness_push_ms: float = 0.0
-        self._wind_above_since_ms: float = 0.0
-        self._route_through_clutter: bool = False
-        self._night_mission: bool = False
-        self._lidar_clear_reached: bool = False
-        self._was_armed: bool = False
-        self._charge_started_ms: float = 0.0
-        self._charge_curve: Any = None
-        self._faults: Dict[str, Any] = {
-            "gps_loss": False,
-            "rf_interference": False,
-            "hostile_drone": False,
-            "link_loss": False,
-            "planner_heartbeat": False,
-            "camera": False,
-            "thermal": False,
-            "lidar": False,
-            "battery_fault": False,
-            "sortie_expiry": False,
-            "charge": False,
-            "wind": False,
-        }
-        self._fault_values: Dict[str, float] = {}
-        # ---- ground-link deadman latch (FM-03) ------------------------------
-        # The deadman used to silence its own trigger: _on_deadman reset the
-        # control source to 'auto', and SafetyManager.evaluate_link only trips
-        # for tracking/manual/planner, so from the very next tick the link
-        # looked fine, `datalink_lost` went False, and exactly one unverified
-        # RTL attempt was ever made. The latch lives HERE, in orchestrator
-        # state, so it survives the source reset; only a fresh, AUTHORIZED
-        # ground heartbeat clears it.
+        self._planner_tracking_tool: str = ""
+        self._planner_resume_context: Optional[Dict[str, Any]] = None
+        self._takeoff_target_alt: float = 0.0
+        self._takeoff_deadline_ms: float = 0.0
+        # Standoff the operator configured, restored when a plan releases the
+        # shared Limits it borrowed (FM-11).
+        self._operator_standoff_m: Optional[float] = None
+
+    def _init_link_state(self) -> None:
+        """The two links -- ground and FC -- and the latches over them.
+
+        The ground-link deadman latch lives HERE, in orchestrator state,
+        rather than in the SafetyManager (FM-03). The deadman used to silence
+        its own trigger: ``_on_deadman`` reset the control source to 'auto',
+        and ``SafetyManager.evaluate_link`` only trips for
+        tracking/manual/planner, so from the very next tick the link looked
+        fine, ``datalink_lost`` went False, and exactly one unverified RTL
+        attempt was ever made. Living out here, the latch survives the source
+        reset; only a fresh, AUTHORIZED ground heartbeat clears it.
+        """
         self._link_lost_latched: bool = False
         self._link_lost_since_ms: float = 0.0
         self._deadman_rtl_attempt_ms: float = 0.0
@@ -219,34 +319,50 @@ class Companion:
         # RTL is latched only once the FC is OBSERVED in RTL (FM-01/FM-02).
         self._rtl_requested_reason: str = ""
         self._rtl_last_attempt_ms: float = 0.0
-        # Standoff the operator configured, restored when a plan releases the
-        # shared Limits it borrowed (FM-11).
-        self._operator_standoff_m: Optional[float] = None
+        self._last_fc_heartbeat_sent_s: float = 0.0
+        self._last_planner_heartbeat_ms: float = 0.0
+        self._last_rf_interference_ms: float = 0.0
+        self._fc_link_lost: bool = False
+        self._fc_link_event: str = ""
+        self._fc_ready: bool = False
         # What we can prove about the FC geofence (FM-14/FM-15). None until an
         # upload has been attempted.
         self._fence_enforced: Optional[bool] = None
         self._fence_detail: str = ""
-        self._fc_link_lost: bool = False
-        self._fc_link_event: str = ""
-        # Tri-state: None = the FC layer has never reported on the WIND rail;
-        # False = it reported that no estimate exists; True = an estimate is
-        # live. Only an explicit False refuses an unattended dispatch (FM-20).
+        self._site_valid: bool = False
+
+    def _init_health_state(self) -> None:
+        """Every rail the health ladder reads, plus the SITL fault injectors.
+
+        THREE separate camera-health facts are kept apart (FM-25 / FM-100):
+          * ``_camera_source_valid``      -- the live capture rail this tick;
+          * ``_camera_fixture_valid``     -- the scripted staging assets at boot;
+          * ``_camera_observation_valid`` -- the last STAGED observation's RGB.
+        They used to be one field, so the 10 Hz perception loop (running a
+        'sim' source that cannot fail) overwrote the fixture verdict ~100 ms
+        after boot, and the startup health report was a lie by the time any
+        operator connected.
+
+        ``_wind_known`` is deliberately TRI-STATE: None = the FC layer has
+        never reported on the WIND rail; False = it reported that no estimate
+        exists; True = an estimate is live. Only an explicit False refuses an
+        unattended dispatch (FM-20).
+        """
+        self._failsafe_decision: Any = None
+        self._battery_snapshot: Any = None
+        self._nav_snapshot: Any = None
+        self._last_readiness_signature: Optional[Tuple[Any, ...]] = None
+        self._last_readiness_push_ms: float = 0.0
+        self._wind_above_since_ms: float = 0.0
         self._wind_known: Optional[bool] = None
+        self._route_through_clutter: bool = False
+        self._night_mission: bool = False
+        self._lidar_clear_reached: bool = False
+        self._was_armed: bool = False
+        self._charge_started_ms: float = 0.0
+        self._charge_curve: Any = None
         self._last_battery_event: str = ""
-        self._fc_ready: bool = False
         self._last_sim_truth: Optional[Tuple[float, float, float, float]] = None
-        self._planner_tracking_tool: str = ""
-        self._planner_resume_context: Optional[Dict[str, Any]] = None
-        self._takeoff_target_alt: float = 0.0
-        self._takeoff_deadline_ms: float = 0.0
-        # THREE separate camera-health facts, kept apart (FM-25 / FM-100):
-        #  * _camera_source_valid   -- the live capture rail this tick;
-        #  * _camera_fixture_valid  -- the scripted staging assets at startup;
-        #  * _camera_observation_valid -- the last STAGED observation's RGB rail.
-        # They used to be one field, so the 10 Hz perception loop (running a
-        # 'sim' source that cannot fail) overwrote the fixture verdict ~100 ms
-        # after boot and the startup health report was a lie by the time any
-        # operator connected.
         self._camera_source_valid: Optional[bool] = None
         self._camera_fixture_valid: Optional[bool] = None
         self._camera_observation_valid: Optional[bool] = None
@@ -254,11 +370,17 @@ class Companion:
         self._lidar_observation_valid: Optional[bool] = None
         self._sensor_fixture_gaps: Dict[str, Tuple[str, ...]] = {}
         self._detector_capabilities: Dict[str, Any] = {}
+        self._faults: Dict[str, Any] = {rail: False for rail in self._FAULT_RAILS}
+        self._fault_values: Dict[str, float] = {}
 
-        # ---- runtime envelope monitor (its own coroutine; see _envelope_loop)
-        # These three flags are the ONLY channel from the monitor to the flight
-        # state, and they are consumed exclusively by control/failsafe.py.
-        # Guidance never reads them; nothing writes them but _envelope_tick.
+    def _init_envelope_state(self) -> None:
+        """The monitor's outputs -- and NOTHING the monitor reads.
+
+        The first three flags are the ONLY channel from the runtime envelope
+        monitor to the flight state, and they are consumed exclusively by
+        control/failsafe.py. Guidance never reads them; nothing writes them
+        but ``_envelope_tick``.
+        """
         self._envelope_hold: bool = False
         self._envelope_rtl: bool = False
         self._envelope_escalate: bool = False
@@ -271,55 +393,52 @@ class Companion:
         self._peer_received_s: float = 0.0
         self._wind_mps: float = 0.0
 
-        # ---- attendance mode + mission record -------------------------------
+    def _init_mission_state(self) -> None:
+        """Attendance mode, the durable mission record, and the gimbal."""
         self._mission_record: Optional[Dict[str, Any]] = None
         self._sortie_starts_ms: List[int] = []
         self._mode_signature: Optional[Tuple[str, bool]] = None
-
-        # ---- gimbal ---------------------------------------------------------
         self._gimbal_reported_pitch: Optional[float] = None
         self._gimbal_leg_index: int = -1
         self._gimbal_last_sent: Optional[float] = None
 
-        self._stop = asyncio.Event()
-        self._tasks: List[asyncio.Task] = []
-
-        # ---- components (built in setup()) ----------------------------------
-        self.vehicle: Optional[Any] = None
-        self.source: Optional[Any] = None          # vision source
-        self.tracker: Optional[Any] = None
-        self.guidance: Optional[Any] = None
-        self.manual: Optional[Any] = None
-        self.planner: Optional[Any] = None         # control.PlannerExecutor
-        self.site: Optional[Any] = None            # site.Site (may be None)
-        self.staging_observer: Optional[Any] = None  # vision.StagingObserver
-        self.sensor_suite: Optional[Any] = None
-        self.battery_health: Optional[Any] = None
-        self.nav_health: Optional[Any] = None
-        self.failsafe: Optional[Any] = None
-        self.envelope: Optional[Any] = None        # control.envelope.EnvelopeMonitor
-        self.attendance: Optional[Any] = None      # control.mode.AttendanceMachine
-        self.unattended_envelope: Optional[Any] = None
-        self.gimbal: Optional[Any] = None          # control.gimbal.GimbalController
-        self.verifier: Optional[Any] = None        # security.CommandVerifier
-        self.safety: Optional[Any] = None
-        self.api: Optional[Any] = None
-        self.video: Optional[Any] = None
-
     # ======================================================================
     # Construction / teardown
     # ======================================================================
+    #: The build order, as phases. Order is a DEPENDENCY, not a preference:
+    #: the site model must exist before the planner and the envelope monitor
+    #: that read its geometry, and the safety manager before the API handlers
+    #: that consult it. Each phase is independently readable, and a phase that
+    #: degrades leaves ``None`` in its slots rather than aborting the boot.
+    _BUILD_PHASES = (
+        "_build_control_core",
+        "_build_site_layer",
+        "_build_health_layer",
+        "_build_supervision_layer",
+        "_build_io_layer",
+    )
+
     def setup(self) -> None:
-        """Instantiate every component. Pure-logic + API + safety are built
-        unconditionally; the hardware-facing Vehicle / vision / video degrade to
-        no-ops if their dependencies (pymavlink, camera, mediamtx) are absent so
-        the companion still boots into a safe held state."""
-        cfg = self.config
+        """Instantiate every component, in dependency order.
 
-        # --- pure-logic control core --------------------------------------
-        from .control.tracker import Tracker
+        Pure-logic + API + safety are built unconditionally; the
+        hardware-facing Vehicle / vision / video degrade to no-ops if their
+        dependencies (pymavlink, camera, mediamtx) are absent, so the
+        companion still boots into a safe held state.
+        """
+        for phase in self._BUILD_PHASES:
+            getattr(self, phase)()
+
+    def _build_control_core(self) -> None:
+        """The pure-logic core: tracker, guidance, manual pilot.
+
+        numpy + stdlib only. Nothing here touches I/O, which is why it is
+        unit-testable with no hardware and why it is built first.
+        """
         from .control.guidance import Guidance
+        from .control.tracker import Tracker
 
+        cfg = self.config
         self.tracker = Tracker(
             iou_threshold=cfg.tracking.iou_threshold,
             max_age=cfg.tracking.max_age,
@@ -336,18 +455,31 @@ class Companion:
         )
         self.manual = self._build_manual_pilot()
 
-        # --- site model + mission-plan executor + staging vision ----------
-        # (site is I/O and lives OUTSIDE control/; its data is passed into the
-        # pure-logic PlannerExecutor / StagingObserver as plain numbers.)
+    def _build_site_layer(self) -> None:
+        """Site model, then everything derived from it.
+
+        ``site`` does file I/O and lives OUTSIDE control/, so its data is
+        handed to the pure-logic PlannerExecutor / StagingObserver as plain
+        numbers. The load MUST precede the three builders below, each of which
+        reads the loaded geometry.
+        """
         self.site = self._load_site()
         self.planner = self._build_planner()
         self.staging_observer = self._build_staging_observer()
         self.sensor_suite = self._build_sensor_suite()
 
+    def _build_health_layer(self) -> None:
+        """Battery, navigation and the failsafe state machine.
+
+        The two ``require_*_telemetry`` flags are inverted SITL: on real
+        hardware, missing cell or temperature telemetry is a fault; in SITL it
+        is simply not modelled, and demanding it would ground every sim run.
+        """
         from .control.battery_health import BatteryHealth, BatteryPolicy
         from .control.failsafe import FailsafeMachine
         from .control.nav_health import NavHealth
 
+        cfg = self.config
         bat = cfg.battery
         self.battery_health = BatteryHealth(BatteryPolicy(
             nominal_endurance_s=bat.nominal_endurance_s,
@@ -364,24 +496,33 @@ class Companion:
         self.nav_health = NavHealth()
         self.failsafe = FailsafeMachine()
 
-        # --- runtime envelope monitor + attendance mode + gimbal -----------
+    def _build_supervision_layer(self) -> None:
+        """Envelope monitor, attendance mode, gimbal, verifier, safety manager.
+
+        These are the components that CONSTRAIN rather than fly: none of them
+        produces a setpoint, and none of them is reachable from guidance.
+        """
+        from .mavlink import SafetyManager
+
         self.envelope = self._build_envelope_monitor()
         self.attendance = self._build_attendance()
         self.unattended_envelope = self._build_unattended_envelope()
         self.gimbal = self._build_gimbal()
         self.verifier = self._build_verifier()
-
-        # --- safety manager (pure stdlib) ---------------------------------
-        from .mavlink import SafetyManager
         self.safety = SafetyManager(self.limits)
 
-        # --- vehicle (pymavlink; degrade if missing) ----------------------
-        self.vehicle = self._build_vehicle()
+    def _build_io_layer(self) -> None:
+        """The outward-facing rails: FC link, vision, control socket, video.
 
-        # --- vision source -------------------------------------------------
+        Built LAST so every handler the API server is wired to already has the
+        components it consults. The FC link and the vision source degrade to
+        ``None``; the control socket does not, because a companion no operator
+        can reach is worse than one with no camera.
+        """
+        cfg = self.config
+        self.vehicle = self._build_vehicle()
         self.source = self._build_vision_source()
 
-        # --- control WebSocket API ----------------------------------------
         from .api import ApiServer
         self.api = ApiServer(
             host=cfg.network.host,
@@ -404,22 +545,37 @@ class Companion:
             vehicle_id=cfg.vehicle_id,
             audit_path=self._audit_path(),
         )
-
-        # --- video stream --------------------------------------------------
         self.video = self._build_video()
+
+    @staticmethod
+    def _optional(what: str, factory, *, degraded: str) -> Optional[Any]:
+        """Construct one degradable component, or return ``None`` saying why.
+
+        Two failures are reported differently on purpose. An ImportError is
+        an ABSENT dependency -- expected on a dev box, a warning. Anything the
+        factory itself raises is a construction BUG and gets a traceback. The
+        pattern is shared by every hardware-facing and optional-control
+        component so the companion always boots into a held state rather than
+        refusing to boot at all.
+        """
+        try:
+            return factory()
+        except ImportError:
+            log.warning("%s unavailable; %s", what, degraded)
+        except Exception:
+            log.exception("failed to construct %s; %s", what, degraded)
+        return None
 
     def _build_manual_pilot(self) -> Optional[Any]:
         """Build the ManualPilot from the control package (documented path)."""
-        try:
+        def build():
             from .control.manual import ManualPilot  # control-core agent's module
-        except Exception:
-            log.warning("control.manual.ManualPilot unavailable; manual piloting disabled")
-            return None
-        try:
             return ManualPilot()
-        except Exception:
-            log.exception("failed to construct ManualPilot; manual piloting disabled")
-            return None
+
+        return self._optional(
+            "control.manual.ManualPilot", build,
+            degraded="manual piloting disabled",
+        )
 
     def _audit_path(self) -> str:
         """Where this vehicle's hash-chained audit log lives.
@@ -568,26 +724,26 @@ class Companion:
         )
 
     def _build_vehicle(self) -> Optional[Any]:
+        """The FC link. Absent pymavlink degrades to a held, link-less boot."""
         cfg = self.config
-        try:
+
+        def build():
             from .mavlink import Vehicle  # lazily imports pymavlink
-        except Exception:
-            log.warning("mavlink.Vehicle unavailable (pymavlink missing?); FC link disabled")
-            return None
-        try:
             return Vehicle(
                 connection=cfg.fc.connection,
                 baud=cfg.fc.baud,
                 source_system=cfg.fc.gcs_sysid,
                 target_system=cfg.fc.sysid,
                 # goto_global clamps to THIS envelope (the global-position
-                # path's second clamp); share the live Limits object so
-                # runtime edits (setMaxSpeed) apply immediately.
+                # path's second clamp); share the live Limits object BY
+                # REFERENCE so runtime edits (setMaxSpeed) apply immediately.
                 limits=self.limits,
             )
-        except Exception:
-            log.exception("failed to construct Vehicle; FC link disabled")
-            return None
+
+        return self._optional(
+            "mavlink.Vehicle (pymavlink missing?)", build,
+            degraded="FC link disabled",
+        )
 
     def _load_site(self) -> Optional[Any]:
         """Load the site model (docs/SITE_CONTRACT.md): perimeter geofence,
@@ -726,16 +882,31 @@ class Companion:
             log.exception("failed to construct staged sensor suite")
             return None
 
+    #: Camera sources that need no hardware at all.
+    _SYNTHETIC_CAMERA_SOURCES = frozenset({"sim", "mock"})
+
     def _build_vision_source(self) -> Optional[Any]:
+        """The perception front end: a synthetic source, or a real camera.
+
+        The real-camera path separates THREE failure classes, and the
+        separation stays in this one method because it is what the honesty
+        tests read. Missing extra, wiring bug and runtime failure each get
+        their own branch: the parameter is ``conf_threshold``, and calling it
+        ``conf=`` raised TypeError on EVERY real-camera build. A blanket
+        ``except`` reported that construction bug as "no hardware", so
+        perception was silently disabled for the whole flight with a log line
+        as the only evidence (FM-101).
+        """
         cfg = self.config
-        if cfg.camera.source in ("sim", "mock"):
-            try:
+        if cfg.camera.source in self._SYNTHETIC_CAMERA_SOURCES:
+            def build_sim():
                 from .vision import SimTargetSource
                 return SimTargetSource()
-            except Exception:
-                log.exception("failed to build SimTargetSource; perception disabled")
-                return None
-        # real camera path: Capture + PersonDetector
+
+            return self._optional(
+                "vision.SimTargetSource", build_sim,
+                degraded="perception disabled",
+            )
         try:
             from .vision import Capture, PersonDetector
         except ImportError:
@@ -747,21 +918,16 @@ class Companion:
             )
             return None
         try:
-            cap = Capture(
+            capture = Capture(
                 source=cfg.camera.source,
                 device=cfg.camera.device,
                 width=cfg.camera.width,
                 height=cfg.camera.height,
                 fps=cfg.camera.fps,
             )
-            det = PersonDetector(
+            detector = PersonDetector(
                 model_path=cfg.detector.model_path,
                 engine_path=cfg.detector.engine_path,
-                # The parameter is conf_threshold. Calling it `conf=` raised
-                # TypeError on EVERY real-camera build, and the blanket except
-                # below reported that construction bug as "no hardware" -- so
-                # perception was silently disabled for the whole flight, with a
-                # log line as the only evidence (FM-101).
                 conf_threshold=cfg.detector.conf,
             )
         except TypeError:
@@ -774,12 +940,14 @@ class Companion:
         except Exception:
             log.exception("failed to build camera+detector; perception disabled")
             return None
-        return _CameraSource(cap, det)
+        return _CameraSource(capture, detector)
 
     def _build_video(self) -> Optional[Any]:
+        """The RTSP/WebRTC rail. Never gates flight, so it degrades quietly."""
         cfg = self.config
-        try:
-            from .stream import VideoStream, StreamConfig
+
+        def build():
+            from .stream import StreamConfig, VideoStream
             return VideoStream(StreamConfig(
                 source=cfg.camera.source,
                 device=cfg.camera.device,
@@ -791,26 +959,24 @@ class Companion:
                 rtsp_port=cfg.network.video_port,
                 webrtc_port=cfg.network.webrtc_port,
             ))
-        except Exception:
-            log.exception("failed to build VideoStream; video disabled")
-            return None
+
+        return self._optional("stream.VideoStream", build, degraded="video disabled")
 
     # ======================================================================
     # Run / shutdown
     # ======================================================================
     async def run(self) -> None:
-        """Start everything and run until stopped. Safe state on any error."""
-        self.setup()
+        """Bring the vehicle up in phases, then run until stopped.
 
-        # Connect the FC first; default to a held setpoint regardless.
-        fc_connected = False
-        if self.vehicle is not None:
-            try:
-                await _maybe_await(self.vehicle.connect())
-                fc_connected = True
-                log.info("connected to FC: %s", self.config.fc.connection)
-            except Exception:
-                log.exception("FC connect failed; continuing in degraded/SITL mode")
+        The phase order is the boot invariant: the aircraft is held before
+        anything can command it, the control socket is up before the fence and
+        failsafe parameters are pushed (so their outcome is reportable), and
+        the loops start last -- nothing ticks against a half-built system.
+        Every phase degrades rather than aborts: a companion that boots into a
+        held state with no FC is still safer than one that does not boot.
+        """
+        self.setup()
+        fc_connected = await self._connect_flight_controller()
 
         if self.api is not None:
             await self.api.start()
@@ -821,58 +987,85 @@ class Companion:
             await self._apply_failsafe_params()
             await self._upload_site_fence()
 
-        if self.video is not None:
-            try:
-                self.video.start()
-            except Exception:
-                log.exception("video stream failed to start (non-fatal)")
+        self._start_video()
 
         # Launch the task graph. The envelope monitor is its OWN task: it must
         # keep evaluating even if perception stalls or the control loop is
-        # held, and it must not be schedulable by anything it watches.
+        # held, and it must not be schedulable by anything it watches. The four
+        # names are spelled out here rather than built from a table because
+        # test_envelope_wiring reads THIS source to prove the monitor got a
+        # task of its own.
         self._tasks = [
             asyncio.create_task(self._telemetry_loop(), name="telemetry"),
             asyncio.create_task(self._perception_loop(), name="perception"),
             asyncio.create_task(self._control_loop(), name="control"),
             asyncio.create_task(self._envelope_loop(), name="envelope"),
         ]
+
         log.info("companion running (sitl=%s)", self.config.sitl)
         await self._status("info", "Companion online")
-
         try:
             await self._stop.wait()
         finally:
             await self.shutdown()
 
+    async def _connect_flight_controller(self) -> bool:
+        """Open the FC link. A failure is degraded operation, not a stop."""
+        if self.vehicle is None:
+            return False
+        try:
+            await _maybe_await(self.vehicle.connect())
+        except Exception:
+            log.exception("FC connect failed; continuing in degraded/SITL mode")
+            return False
+        log.info("connected to FC: %s", self.config.fc.connection)
+        return True
+
+    def _start_video(self) -> None:
+        """Video is a convenience rail: it never gates flight."""
+        if self.video is None:
+            return
+        try:
+            self.video.start()
+        except Exception:
+            log.exception("video stream failed to start (non-fatal)")
+
     async def shutdown(self) -> None:
-        """Stop all tasks, zero the setpoint, hold, and tear down components."""
+        """Stop all tasks, zero the setpoint, hold, and tear down components.
+
+        Order is the whole point: the loops stop FIRST so nothing re-commands
+        motion behind the hold, the hold goes out SECOND, and only then are
+        the I/O rails closed. Every teardown step is independently guarded --
+        a component that cannot close must not strand the ones after it.
+        """
         log.info("companion shutting down -> safe state")
-        for t in self._tasks:
-            t.cancel()
-        for t in self._tasks:
-            try:
-                await t
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._tasks = []
+        await self._cancel_loops()
 
         # Default to the safe state: zero setpoint + hold.
         await self._send_hold("shutdown")
 
         if self.video is not None:
+            _safe_call(getattr(self.video, "stop", None))
+        for closer in (
+            self.api.stop if self.api is not None else None,
+            self.vehicle.close if self.vehicle is not None else None,
+        ):
+            if closer is None:
+                continue
             try:
-                self.video.stop()
+                await _maybe_await(closer())
             except Exception:
                 pass
-        if self.api is not None:
+
+    async def _cancel_loops(self) -> None:
+        """Cancel every loop task and wait for it to actually be gone."""
+        tasks, self._tasks = self._tasks, []
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
             try:
-                await self.api.stop()
-            except Exception:
-                pass
-        if self.vehicle is not None:
-            try:
-                await _maybe_await(self.vehicle.close())
-            except Exception:
+                await task
+            except (asyncio.CancelledError, Exception):
                 pass
 
     def request_stop(self) -> None:
@@ -881,71 +1074,144 @@ class Companion:
     # ======================================================================
     # Task 1: telemetry pump @ 10 Hz
     # ======================================================================
-    async def _telemetry_loop(self) -> None:
-        period = 1.0 / TELEMETRY_HZ
+    async def _drive(
+        self,
+        cadence: _Cadence,
+        tick: Callable[[float], Awaitable[None]],
+        on_failure: _TickFailure,
+    ) -> None:
+        """Run one loop at ``cadence`` until the stop event is set.
+
+        The single driver behind all four tasks. It owns exactly three things:
+        the stop condition, the per-tick delta, and the promise that a raising
+        tick is contained -- it never escapes to cancel the task, and each loop
+        supplies its own safe-state reaction through ``on_failure``.
+        """
         while not self._stop.is_set():
             t0 = time.monotonic()
+            dt = cadence.tick(t0)
             try:
-                await self._telemetry_tick()
-            except Exception:
-                log.exception("telemetry tick failed")
-            await self._sleep_remaining(t0, period)
+                await tick(dt)
+            except Exception as exc:
+                await on_failure(exc)
+            await self._sleep_remaining(t0, cadence.period)
+
+    @staticmethod
+    def _log_tick_failure(what: str) -> _TickFailure:
+        """The default reaction: record it and take the next tick."""
+        async def report(exc: BaseException) -> None:
+            log.error("%s tick failed", what, exc_info=exc)
+        return report
+
+    async def _telemetry_loop(self) -> None:
+        await self._drive(
+            _Cadence("telemetry", TELEMETRY_HZ),
+            lambda _dt: self._telemetry_tick(),
+            self._log_tick_failure("telemetry"),
+        )
 
     async def _telemetry_tick(self) -> None:
-        telem: Optional[Dict[str, Any]] = None
-        if self.vehicle is not None:
-            heartbeat_now = time.monotonic()
-            # STOP the 1 Hz MAV_TYPE_GCS heartbeat while the ground-link
-            # deadman is tripped. The companion IS the FC's GCS, so pumping it
-            # unconditionally kept FS_GCS_ENABLE's timer alive and made the
-            # ground outage invisible to the firmware -- the documented
-            # "ArduPilot GCS failsafe -> RTL" backstop could never fire, because
-            # this process was suppressing its own trigger (FM-03).
-            if (
-                hasattr(self.vehicle, "send_heartbeat")
-                and not self._link_lost_latched
-                and heartbeat_now - self._last_fc_heartbeat_sent_s >= 1.0
-            ):
-                try:
-                    await _maybe_await(self.vehicle.send_heartbeat())
-                    self._last_fc_heartbeat_sent_s = heartbeat_now
-                except Exception:
-                    log.exception("companion MAVLink heartbeat failed")
-            try:
-                self._vehicle_state = await _maybe_await(self.vehicle.get_state())
-            except Exception:
-                pass
-            try:
-                telem = await _maybe_await(self.vehicle.get_telemetry())
-            except Exception:
-                telem = None
+        """Read the FC, run the health ladder, stamp the frame, push it.
 
-        if telem is None:
-            telem = _telemetry_from_state(self._vehicle_state)
+        The frame is assembled in stages so each stamp has one owner: the FC
+        layer supplies what it can see, the site supplies home, and the
+        orchestrator overwrites the fields it -- and only it -- is the
+        authority for (the active control source above all).
+        """
+        await self._pump_fc_heartbeat()
+        telem = await self._read_fc_telemetry()
+        home_distance_m = self._stamp_home(telem)
 
-        home_distance_m = math.inf
-        if self.site is not None:
-            home_distance_m = _great_circle_distance_m(
-                self._vehicle_state.lat,
-                self._vehicle_state.lon,
-                self.site.home.lat,
-                self.site.home.lon,
-            )
-            home = telem.setdefault("home", {})
-            home["lat"] = self.site.home.lat
-            home["lon"] = self.site.home.lon
-            if math.isfinite(home_distance_m):
-                home["distance"] = home_distance_m
-
+        # The health ladder runs BEFORE the stamps that report its verdict.
         await self._health_tick(telem, home_distance_m=home_distance_m)
 
-        # Stamp the authoritative active control source (single source of truth).
+        self._stamp_identity(telem)
+        self._stamp_health(telem)
+        self._stamp_battery(telem)
+        self._stamp_gimbal(telem)
+        if self.api is not None:
+            await self.api.push_telemetry(telem)
+
+    async def _pump_fc_heartbeat(self) -> None:
+        """The companion's own 1 Hz MAV_TYPE_GCS heartbeat -- SUPPRESSED on a
+        tripped ground link.
+
+        The companion IS the FC's GCS, so pumping this unconditionally kept
+        FS_GCS_ENABLE's timer alive and made the ground outage invisible to
+        the firmware: the documented "ArduPilot GCS failsafe -> RTL" backstop
+        could never fire, because this process was suppressing its own trigger
+        (FM-03).
+        """
+        vehicle = self.vehicle
+        if vehicle is None or not hasattr(vehicle, "send_heartbeat"):
+            return
+        if self._link_lost_latched:
+            return
+        now = time.monotonic()
+        if now - self._last_fc_heartbeat_sent_s < 1.0:
+            return
+        try:
+            await _maybe_await(vehicle.send_heartbeat())
+        except Exception:
+            log.exception("companion MAVLink heartbeat failed")
+            return
+        self._last_fc_heartbeat_sent_s = now
+
+    async def _read_fc_telemetry(self) -> Dict[str, Any]:
+        """Refresh the cached VehicleState and return a telemetry frame.
+
+        Each read is independently guarded: a Vehicle that can report state
+        but not a full telemetry dict still gets a well-formed frame built
+        from the state, rather than no frame at all.
+        """
+        vehicle = self.vehicle
+        if vehicle is None:
+            return _telemetry_from_state(self._vehicle_state)
+        try:
+            self._vehicle_state = await _maybe_await(vehicle.get_state())
+        except Exception:
+            pass
+        try:
+            telem = await _maybe_await(vehicle.get_telemetry())
+        except Exception:
+            telem = None
+        return telem if telem is not None else _telemetry_from_state(self._vehicle_state)
+
+    def _stamp_home(self, telem: Dict[str, Any]) -> float:
+        """Overwrite ``home`` with the SITE home and return the distance to it.
+
+        Returns ``inf`` when there is no site model, or when the position
+        cannot be placed -- the health ladder reads that as "not near home",
+        which is the conservative answer.
+        """
+        if self.site is None:
+            return math.inf
+        home_lat, home_lon = self.site.home.lat, self.site.home.lon
+        distance = _great_circle_distance_m(
+            self._vehicle_state.lat, self._vehicle_state.lon, home_lat, home_lon,
+        )
+        home = telem.setdefault("home", {})
+        home["lat"] = home_lat
+        home["lon"] = home_lon
+        if math.isfinite(distance):
+            home["distance"] = distance
+        return distance
+
+    def _stamp_identity(self, telem: Dict[str, Any]) -> None:
+        """Who this frame is from, and who is flying.
+
+        ``controlSource`` and ``vehicleId`` are ASSIGNED, not defaulted: the
+        orchestrator is the single source of truth for both, and an FC layer
+        that guessed at either must not win (PRD 11).
+        """
         telem["controlSource"] = self._control_source
+        telem["vehicleId"] = self.config.vehicle_id
         telem.setdefault("type", "telemetry")
         telem.setdefault("ts", _now_ms())
-        telem["vehicleId"] = self.config.vehicle_id
-        nav = self._nav_snapshot
-        telem["navSource"] = getattr(nav, "source", "gps")
+
+    def _stamp_health(self, telem: Dict[str, Any]) -> None:
+        """Navigation source, GPS health digest, and the failsafe verdict."""
+        telem["navSource"] = getattr(self._nav_snapshot, "source", "gps")
         gps = telem.get("gps") or {}
         telem["gpsHealth"] = {
             "fix": int(gps.get("fixType", 0)),
@@ -955,36 +1221,45 @@ class Companion:
         decision = self._failsafe_decision
         telem["failsafeState"] = getattr(decision, "state", "none")
         telem["failsafeReason"] = getattr(decision, "reason", "")
-        if self._battery_snapshot is not None:
-            bat = self._battery_snapshot
-            telem["battery"] = {
-                "soc_pct": bat.soc_pct,
-                "voltage_v": bat.voltage_v,
-                "current_a": bat.current_a,
-                "cell_delta_v": bat.cell_delta_v,
-                "temp_c": bat.temp_c,
-                "remaining_s": bat.remaining_s,
-                "charge_state": bat.charge_state,
-                "voltage": bat.voltage_v,
-                "current": bat.current_a,
-                "remaining": bat.soc_pct,
-                **({"fault": bat.fault} if bat.fault else {}),
-            }
-            telem["sortie"] = (
-                {
-                    "elapsed_s": bat.elapsed_sortie_s,
-                    "cap_s": bat.cap_s,
-                    "must_rtl_by_s": bat.must_rtl_by_s,
-                }
-                if self._vehicle_state.armed else None
-            )
-        gimbal_pitch = self._gimbal_pitch_for_telemetry()
-        if gimbal_pitch is not None:
-            # Optional in the contract: an airframe with no commandable mount
-            # omits the field rather than reporting a fictional 0.
-            telem["gimbal"] = {"pitchDeg": round(float(gimbal_pitch), 2)}
-        if self.api is not None:
-            await self.api.push_telemetry(telem)
+
+    def _stamp_battery(self, telem: Dict[str, Any]) -> None:
+        """The battery block plus the sortie budget.
+
+        The compatibility aliases (voltage/current/remaining) are emitted
+        alongside the canonical fields because the contract still declares
+        both while existing panels migrate. ``sortie`` is None on the ground:
+        a budget only means something once a sortie is under way.
+        """
+        bat = self._battery_snapshot
+        if bat is None:
+            return
+        battery: Dict[str, Any] = {
+            "soc_pct": bat.soc_pct,
+            "voltage_v": bat.voltage_v,
+            "current_a": bat.current_a,
+            "cell_delta_v": bat.cell_delta_v,
+            "temp_c": bat.temp_c,
+            "remaining_s": bat.remaining_s,
+            "charge_state": bat.charge_state,
+            "voltage": bat.voltage_v,
+            "current": bat.current_a,
+            "remaining": bat.soc_pct,
+        }
+        if bat.fault:
+            battery["fault"] = bat.fault
+        telem["battery"] = battery
+        telem["sortie"] = {
+            "elapsed_s": bat.elapsed_sortie_s,
+            "cap_s": bat.cap_s,
+            "must_rtl_by_s": bat.must_rtl_by_s,
+        } if self._vehicle_state.armed else None
+
+    def _stamp_gimbal(self, telem: Dict[str, Any]) -> None:
+        """Optional in the contract: an airframe with no commandable mount
+        omits the field rather than reporting a fictional 0."""
+        pitch = self._gimbal_pitch_for_telemetry()
+        if pitch is not None:
+            telem["gimbal"] = {"pitchDeg": round(float(pitch), 2)}
 
     def _gimbal_pitch_for_telemetry(self) -> Optional[float]:
         """Reported mount pitch, falling back to the commanded angle.
@@ -1722,58 +1997,75 @@ class Companion:
     # Task 2: perception + tracking @ ~10 Hz
     # ======================================================================
     async def _perception_loop(self) -> None:
-        period = 1.0 / TRACKING_HZ
-        while not self._stop.is_set():
-            t0 = time.monotonic()
-            try:
-                await self._perception_tick()
-            except Exception:
-                log.exception("perception tick failed")
-            await self._sleep_remaining(t0, period)
+        await self._drive(
+            _Cadence("perception", TRACKING_HZ),
+            lambda _dt: self._perception_tick(),
+            self._log_tick_failure("perception"),
+        )
 
     async def _perception_tick(self) -> None:
-        observations: List[TargetObservation] = []
-        if self.source is not None:
-            try:
-                observations = await _maybe_await(self.source.observe())
-            except FrameUnavailable as exc:
-                # A MISSING or FAILED frame is "no observation", NOT a healthy
-                # frame containing zero tracks. The two support opposite
-                # incident verdicts: a valid empty frame supports false_alarm,
-                # a dead camera must escalate. _CameraSource used to swallow a
-                # failed read and return [], which set the rail HEALTHY and
-                # could close an incident on evidence never captured (FM-100).
-                observations = []
-                if self._camera_source_valid is not False:
-                    await self._health_event("camera", "failed", f"no observation: {exc}")
-                self._camera_source_valid = False
-            except Exception:
-                log.exception("vision source failed")
-                observations = []
-                if self._camera_source_valid is not False:
-                    await self._health_event(
-                        "camera", "failed", "no observation: vision source raised"
-                    )
-                self._camera_source_valid = False
-            else:
-                if self._camera_source_valid is False:
-                    await self._health_event(
-                        "camera", "ready", "camera frames flowing again"
-                    )
-                self._camera_source_valid = True
+        """One perception pass: gather observations, then publish tracking.
 
-        # Staging-point vision: ONLY while a mission plan is flying. The
-        # observer emits still-image detections when the vehicle arrives at a
-        # site staging point; they ride the normal tracker -> 'tracking' path.
-        if self._planner_engaged and self.staging_observer is not None:
-            try:
-                st = self._vehicle_state
-                extra = self.staging_observer.observe(st.lat, st.lon, st.relAlt)
-                if extra:
-                    observations = list(observations) + list(extra)
-            except Exception:
-                log.exception("staging observer failed")
+        Split into three collectors so the LIVE camera rail and the two
+        plan-only staging rails cannot share a failure mode. Each collector
+        owns its own health reporting and returns observations; none of them
+        can take the tick down.
+        """
+        observations = await self._observe_live_camera()
+        observations.extend(self._observe_staging_points())
+        await self._observe_staged_sensors()
+        await self._publish_tracking(observations)
 
+    async def _observe_live_camera(self) -> List[TargetObservation]:
+        """The live vision source, with the camera health rail it drives.
+
+        A MISSING or FAILED frame is "no observation", NOT a healthy frame
+        containing zero tracks. The two support opposite incident verdicts: a
+        valid empty frame supports false_alarm, a dead camera must escalate.
+        _CameraSource used to swallow a failed read and return [], which set
+        the rail HEALTHY and could close an incident on evidence never
+        captured (FM-100).
+        """
+        if self.source is None:
+            return []
+        try:
+            observations = await _maybe_await(self.source.observe())
+        except FrameUnavailable as exc:
+            await self._camera_rail_failed(f"no observation: {exc}")
+            return []
+        except Exception:
+            log.exception("vision source failed")
+            await self._camera_rail_failed("no observation: vision source raised")
+            return []
+        # Only a returned frame -- empty or not -- restores the rail.
+        if self._camera_source_valid is False:
+            await self._health_event("camera", "ready", "camera frames flowing again")
+        self._camera_source_valid = True
+        return list(observations or [])
+
+    async def _camera_rail_failed(self, detail: str) -> None:
+        """Mark the live camera rail down, announcing the EDGE only once."""
+        if self._camera_source_valid is not False:
+            await self._health_event("camera", "failed", detail)
+        self._camera_source_valid = False
+
+    def _observe_staging_points(self) -> List[TargetObservation]:
+        """Staging-point vision: ONLY while a mission plan is flying.
+
+        The observer emits still-image detections when the vehicle arrives at
+        a site staging point; they ride the normal tracker -> 'tracking' path.
+        """
+        if not (self._planner_engaged and self.staging_observer is not None):
+            return []
+        st = self._vehicle_state
+        try:
+            return list(self.staging_observer.observe(st.lat, st.lon, st.relAlt) or [])
+        except Exception:
+            log.exception("staging observer failed")
+            return []
+
+    async def _observe_staged_sensors(self) -> None:
+        """The multi-sensor staged observation rail (plan-only, own wire type)."""
         if self._planner_engaged and self.sensor_suite is not None:
             try:
                 staged = await asyncio.to_thread(
@@ -1832,54 +2124,71 @@ class Companion:
                 log.exception("staged multi-sensor observation failed")
                 await self._health_event("camera", "failed", "no observation")
 
-        if self.tracker is None:
-            return
-        # ROUTE BY CLASS. The person-following tracker and the 'tracking' wire
-        # message carry no class, so a vehicle or structure box spliced in from
-        # the staging rail was rendered by the UI as a locked PERSON target
-        # (FM-122). Non-person detections stay on the observation rail, which
-        # does carry a class.
-        person_observations = [
+    @staticmethod
+    def _person_observations(
+        observations: List[TargetObservation],
+    ) -> List[TargetObservation]:
+        """ROUTE BY CLASS: only ``person`` boxes reach the person tracker.
+
+        The person-following tracker and the 'tracking' wire message carry no
+        class, so a vehicle or structure box spliced in from the staging rail
+        was rendered by the UI as a locked PERSON target (FM-122). Non-person
+        detections stay on the observation rail, which does carry a class.
+        """
+        kept = [
             obs for obs in observations
             if str(getattr(obs, "cls", "person")).strip().lower() == "person"
         ]
-        dropped = len(observations) - len(person_observations)
+        dropped = len(observations) - len(kept)
         if dropped:
             log.debug(
                 "%d non-person staging observation(s) kept off the person-tracking "
                 "wire", dropped,
             )
-        result = self.tracker.update(person_observations, ts=time.time())
-        self._latest_tracking = result
+        return kept
 
-        # Build + push the contract tracking message.
+    async def _publish_tracking(self, observations: List[TargetObservation]) -> None:
+        """Feed the tracker and broadcast the contract 'tracking' message."""
+        if self.tracker is None:
+            return
+        result = self.tracker.update(
+            self._person_observations(observations), ts=time.time()
+        )
+        self._latest_tracking = result
         if self.api is not None:
             await self.api.push_tracking(self._tracking_message(result))
 
+    @staticmethod
+    def _detected_target(track: Any) -> Dict[str, Any]:
+        """One contract DetectedTarget: bbox normalised 0..1, [x, y, w, h]."""
+        box = track.bbox
+        return {
+            "id": int(track.id),
+            "bbox": [float(box[0]), float(box[1]), float(box[2]), float(box[3])],
+            "confidence": float(track.confidence),
+            "isLocked": bool(track.is_locked),
+        }
+
     def _tracking_message(self, result: Any) -> Dict[str, Any]:
-        targets = [
-            {
-                "id": int(t.id),
-                "bbox": [float(t.bbox[0]), float(t.bbox[1]),
-                         float(t.bbox[2]), float(t.bbox[3])],
-                "confidence": float(t.confidence),
-                "isLocked": bool(t.is_locked),
-            }
-            for t in result.targets
-        ]
-        state = result.state.value if hasattr(result.state, "value") else str(result.state)
+        """The contract 'tracking' frame.
+
+        ``standoffDistance`` and ``maxSpeed`` are the LIVE limits, not the
+        configured ones: the operator's ring is whatever the envelope says it
+        is right now, and reporting the config value would let the UI draw a
+        ring the aircraft is not actually holding. ``estimatedDistance`` stays
+        None rather than 0 when there is no range -- "we do not know" and
+        "you are on top of the subject" must never render the same.
+        """
+        distance = result.estimated_distance
         return {
             "type": "tracking",
             "ts": _now_ms(),
             "vehicleId": self.config.vehicle_id,
-            "state": state,
-            "targets": targets,
+            "state": _wire_value(result.state),
+            "targets": [self._detected_target(t) for t in result.targets],
             "lockedTargetId": result.locked_target_id,
             "standoffDistance": float(self.limits.standoff),
-            "estimatedDistance": (
-                None if result.estimated_distance is None
-                else float(result.estimated_distance)
-            ),
+            "estimatedDistance": None if distance is None else float(distance),
             "maxSpeed": float(self.limits.max_speed),
         }
 
@@ -1895,20 +2204,27 @@ class Companion:
         safe state on any exception" rule the control loop follows, applied to
         the component whose whole job is knowing where the edges are.
         """
-        period = 1.0 / max(1.0, float(self.config.envelope.hz))
-        while not self._stop.is_set():
-            t0 = time.monotonic()
-            try:
-                await self._envelope_tick()
-            except Exception:
-                log.exception("envelope tick failed -> request hold")
-                self._envelope_hold = True
-                self._envelope_rtl = False
-                self._envelope_speed_scale = 0.0
-                await self._health_event(
-                    "envelope", "unavailable", "envelope monitor tick failed"
-                )
-            await self._sleep_remaining(t0, period)
+        await self._drive(
+            _Cadence("envelope", max(1.0, float(self.config.envelope.hz))),
+            lambda _dt: self._envelope_tick(),
+            self._envelope_tick_failed,
+        )
+
+    async def _envelope_tick_failed(self, exc: BaseException) -> None:
+        """A monitor that cannot evaluate must not leave its last verdict up.
+
+        Not knowing where the edges are is indistinguishable, from the
+        aircraft's point of view, from being at one. So the failure path asks
+        for the same thing a breach would: stop moving, and say so in the
+        audited record.
+        """
+        log.error("envelope tick failed -> request hold", exc_info=exc)
+        self._envelope_hold = True
+        self._envelope_rtl = False
+        self._envelope_speed_scale = 0.0
+        await self._health_event(
+            "envelope", "unavailable", "envelope monitor tick failed"
+        )
 
     async def _envelope_tick(self) -> None:
         """One monitor evaluation: sample -> decision -> failsafe request + wire."""
@@ -2073,149 +2389,237 @@ class Companion:
     # ======================================================================
     # Task 3: control loop @ 10-20 Hz -- the ONE active control source wins
     # ======================================================================
+    #: The arbitration ladder, in priority order. Each name is an async method
+    #: taking ``dt`` and returning True when it has FULLY handled the tick --
+    #: emitted whatever setpoint it wanted, or deliberately emitted nothing.
+    #: The order is the safety argument, written down once:
+    #:   e-stop      beats everything, including a hands-on operator;
+    #:   deadman     beats the operator it can no longer hear;
+    #:   manual      beats every automated hold below it;
+    #:   failsafe    beats the takeoff window (FM-04) and all guidance;
+    #:   takeoff     suppresses only the idle EMISSION, never the ladder;
+    #:   override    is the SITL monitor-independence hook, below the monitor.
+    #: Anything that clears the whole ladder reaches source arbitration.
+    _ARBITRATION = (
+        "_arb_emergency_stop",
+        "_arb_ground_link",
+        "_arb_manual",
+        "_arb_failsafe",
+        "_arb_takeoff_window",
+        "_arb_test_override",
+    )
+
     async def _control_loop(self) -> None:
-        period = 1.0 / CONTROL_HZ
-        last = time.monotonic()
-        while not self._stop.is_set():
-            t0 = time.monotonic()
-            dt = max(0.0, t0 - last)
-            last = t0
-            try:
-                await self._control_tick(dt)
-            except Exception:
-                # SAFE DEFAULT: any control-tick error -> hold.
-                log.exception("control tick failed -> hold")
-                await self._send_hold("control error")
-            await self._sleep_remaining(t0, period)
+        await self._drive(
+            _Cadence("control", CONTROL_HZ),
+            self._control_tick,
+            self._control_tick_failed,
+        )
+
+    async def _control_tick_failed(self, exc: BaseException) -> None:
+        """SAFE DEFAULT: any control-tick error -> hold."""
+        log.error("control tick failed -> hold", exc_info=exc)
+        await self._send_hold("control error")
 
     async def _control_tick(self, dt: float) -> None:
-        # The mount is pointed every tick, whatever the flight state: where the
-        # camera looks is never a control input, so it is decided here and
-        # cannot feed back into guidance.
+        """One 20 Hz pass: point the mount, walk the ladder, then arbitrate.
+
+        The mount is pointed every tick, whatever the flight state: where the
+        camera looks is never a control input, so it is decided up front and
+        cannot feed back into guidance.
+        """
         await self._gimbal_tick(dt)
-
-        # E-stop latch: while latched, never command motion. It clears only on
-        # the observed physical state (disarmed, on the ground), never inside
-        # the coroutine that set it (FM-24).
-        self._maybe_clear_estop()
-        if self._estop_latched:
-            await self._send_hold("emergency stop latched")
-            return
-
-        # --- ground-link deadman --------------------------------------------
-        # The LATCH is checked alongside the live evaluation: once tripped the
-        # deadman keeps acting even though the release reset the control source
-        # to 'auto', which is precisely the state evaluate_link stops tripping
-        # on (FM-03).
-        if self.safety is not None:
-            link = self.safety.evaluate_link(
-                self._control_source,
-                airborne=self._vehicle_state.airborne,
-            )
-            if link.tripped or self._link_lost_latched:
-                await self._on_deadman(link)
+        for stage in self._ARBITRATION:
+            if await getattr(self, stage)(dt):
                 return
+        await self._fly_active_source(dt)
 
-        # A hands-on operator is authoritative after the link watchdog passes.
-        # Automated holds never overwrite fresh manual sticks.
-        if self._manual_engaged:
-            sp = self._clamp_setpoint(await self._manual_setpoint(dt))
-            await self._send_setpoint(sp)
-            return
+    # ---- arbitration ladder ----------------------------------------------
+    async def _arb_emergency_stop(self, dt: float) -> bool:
+        """While latched, never command motion.
 
-        # --- FAILSAFE LADDER ------------------------------------------------
-        # Evaluated BEFORE the takeoff window, and the window now gates only
-        # the idle setpoint EMISSION. The early return used to sit above this
-        # block, so every takeoff suspended the entire ladder for up to 60 s --
-        # battery/sortie/wind RTL, GPS-denied hold, hostile-drone hold, LiDAR
-        # climb and site-invalid refuse were all inert during the climb, and
-        # the window is longest exactly when a climb is failing (FM-04).
+        The latch clears only on the observed physical state (disarmed, on the
+        ground), never inside the coroutine that set it (FM-24).
+        """
+        self._maybe_clear_estop()
+        if not self._estop_latched:
+            return False
+        await self._send_hold("emergency stop latched")
+        return True
+
+    async def _arb_ground_link(self, dt: float) -> bool:
+        """Ground-link deadman: the LATCH is checked beside the live evaluation.
+
+        Once tripped the deadman keeps acting even though the release reset
+        the control source to 'auto', which is precisely the state
+        ``evaluate_link`` stops tripping on (FM-03).
+        """
+        if self.safety is None:
+            return False
+        link = self.safety.evaluate_link(
+            self._control_source,
+            airborne=self._vehicle_state.airborne,
+        )
+        if not (link.tripped or self._link_lost_latched):
+            return False
+        await self._on_deadman(link)
+        return True
+
+    async def _arb_manual(self, dt: float) -> bool:
+        """A hands-on operator is authoritative once the link watchdog passes.
+
+        Automated holds never overwrite fresh manual sticks.
+        """
+        if not self._manual_engaged:
+            return False
+        await self._send_setpoint(
+            self._clamp_setpoint(await self._manual_setpoint(dt))
+        )
+        return True
+
+    async def _arb_failsafe(self, dt: float) -> bool:
+        """The failsafe ladder, evaluated BEFORE the takeoff window.
+
+        The takeoff early-return used to sit above this block, so every
+        takeoff suspended the entire ladder for up to 60 s -- battery/sortie/
+        wind RTL, GPS-denied hold, hostile-drone hold, LiDAR climb and
+        site-invalid refuse were all inert during the climb, and the window is
+        longest exactly when a climb is failing (FM-04).
+        """
         decision = self._failsafe_decision
         failure = getattr(decision, "state", "none")
         reason = getattr(decision, "reason", "")
         if failure == "rtl":
-            # Any failsafe RTL abandons the climb: the NAV_TAKEOFF target is
-            # what we are getting away from.
-            self._takeoff_deadline_ms = 0.0
-            if self._rtl_requested_reason != reason:
-                self._rtl_requested_reason = reason
-                self._rtl_last_attempt_ms = 0.0
-                self._release_all(ControlSource.AUTO.value)
-                await self._status("critical", reason)
-                await self._health_event("link", "rtl", reason)
-            # Re-assert until the FC is OBSERVED in RTL. The latch used to be
-            # stamped BEFORE the call, so a refused or dropped RTL was never
-            # retried: the vehicle hovered in GUIDED while telemetry reported
-            # failsafeState=rtl (FM-01).
-            confirmed = await self._assert_rtl(f"failsafe {reason}")
-            self._last_applied_failsafe = (
-                f"rtl:{reason}" if confirmed else f"rtl-pending:{reason}"
-            )
-            await self._send_hold(reason)
-            return
+            await self._failsafe_return(reason)
+            return True
+        # Anything below is not an RTL, so a previously requested one is over.
         self._rtl_requested_reason = ""
-        if failure in {"hold", "refuse"} or (
-            failure == "escalate" and reason == "probable interference"
-        ):
-            self._takeoff_deadline_ms = 0.0
-            self._last_applied_failsafe = f"{failure}:{reason}"
-            clear_alt = self._lidar_clear_altitude_m()
-            if (
-                "LiDAR failed" in reason
-                and clear_alt is not None
-                and self._vehicle_state.relAlt < clear_alt
-                and self._guidance_preconditions_ok()
-            ):
-                climb = VelocitySetpoint(
-                    vz=-min(self.limits.max_climb_rate, 1.0), valid=True
-                )
-                await self._send_setpoint(self._clamp_setpoint(climb))
-            else:
-                await self._send_hold(reason)
-            return
+        if self._is_holding_failure(failure, reason):
+            await self._failsafe_hold(failure, reason)
+            return True
         self._last_applied_failsafe = "none"
+        return False
 
-        # NAV_TAKEOFF owns the GUIDED target until climb completes. Sending
-        # the ordinary zero-velocity idle frame here would overwrite it -- so
-        # the window suppresses the EMISSION only, after the ladder above has
-        # already had its say.
-        if self._takeoff_deadline_ms:
-            if (
-                self._vehicle_state.armed
-                and _now_ms() < self._takeoff_deadline_ms
-                and self._vehicle_state.relAlt < 0.9 * self._takeoff_target_alt
-            ):
-                return
-            self._takeoff_deadline_ms = 0.0
+    @staticmethod
+    def _is_holding_failure(failure: str, reason: str) -> bool:
+        """Failsafe states that stop the aircraft where it is.
 
-        # SITL-only, triple-gated: command motion straight out of the certified
-        # corridor to prove the monitor is independent of guidance. It sits
-        # AFTER the failsafe branches above precisely so the monitor's hold/RTL
-        # wins over it -- that suppression IS the proof.
-        if self._guidance_override_active():
-            await self._send_setpoint(self._clamp_setpoint(
-                VelocitySetpoint(vx=self.limits.max_speed, valid=True)
-            ))
-            return
+        ``escalate`` normally takes no control action -- it is a report. The
+        one exception is probable RF interference, which is a reason to stop
+        moving even before it becomes a hold.
+        """
+        if failure in ("hold", "refuse"):
+            return True
+        return failure == "escalate" and reason == "probable interference"
 
-        sp = VelocitySetpoint.hold()
+    async def _failsafe_return(self, reason: str) -> None:
+        """Failsafe RTL: announce once, then re-assert until the FC obeys."""
+        # Any failsafe RTL abandons the climb: the NAV_TAKEOFF target is what
+        # we are getting away from.
+        self._takeoff_deadline_ms = 0.0
+        if self._rtl_requested_reason != reason:
+            self._rtl_requested_reason = reason
+            self._rtl_last_attempt_ms = 0.0
+            self._release_all(ControlSource.AUTO.value)
+            await self._status("critical", reason)
+            await self._health_event("link", "rtl", reason)
+        # Re-assert until the FC is OBSERVED in RTL. The latch used to be
+        # stamped BEFORE the call, so a refused or dropped RTL was never
+        # retried: the vehicle hovered in GUIDED while telemetry reported
+        # failsafeState=rtl (FM-01).
+        confirmed = await self._assert_rtl(f"failsafe {reason}")
+        self._last_applied_failsafe = (
+            f"rtl:{reason}" if confirmed else f"rtl-pending:{reason}"
+        )
+        await self._send_hold(reason)
 
-        if self._planner_engaged and self._planner_tracking_tool and self._guidance_preconditions_ok():
-            sp = self._guidance_setpoint(dt)
-        elif self._planner_engaged and self._guidance_preconditions_ok():
-            planner_sp = await self._planner_tick(dt)
-            if planner_sp is None:
-                # goto / rtl / completion handled their own emission this tick
-                # (a body-velocity frame would override the position target).
-                return
-            sp = planner_sp
-        elif self._tracking_engaged and self._guidance_preconditions_ok():
-            sp = self._guidance_setpoint(dt)
+    async def _failsafe_hold(self, failure: str, reason: str) -> None:
+        """Stop where we are -- or climb, when the reason is a blind LiDAR."""
+        self._takeoff_deadline_ms = 0.0
+        self._last_applied_failsafe = f"{failure}:{reason}"
+        climb = self._lidar_recovery_climb(reason)
+        if climb is None:
+            await self._send_hold(reason)
         else:
-            sp = VelocitySetpoint.hold()
+            await self._send_setpoint(self._clamp_setpoint(climb))
 
-        sp = self._clamp_setpoint(sp)
-        await self._send_setpoint(sp)
+    def _lidar_recovery_climb(self, reason: str) -> Optional[VelocitySetpoint]:
+        """The gentle climb a failed LiDAR asks for, or ``None`` to hold.
+
+        Only offered when there IS a surveyed clear altitude above us and the
+        guidance preconditions hold; every other case holds instead.
+        """
+        if "LiDAR failed" not in reason:
+            return None
+        clear_alt = self._lidar_clear_altitude_m()
+        if clear_alt is None or self._vehicle_state.relAlt >= clear_alt:
+            return None
+        if not self._guidance_preconditions_ok():
+            return None
+        return VelocitySetpoint(vz=-min(self.limits.max_climb_rate, 1.0), valid=True)
+
+    async def _arb_takeoff_window(self, dt: float) -> bool:
+        """NAV_TAKEOFF owns the GUIDED target until the climb completes.
+
+        Sending the ordinary zero-velocity idle frame would overwrite it, so
+        the window suppresses the EMISSION only -- after the ladder above has
+        already had its say.
+        """
+        if not self._takeoff_deadline_ms:
+            return False
+        st = self._vehicle_state
+        climbing = (
+            st.armed
+            and _now_ms() < self._takeoff_deadline_ms
+            and st.relAlt < 0.9 * self._takeoff_target_alt
+        )
+        if climbing:
+            return True
+        self._takeoff_deadline_ms = 0.0
+        return False
+
+    async def _arb_test_override(self, dt: float) -> bool:
+        """SITL-only, triple-gated: fly straight out of the certified corridor.
+
+        It sits BELOW the failsafe branches precisely so the monitor's
+        hold/RTL wins over it -- that suppression IS the proof that the
+        monitor is independent of guidance.
+        """
+        if not self._guidance_override_active():
+            return False
+        await self._send_setpoint(self._clamp_setpoint(
+            VelocitySetpoint(vx=self.limits.max_speed, valid=True)
+        ))
+        return True
+
+    # ---- source arbitration ----------------------------------------------
+    async def _fly_active_source(self, dt: float) -> None:
+        """Pick the ONE active control source and emit its clamped setpoint.
+
+        Exactly one branch produces the setpoint (PRD 11). ``None`` from the
+        planner means that tick emitted a different flavour itself -- a global
+        position target, an RTL handoff, or plan completion -- and a
+        body-velocity frame on top of it would override the position target.
+        """
+        setpoint = await self._active_setpoint(dt)
+        if setpoint is None:
+            return
+        await self._send_setpoint(self._clamp_setpoint(setpoint))
+
+    async def _active_setpoint(self, dt: float) -> Optional[VelocitySetpoint]:
+        if not self._guidance_preconditions_ok():
+            return VelocitySetpoint.hold()
+        if self._planner_engaged:
+            # A plan flying a tracking tool (follow/orbit-on-track) is still
+            # visually servoed: the planner chose the subject, guidance flies
+            # to it, and the standoff floor applies exactly as it does under
+            # operator tracking.
+            if self._planner_tracking_tool:
+                return self._guidance_setpoint(dt)
+            return await self._planner_tick(dt)
+        if self._tracking_engaged:
+            return self._guidance_setpoint(dt)
+        return VelocitySetpoint.hold()
 
     def _lidar_clear_altitude_m(self) -> Optional[float]:
         """The altitude the LiDAR-degraded climb may target, or ``None``.
@@ -2337,13 +2741,20 @@ class Companion:
             log.exception("gimbal pitch command failed")
 
     def _guidance_setpoint(self, dt: float) -> VelocitySetpoint:
-        if self.guidance is None or self._latest_tracking is None:
+        """Visual servoing toward the locked track.
+
+        The STANDOFF is not applied here and never has been: it is a hard
+        limit inside ``control/guidance.py``, which is handed the live
+        ``Limits`` and is the only component allowed to decide how close the
+        aircraft gets. The orchestrator passes inputs and takes a setpoint.
+        """
+        tracking = self._latest_tracking
+        if self.guidance is None or tracking is None:
             return VelocitySetpoint.hold()
-        res = self._latest_tracking
         return self.guidance.update(
-            res.state,
-            res.locked_bbox,
-            res.estimated_distance,
+            tracking.state,
+            tracking.locked_bbox,
+            tracking.estimated_distance,
             self.limits,
             dt,
         )
@@ -2364,16 +2775,16 @@ class Companion:
         source), so a tripped link never reaches here.
         """
         if self.planner is None:
-            self._planner_engaged = False
-            self._set_control_source(ControlSource.AUTO.value)
-            return VelocitySetpoint.hold()
+            # No executor at all: there was never a corridor to give back, so
+            # the monitor's arming is left exactly as it was.
+            return self._end_plan("no planner", disarm=False)
         try:
             out = self.planner.update(self._vehicle_state, dt)
         except Exception:
             log.exception("planner update failed -> hold")
             return VelocitySetpoint.hold()
 
-        kind = getattr(out.kind, "value", str(out.kind))
+        kind = _wire_value(out.kind)
         if kind == "velocity":
             return out.setpoint
         if kind == "goto" and out.goto is not None:
@@ -2389,50 +2800,68 @@ class Companion:
             await self._send_hold("plan rtl")
             return None
         if kind == "done":
-            self._planner_engaged = False
-            self._disarm_envelope()
-            self._set_control_source(ControlSource.AUTO.value)
+            self._end_plan("complete")
             await self._status("info", "mission plan complete -> hold")
             await self._send_hold("plan complete")
             return None
         # idle / unexpected while engaged: release and hold (safe default).
+        return self._end_plan(f"unexpected planner output {kind!r}")
+
+    def _end_plan(self, why: str, *, disarm: bool = True) -> VelocitySetpoint:
+        """Disengage the plan, drop its corridor, and hand back a hold.
+
+        The corridor goes with the plan (``_disarm_envelope``); the site
+        containment the monitor also enforces does not, because it applies
+        whether or not a plan is loaded.
+        """
+        log.debug("mission plan disengaged: %s", why)
         self._planner_engaged = False
-        self._disarm_envelope()
+        if disarm:
+            self._disarm_envelope()
         self._set_control_source(ControlSource.AUTO.value)
         return VelocitySetpoint.hold()
+
+    #: How long a latched goto target may stand before it is re-sent, seconds.
+    #: ArduPilot LATCHES a position target, so re-sending at 20 Hz would only
+    #: spam DO_CHANGE_SPEED; re-sending never would leave a dropped target
+    #: silently unflown.
+    _GOTO_REFRESH_S = 1.0
 
     async def _stream_goto(self, goto: Any) -> None:
         """Send/refresh the GUIDED global position target for a goto leg.
 
-        ArduPilot latches a position target, so re-send only when the target
-        changes or every ~1 s as belt-and-braces (re-sending at 20 Hz would
-        spam DO_CHANGE_SPEED). While a goto is active the control tick
-        deliberately does NOT emit the body-velocity hold -- a zero-velocity
-        frame would override the position target."""
+        While a goto is active the control tick deliberately does NOT emit the
+        body-velocity hold -- a zero-velocity frame would override the
+        position target the FC is holding.
+        """
         if self.vehicle is None:
             return
-        key = (
+        # Rounded so floating-point noise in an unchanged target does not read
+        # as a new one every tick.
+        target = (
             round(float(goto.lat), 7), round(float(goto.lon), 7),
             round(float(goto.alt), 2), round(float(goto.speed), 2),
         )
         now = time.monotonic()
-        if key == self._last_goto and (now - self._last_goto_ts) < 1.0:
+        unchanged = target == self._last_goto
+        if unchanged and (now - self._last_goto_ts) < self._GOTO_REFRESH_S:
             return
-        self._last_goto = key
+        self._last_goto = target
         self._last_goto_ts = now
         try:
-            ok = await _maybe_await(self.vehicle.goto_global(
+            accepted = await _maybe_await(self.vehicle.goto_global(
                 goto.lat, goto.lon, goto.alt, goto.speed,
             ))
-            if not ok:
-                # Refused (e.g. zero-speed leg / bad target): emit the
-                # canonical zero-and-hold so any PREVIOUSLY latched position
-                # target in the FC cannot keep the vehicle moving.
-                log.warning("goto_global refused target %s -> hold", key)
-                await self._send_hold("goto refused")
         except Exception:
             log.exception("goto_global failed")
             await self._send_hold("goto failed")
+            return
+        if not accepted:
+            # Refused (e.g. zero-speed leg / bad target): emit the canonical
+            # zero-and-hold so any PREVIOUSLY latched position target in the
+            # FC cannot keep the vehicle moving.
+            log.warning("goto_global refused target %s -> hold", target)
+            await self._send_hold("goto refused")
 
     async def _manual_setpoint(self, dt: float) -> VelocitySetpoint:
         """Manual setpoint via ManualPilot, gated by the input watchdog.
@@ -2440,14 +2869,11 @@ class Companion:
         If no manualInput frame has arrived within ``manual_watchdog_ms``, zero
         the setpoint and hold -- never continue the last commanded velocity.
         """
-        watchdog_ms = float(self.limits.manual_watchdog_ms)
-        age = _now_ms() - self._last_manual_input_ms if self._last_manual_input_ms else float("inf")
-        if age > watchdog_ms:
+        if self._manual_input_stale():
             # Watchdog: zero + hold. Reset the pilot so smoothing doesn't coast.
             if self.manual is not None:
                 _safe_call(getattr(self.manual, "reset", None))
             return VelocitySetpoint.hold()
-
         if self.manual is None:
             return VelocitySetpoint.hold()
         try:
@@ -2455,6 +2881,18 @@ class Companion:
         except Exception:
             log.exception("manual pilot update failed -> hold")
             return VelocitySetpoint.hold()
+
+    def _manual_input_stale(self) -> bool:
+        """True when no stick frame has landed inside ``manual_watchdog_ms``.
+
+        Never having received one counts as stale: the watchdog opens CLOSED,
+        so engaging manual and then losing the stream before the first frame
+        holds rather than waiting indefinitely for a timeout that never starts.
+        """
+        stamp = self._last_manual_input_ms
+        if not stamp:
+            return True
+        return (_now_ms() - stamp) > float(self.limits.manual_watchdog_ms)
 
     def _clamp_setpoint(self, sp: VelocitySetpoint) -> VelocitySetpoint:
         """Final hard clamp of every axis to Limits (belt-and-braces).
@@ -2470,47 +2908,63 @@ class Companion:
         """
         if not sp.valid:
             return VelocitySetpoint.hold()
+        axes = (sp.vx, sp.vy, sp.vz, sp.yaw_rate)
         # A non-finite axis collapses the WHOLE setpoint to hold. Clamping it
         # per-axis is not enough: a component that produced one unusable number
         # produced an unusable command, and the belt-and-braces clamp must not
         # be the thing that renders it as maximum output (FM-06). This mirrors
         # planner_exec._clamp_setpoint, which had the guard all along on a path
         # neither manual nor tracking ever takes.
-        if not all(
-            math.isfinite(v) for v in (sp.vx, sp.vy, sp.vz, sp.yaw_rate)
-        ):
-            log.error(
-                "non-finite setpoint (%r, %r, %r, %r) -> HOLD",
-                sp.vx, sp.vy, sp.vz, sp.yaw_rate,
-            )
+        if not all(math.isfinite(axis) for axis in axes):
+            log.error("non-finite setpoint (%r, %r, %r, %r) -> HOLD", *axes)
             return VelocitySetpoint.hold()
-        L = self.limits
-        scale = min(1.0, max(0.0, float(self._envelope_speed_scale)))
-        speed_cap = L.max_speed * scale
-        climb_cap = L.max_climb_rate * scale
+        speed_cap, climb_cap, yaw_cap = self._axis_caps()
         return VelocitySetpoint(
             vx=_clamp(sp.vx, -speed_cap, speed_cap),
             vy=_clamp(sp.vy, -speed_cap, speed_cap),
             vz=_clamp(sp.vz, -climb_cap, climb_cap),
-            yaw_rate=_clamp(sp.yaw_rate, -L.max_yaw_rate, L.max_yaw_rate),
+            yaw_rate=_clamp(sp.yaw_rate, -yaw_cap, yaw_cap),
             valid=True,
         )
 
+    def _axis_caps(self) -> Tuple[float, float, float]:
+        """(translational, vertical, yaw) magnitude caps for this tick.
+
+        The envelope monitor's ``speed_scale`` is folded in here and nowhere
+        else. It is bounded to [0, 1] on the way in, so a monitor bug can only
+        ever make the aircraft slower than ``Limits`` allows, never faster --
+        the scale cannot become an amplifier.
+        """
+        limits = self.limits
+        scale = min(1.0, max(0.0, float(self._envelope_speed_scale)))
+        return (
+            float(limits.max_speed) * scale,
+            float(limits.max_climb_rate) * scale,
+            float(limits.max_yaw_rate),
+        )
+
     async def _send_setpoint(self, sp: VelocitySetpoint) -> None:
+        """Hand one body-velocity frame to the FC.
+
+        ``valid`` is passed when the Vehicle layer accepts it and dropped when
+        it does not: an older signature must degrade to sending the axes, not
+        to sending nothing at all.
+        """
         if self.vehicle is None:
             return
+        axes = (sp.vx, sp.vy, sp.vz, sp.yaw_rate)
         try:
-            await _maybe_await(self.vehicle.send_body_velocity(
-                sp.vx, sp.vy, sp.vz, sp.yaw_rate, valid=sp.valid,
-            ))
+            await _maybe_await(
+                self.vehicle.send_body_velocity(*axes, valid=sp.valid)
+            )
+            return
         except TypeError:
-            # Vehicle.send_body_velocity may not take a 'valid' kwarg; retry.
-            try:
-                await _maybe_await(self.vehicle.send_body_velocity(
-                    sp.vx, sp.vy, sp.vz, sp.yaw_rate,
-                ))
-            except Exception:
-                log.exception("send_body_velocity failed")
+            pass  # no 'valid' kwarg on this Vehicle: retry without it
+        except Exception:
+            log.exception("send_body_velocity failed")
+            return
+        try:
+            await _maybe_await(self.vehicle.send_body_velocity(*axes))
         except Exception:
             log.exception("send_body_velocity failed")
 
@@ -2539,21 +2993,14 @@ class Companion:
             reconnect -- not only a ``statusText`` broadcast to the zero
             clients a link outage guarantees.
         """
-        first_trip = not self._link_lost_latched
-        self._link_lost_latched = True
-        if first_trip:
-            self._link_lost_since_ms = _now_ms()
+        # ZERO FIRST. Whatever else this tick decides, the aircraft stops
+        # being commanded before any of it is worked out.
+        first_trip = self._latch_link_lost()
         await self._send_hold("deadman")
 
-        action = getattr(link.action, "value", str(link.action))
         reason = getattr(link, "reason", "") or "ground link lost -> hold/RTL"
         if first_trip:
-            await self._status("critical", reason)
-            # healthEvent, not just statusText: this is the one message that
-            # MUST survive an outage whose defining property is that nobody is
-            # listening. It is hash-chained into the audit and replayed to the
-            # next client that connects.
-            await self._health_event("link", "deadman", reason)
+            await self._announce_deadman(reason)
 
         # A tripped deadman means the operator is gone: releasing to auto is
         # correct, and the LATCH (not the source) is what keeps the deadman
@@ -2561,9 +3008,35 @@ class Companion:
         self._release_all(ControlSource.AUTO.value)
         self._takeoff_deadline_ms = 0.0
 
-        airborne = bool(self._vehicle_state.airborne)
-        if (action == "rtl" or airborne) and self.vehicle is not None:
+        action = getattr(link.action, "value", str(link.action))
+        if self.vehicle is None:
+            return
+        if action == "rtl" or bool(self._vehicle_state.airborne):
             await self._assert_rtl("deadman")
+
+    def _latch_link_lost(self) -> bool:
+        """Set the ground-link latch; True when this is the first trip.
+
+        The latch is orchestrator state rather than SafetyManager state
+        precisely so it SURVIVES the release to 'auto' -- the source
+        ``evaluate_link`` stops tripping on (FM-03).
+        """
+        if self._link_lost_latched:
+            return False
+        self._link_lost_latched = True
+        self._link_lost_since_ms = _now_ms()
+        return True
+
+    async def _announce_deadman(self, reason: str) -> None:
+        """Say it once, on both rails.
+
+        The healthEvent, not the statusText, is the load-bearing half: this is
+        the one message that MUST survive an outage whose defining property is
+        that nobody is listening. It is hash-chained into the audit and
+        replayed to the next client that connects.
+        """
+        await self._status("critical", reason)
+        await self._health_event("link", "deadman", reason)
 
     def _observed_mode(self) -> str:
         return str(getattr(self._vehicle_state, "mode", "")).upper()
@@ -2571,25 +3044,22 @@ class Companion:
     async def _assert_rtl(self, why: str, *, throttle_ms: float = 1000.0) -> bool:
         """Command RTL and keep commanding it until the FC is OBSERVED in RTL.
 
-        Returns True once the mode readback confirms RTL. A ``set_mode`` that
-        returns False (ArduCopter refuses RTL without a home position, for
-        one) or raises no longer counts as done: the caller must not latch
-        anything on an unverified mode change (FM-01 / FM-02).
+        Returns True only once the mode READBACK confirms RTL. A ``set_mode``
+        that returns False (ArduCopter refuses RTL without a home position,
+        for one) or raises does not count as done: the caller must not latch
+        anything on an unverified mode change (FM-01 / FM-02). Retries are
+        throttled so a refusing FC is asked once a second, not 20 times.
         """
         if self._observed_mode() == "RTL":
             return True
-        if self.vehicle is None:
+        if self.vehicle is None or self._rtl_attempt_throttled(throttle_ms):
             return False
-        now = _now_ms()
-        if self._rtl_last_attempt_ms and now - self._rtl_last_attempt_ms < throttle_ms:
-            return False
-        self._rtl_last_attempt_ms = now
         try:
-            result = await self._vehicle_call(self.vehicle.set_mode, "RTL")
+            accepted = await self._vehicle_call(self.vehicle.set_mode, "RTL")
         except Exception:
             log.exception("%s RTL command failed", why)
             return False
-        if result is False:
+        if accepted is False:
             log.error("%s RTL REFUSED by the flight controller; will retry", why)
             await self._health_event(
                 "link", "rtl_refused",
@@ -2597,6 +3067,14 @@ class Companion:
             )
             return False
         return True
+
+    def _rtl_attempt_throttled(self, throttle_ms: float) -> bool:
+        """True to skip this attempt; otherwise stamp it and let it through."""
+        now = _now_ms()
+        if self._rtl_last_attempt_ms and now - self._rtl_last_attempt_ms < throttle_ms:
+            return True
+        self._rtl_last_attempt_ms = now
+        return False
 
     async def _apply_failsafe_params(self) -> None:
         """Push the derived envelope to the FC so the clamp has a firmware half.
@@ -2752,23 +3230,15 @@ class Companion:
         Runs inside the API server's receive loop. Never raises (the API server
         also guards, but we keep our own try so the ack message is meaningful)."""
         command = str(msg.get("command", ""))
-        params = msg.get("params") or {}
-        verdict = await self._verify_command(msg, command)
-        if verdict is not None:
-            return verdict
+        refusal = await self._verify_command(msg, command)
+        if refusal is not None:
+            return refusal
         try:
-            ok, message = await self._dispatch(command, params)
+            ok, message = await self._dispatch(command, msg.get("params") or {})
         except Exception as exc:
             log.exception("command %r failed", command)
             ok, message = False, f"{command} failed: {exc}"
-        return {
-            "type": "ack",
-            "ts": _now_ms(),
-            "vehicleId": self.config.vehicle_id,
-            "command": command,
-            "success": bool(ok),
-            "message": message,
-        }
+        return self._ack(command, ok, message)
 
     async def _verify_command(
         self, msg: Dict[str, Any], command: str
@@ -2830,6 +3300,8 @@ class Companion:
         return f"{msg.get('type', 'frame')} refused: {result.reason}"
 
     def _ack(self, command: str, ok: bool, message: str) -> Dict[str, Any]:
+        """The one CommandAck builder. Acks correlate by command NAME, FIFO --
+        the contract puts no requestId on the ack path."""
         return {
             "type": "ack",
             "ts": _now_ms(),
@@ -2860,137 +3332,210 @@ class Companion:
     #: very next tick (FM-24).
     _ESTOP_ALLOWED = frozenset({"emergencyStop", "disarm", "land", "rtl"})
 
-    async def _dispatch(self, command: str, params: Dict[str, Any]):
-        v = self.vehicle
+    #: The command surface, as data. Every CommandName in shared.py appears
+    #: here exactly once, mapped to the method that performs it. ``emergencyStop``
+    #: is deliberately absent: it precedes the e-stop latch gate itself and is
+    #: handled before the table is consulted.
+    #:
+    #: ``exempt`` marks the commands that bypass the failsafe gate -- signed
+    #: attendance transitions, camera pointing, the SITL fault hooks and the
+    #: operator's own "carry on". Everything else, INCLUDING an unrecognised
+    #: name, is gated: an unknown command during a failsafe is answered with
+    #: the failsafe, not with a lecture about the name.
+    _COMMANDS: Dict[str, Tuple[str, bool, bool]] = {
+        # name:            (method,               takes params, exempt)
+        "continueMission": ("_continue_mission",  False, True),
+        "testFault":       ("_test_fault",        True,  True),
+        "enterUnattended": ("_enter_unattended",  True,  True),
+        "exitUnattended":  ("_exit_unattended",   True,  True),
+        "setGimbal":       ("_set_gimbal",        True,  True),
 
-        # ---- emergencyStop: overrides EVERYTHING, no confirmation ----------
+        "arm":             ("_do_arm",            False, False),
+        "disarm":          ("_cmd_disarm",        False, False),
+        "takeoff":         ("_cmd_takeoff",       True,  False),
+        "land":            ("_cmd_land",          False, False),
+        "rtl":             ("_cmd_rtl",           False, False),
+        "setMode":         ("_cmd_set_mode",      True,  False),
+
+        "engageTracking":    ("_engage_tracking",    False, False),
+        "disengageTracking": ("_disengage_tracking", False, False),
+        "selectTarget":      ("_cmd_select_target",  True,  False),
+        "setStandoff":       ("_cmd_set_standoff",   True,  False),
+        "setMaxSpeed":       ("_cmd_set_max_speed",  True,  False),
+
+        "engageManual":    ("_engage_manual",     False, False),
+        "disengageManual": ("_disengage_manual",  False, False),
+
+        "executePlan":     ("_execute_plan",      True,  False),
+        "abortPlan":       ("_abort_plan",        False, False),
+    }
+
+    async def _dispatch(self, command: str, params: Dict[str, Any]):
+        """Route one verified command through the gates, then the table."""
+        # emergencyStop overrides EVERYTHING and takes no confirmation. It is
+        # above the latch gate because it is what SETS the latch.
         if command == "emergencyStop":
             return await self._emergency_stop()
 
-        # ---- e-stop latch: nothing re-commands motion until it clears ------
-        if self._estop_latched and command not in self._ESTOP_ALLOWED:
-            return False, (
-                "emergency stop is latched: only disarm/land/rtl are accepted "
-                "until the vehicle is disarmed on the ground"
-            )
+        spec = self._COMMANDS.get(command)
+        for gate in (self._gate_estop, self._gate_failsafe):
+            refusal = gate(command, params, spec)
+            if refusal is not None:
+                return refusal
+        if spec is None:
+            return False, f"unknown command {command!r}"
 
-        if command == "continueMission":
-            return await self._continue_mission()
-        if command == "testFault":
-            return await self._test_fault(params)
+        method, wants_params, _exempt = spec
+        action = getattr(self, method)
+        return await _maybe_await(action(params) if wants_params else action())
 
-        # ---- privileged transitions (already signature-checked) ------------
-        # These stay available during a failsafe: pointing the camera and
-        # returning to supervision are both things an operator may need while
-        # the vehicle is held.
-        if command == "enterUnattended":
-            return await self._enter_unattended(params)
-        if command == "exitUnattended":
-            return await self._exit_unattended(params)
-        if command == "setGimbal":
-            return await self._set_gimbal(params)
-        # Recovery, operator takeover, and explicit return commands remain
-        # available during a failsafe. New autonomous work does not.
+    # ---- dispatch gates ---------------------------------------------------
+    def _gate_estop(self, command, params, spec):
+        """Nothing re-commands motion until the e-stop latch clears.
+
+        The latch used to clear itself inside the same coroutine that set it,
+        so setMode GUIDED / takeoff / engageTracking / executePlan were
+        accepted on the very next tick and cancelled the FC LAND (FM-24).
+        """
+        if not self._estop_latched or command in self._ESTOP_ALLOWED:
+            return None
+        return False, (
+            "emergency stop is latched: only disarm/land/rtl are accepted "
+            "until the vehicle is disarmed on the ground"
+        )
+
+    def _gate_failsafe(self, command, params, spec):
+        """Refuse NEW autonomous work while a failsafe is in force.
+
+        Recovery, operator takeover and explicit return commands stay
+        available: refusing the operator's least disruptive stop while the
+        plan keeps commanding motion is worse than the failsafe itself
+        (FM-18). Privileged transitions carry their own ``exempt`` flag --
+        pointing the camera and returning to supervision are both things an
+        operator may need while the vehicle is held.
+        """
+        if spec is not None and spec[2]:
+            return None
         decision = self._failsafe_decision
-        if (
-            decision is not None
-            and getattr(decision, "state", "none") != "none"
-            and command not in self._FAILSAFE_SAFE_COMMANDS
-        ):
-            # setMode is admitted for RECOVERY modes only: a plain `escalate`
-            # (camera failed, thermal degraded, soc_degraded) takes no control
-            # action, so the plan keeps flying while the operator's graceful
-            # stops were being refused -- and a soc_degraded escalate could
-            # hold that lockout for the rest of the sortie (FM-18).
-            recovery_mode = (
-                command == "setMode"
-                and str(params.get("mode", "")).upper() in self._FAILSAFE_SAFE_MODES
-            )
-            if not recovery_mode:
-                return False, (
-                    f"command rejected during {decision.state}: {decision.reason}"
-                )
+        if decision is None or getattr(decision, "state", "none") == "none":
+            return None
+        if command in self._FAILSAFE_SAFE_COMMANDS:
+            return None
+        # setMode is admitted for RECOVERY modes only: a plain `escalate`
+        # (camera failed, thermal degraded, soc_degraded) takes no control
+        # action, so the plan keeps flying while the operator's graceful
+        # stops were being refused -- and a soc_degraded escalate could hold
+        # that lockout for the rest of the sortie (FM-18).
+        if command == "setMode" and str(
+            (params or {}).get("mode", "")
+        ).upper() in self._FAILSAFE_SAFE_MODES:
+            return None
+        return False, f"command rejected during {decision.state}: {decision.reason}"
 
-        # ---- flight commands (-> Vehicle) ----------------------------------
-        if command == "arm":
-            return await self._do_arm()
-        if command == "disarm":
-            self._release_all(ControlSource.AUTO.value)
-            await self._send_hold("disarm")
-            return await self._vehicle_action("disarm", lambda: v.disarm())
-        if command == "takeoff":
-            alt = float(params.get("altitude", 2.0))
-            alt = min(alt, self.limits.max_altitude)
-            result = await self._vehicle_action("takeoff", lambda: v.takeoff(alt))
-            if result[0]:
-                self._takeoff_target_alt = alt
-                self._takeoff_deadline_ms = _now_ms() + 60_000.0
-            return result
-        if command == "land":
-            self._release_all(ControlSource.AUTO.value)
-            return await self._vehicle_action("land", lambda: v.land())
-        if command == "rtl":
-            self._release_all(ControlSource.AUTO.value)
-            return await self._vehicle_action("rtl", lambda: v.set_mode("RTL"))
-        if command == "setMode":
-            mode = str(params.get("mode", "")).upper()
-            if not mode:
-                return False, "setMode requires params.mode"
-            return await self._vehicle_action("setMode", lambda: v.set_mode(mode))
+    # ---- flight commands (-> Vehicle) ------------------------------------
+    async def _cmd_disarm(self):
+        self._release_all(ControlSource.AUTO.value)
+        await self._send_hold("disarm")
+        return await self._vehicle_action("disarm", self.vehicle.disarm
+                                          if self.vehicle is not None else None)
 
-        # ---- tracking / guidance (-> Guidance / Tracker) -------------------
-        if command == "engageTracking":
-            return self._engage_tracking()
-        if command == "disengageTracking":
-            return self._disengage_tracking()
-        if command == "selectTarget":
-            tid = params.get("targetId")
-            if self.tracker is not None:
-                self.tracker.select(None if tid is None else int(tid))
-            return True, f"target {tid} selected"
-        if command == "setStandoff":
-            meters = float(params.get("meters", self.limits.standoff))
-            val = self.guidance.set_standoff(meters, self.limits) if self.guidance else \
-                self.limits.clamp_standoff(meters)
-            self._sync_safety_limits()
-            return True, f"standoff set to {val:.1f} m (floor {self.limits.min_standoff:.0f} m)"
-        if command == "setMaxSpeed":
-            mps = float(params.get("mps", self.limits.max_speed))
-            # Runtime mirror of the config-time hard cap (_enforce_safety_floor):
-            # the wire may LOWER the live max_speed, never raise it past the
-            # 8 m/s envelope. guidance.set_max_speed itself only floors at
-            # min_speed (control/ stays cap-agnostic), so clamp here -- the
-            # same idiom as setStandoff's floor. NaN falls back to the cap
-            # (min() would propagate it into the live Limits otherwise).
-            mps = min(mps, MAX_SPEED_CAP) if math.isfinite(mps) else MAX_SPEED_CAP
-            val = self.guidance.set_max_speed(mps, self.limits) if self.guidance else \
-                self.limits.clamp_speed(mps)
-            self._sync_safety_limits()
-            return True, f"max speed set to {val:.1f} m/s (cap {MAX_SPEED_CAP:.0f} m/s)"
+    async def _cmd_takeoff(self, params: Dict[str, Any]):
+        """Climb to a requested altitude, capped by the geofence ceiling.
 
-        # ---- manual piloting (-> ManualPilot) ------------------------------
-        if command == "engageManual":
-            return await self._engage_manual()
-        if command == "disengageManual":
-            return await self._disengage_manual()
+        The takeoff WINDOW is armed only on an accepted command: arming it on
+        a refusal would suppress setpoint emission for 60 s over a climb that
+        never began.
+        """
+        altitude = min(float(params.get("altitude", 2.0)), self.limits.max_altitude)
+        vehicle = self.vehicle
+        ok, message = await self._vehicle_action(
+            "takeoff",
+            (lambda: vehicle.takeoff(altitude)) if vehicle is not None else None,
+        )
+        if ok:
+            self._takeoff_target_alt = altitude
+            self._takeoff_deadline_ms = _now_ms() + 60_000.0
+        return ok, message
 
-        # ---- mission planner (-> PlannerExecutor) --------------------------
-        if command == "executePlan":
-            return await self._execute_plan(params)
-        if command == "abortPlan":
-            return await self._abort_plan()
-        return False, f"unknown command {command!r}"
+    async def _cmd_land(self):
+        self._release_all(ControlSource.AUTO.value)
+        return await self._vehicle_action("land", self.vehicle.land
+                                          if self.vehicle is not None else None)
+
+    async def _cmd_rtl(self):
+        self._release_all(ControlSource.AUTO.value)
+        vehicle = self.vehicle
+        return await self._vehicle_action(
+            "rtl", (lambda: vehicle.set_mode("RTL")) if vehicle is not None else None,
+        )
+
+    async def _cmd_set_mode(self, params: Dict[str, Any]):
+        mode = str(params.get("mode", "")).upper()
+        if not mode:
+            return False, "setMode requires params.mode"
+        vehicle = self.vehicle
+        return await self._vehicle_action(
+            "setMode", (lambda: vehicle.set_mode(mode)) if vehicle is not None else None,
+        )
+
+    # ---- tracking / guidance (-> Guidance / Tracker) ---------------------
+    def _cmd_select_target(self, params: Dict[str, Any]):
+        target_id = params.get("targetId")
+        if self.tracker is not None:
+            self.tracker.select(None if target_id is None else int(target_id))
+        return True, f"target {target_id} selected"
+
+    def _cmd_set_standoff(self, params: Dict[str, Any]):
+        """Move the standoff ring. The FLOOR is not negotiable from the wire."""
+        meters = float(params.get("meters", self.limits.standoff))
+        applied = (
+            self.guidance.set_standoff(meters, self.limits) if self.guidance
+            else self.limits.clamp_standoff(meters)
+        )
+        self._sync_safety_limits()
+        return True, (
+            f"standoff set to {applied:.1f} m "
+            f"(floor {self.limits.min_standoff:.0f} m)"
+        )
+
+    def _cmd_set_max_speed(self, params: Dict[str, Any]):
+        """Runtime mirror of the config-time hard cap (_enforce_safety_floor).
+
+        The wire may LOWER the live max_speed, never raise it past the 8 m/s
+        envelope. ``guidance.set_max_speed`` itself only floors at min_speed
+        (control/ stays cap-agnostic), so the cap is applied here -- the same
+        idiom as setStandoff's floor. A NON-FINITE request falls back to the
+        cap rather than being propagated: ``min()`` would carry a NaN straight
+        into the live Limits.
+        """
+        requested = float(params.get("mps", self.limits.max_speed))
+        bounded = min(requested, MAX_SPEED_CAP) if math.isfinite(requested) else MAX_SPEED_CAP
+        applied = (
+            self.guidance.set_max_speed(bounded, self.limits) if self.guidance
+            else self.limits.clamp_speed(bounded)
+        )
+        self._sync_safety_limits()
+        return True, (
+            f"max speed set to {applied:.1f} m/s (cap {MAX_SPEED_CAP:.0f} m/s)"
+        )
 
     # ---- command helpers -------------------------------------------------
     async def _do_arm(self):
-        """Arm with a conservative precondition check (PRD 11)."""
+        """Arm, but only past THREE independent refusals (PRD 11).
+
+        Readiness, the failsafe ladder and the SafetyManager's arming check
+        each get a veto, and each of them says why in its own words. Refusing
+        an arm is cheap; arming an aircraft that one of the three would have
+        stopped is not, so any one "no" is the answer.
+        """
         readiness = self._readiness_message()
         if not readiness["ready"]:
             return False, "arm refused: " + "; ".join(readiness["reasons"])
-        if self._failsafe_decision is not None and getattr(
-            self._failsafe_decision, "state", "refuse"
-        ) != "none":
-            return False, f"arm refused: {self._failsafe_decision.reason}"
+
+        decision = self._failsafe_decision
+        if decision is not None and getattr(decision, "state", "refuse") != "none":
+            return False, f"arm refused: {decision.reason}"
+
         if self.safety is not None:
             check = self.safety.check_arming(
                 self._vehicle_state,
@@ -3000,13 +3545,26 @@ class Companion:
             if not check.ok:
                 await self._status("warning", check.message)
                 return False, check.message
-        return await self._vehicle_action("arm", lambda: self.vehicle.arm())
+
+        vehicle = self.vehicle
+        return await self._vehicle_action(
+            "arm", vehicle.arm if vehicle is not None else None,
+        )
 
     def _engage_tracking(self):
-        if self._manual_engaged:
-            return False, "release manual control before engaging tracking"
-        if self._planner_engaged:
-            return False, "abort the active mission plan before engaging tracking"
+        """engageTracking: only from an unclaimed aircraft.
+
+        Tracking does not preempt anything. An operator with sticks in hand
+        and a dispatched mission plan are both stronger claims than a fresh
+        tracking request, so this refuses rather than stealing.
+        """
+        for engaged, refusal in (
+            (self._manual_engaged, "release manual control before engaging tracking"),
+            (self._planner_engaged,
+             "abort the active mission plan before engaging tracking"),
+        ):
+            if engaged:
+                return False, refusal
         self._tracking_engaged = True
         self._set_control_source(ControlSource.TRACKING.value)
         if self.guidance is not None:
@@ -3014,8 +3572,13 @@ class Companion:
         return True, "tracking engaged"
 
     def _disengage_tracking(self):
-        # Guard the source release on was-engaged (same hazard as abortPlan:
-        # a stray disengage must not relabel an active manual/planner source).
+        """disengageTracking: idempotent, and it never relabels someone else.
+
+        The source release is guarded on WAS-engaged (the same hazard as
+        abortPlan): a stray disengage arriving while manual or a plan is
+        flying must not relabel the active source, because telemetry would
+        then lie about who is flying and the deadman would stop tripping.
+        """
         was_engaged = self._tracking_engaged
         self._tracking_engaged = False
         if self.guidance is not None:
@@ -3033,8 +3596,9 @@ class Companion:
             await self._status("warning", msg)
             return False, msg
 
-        # mutual exclusion: tracking AND any mission plan release immediately
-        # (the hands-on operator always wins).
+        # Mutual exclusion: tracking AND any mission plan release immediately.
+        # The hands-on operator always wins -- this is the one engage that
+        # preempts rather than refusing.
         self._tracking_engaged = False
         self._planner_engaged = False
         if self.planner is not None:
@@ -3044,41 +3608,56 @@ class Companion:
         if self.manual is not None:
             _safe_call(getattr(self.manual, "reset", None))
 
-        # ensure GUIDED so velocity setpoints take effect.
-        if self.vehicle is not None and str(st.mode).upper() != "GUIDED":
-            try:
-                if await self._vehicle_call(self.vehicle.set_mode, "GUIDED") is False:
-                    log.error(
-                        "flight controller REFUSED GUIDED for manual control; "
-                        "setpoints will not take effect"
-                    )
-                    await self._status(
-                        "critical",
-                        "manual control engaged but the flight controller refused "
-                        "GUIDED -- setpoints may not take effect",
-                    )
-            except Exception:
-                log.exception("could not switch to GUIDED for manual control")
+        await self._ensure_guided_for_manual(st)
 
         self._manual_engaged = True
-        # seed the watchdog so the first ticks don't instantly time out.
+        # Seed the watchdog so the first ticks don't instantly time out on an
+        # operator who has not moved a stick yet.
         self._last_manual_input_ms = _now_ms()
         self._set_control_source(ControlSource.MANUAL.value)
         return True, "manual control engaged (GUIDED)"
 
+    async def _ensure_guided_for_manual(self, st: VehicleState) -> None:
+        """Put the FC in GUIDED so body-velocity setpoints take effect.
+
+        A REFUSAL is reported loudly and does not abort the engage: the
+        operator has asked for the sticks, and telling them the mode change
+        failed is more useful than silently leaving the aircraft on whatever
+        was flying it before.
+        """
+        if self.vehicle is None or str(st.mode).upper() == "GUIDED":
+            return
+        try:
+            accepted = await self._vehicle_call(self.vehicle.set_mode, "GUIDED")
+        except Exception:
+            log.exception("could not switch to GUIDED for manual control")
+            return
+        if accepted is False:
+            log.error(
+                "flight controller REFUSED GUIDED for manual control; "
+                "setpoints will not take effect"
+            )
+            await self._status(
+                "critical",
+                "manual control engaged but the flight controller refused "
+                "GUIDED -- setpoints may not take effect",
+            )
+
     async def _disengage_manual(self):
         """releaseManualControl: zero setpoints + auto-hold; controlSource=auto.
-        The release (hold + source=auto) only runs when manual WAS engaged --
-        a stray disengage must not stomp an active tracking/planner source
-        (deadman silencing hazard; see _abort_plan)."""
+
+        Like ``_disengage_tracking``, the release (hold + source=auto) only
+        runs when manual WAS engaged -- a stray disengage must not stomp an
+        active tracking/planner source (deadman silencing hazard).
+        """
         was_engaged = self._manual_engaged
         self._manual_engaged = False
         if self.manual is not None:
             _safe_call(getattr(self.manual, "reset", None))
         if was_engaged:
+            # auto-hold in GUIDED: a zero-velocity frame, not a mode change.
             await self._send_hold("release manual")
             self._set_control_source(ControlSource.AUTO.value)
-        # auto-hold in GUIDED (zero-velocity); optionally LOITER if available.
         return True, "manual control released -> auto hold"
 
     # ---- attendance mode (signed) ----------------------------------------
@@ -3663,6 +4242,8 @@ class Companion:
         old path swallowed that and still acked ``success: true``, i.e. the
         ordinary ``land`` command was verified harder than the emergency one.
         """
+        # LATCH FIRST, unconditionally. Everything below may fail; the latch
+        # may not, because it is what stops the next tick re-commanding motion.
         self._estop_latched = True
         self._takeoff_deadline_ms = 0.0
         try:
@@ -3671,14 +4252,8 @@ class Companion:
             log.exception("emergencyStop release failed; latch stays set")
         await self._send_hold("emergencyStop")
 
-        plan = None
-        try:
-            if self.safety is not None:
-                plan = self.safety.emergency_stop_plan(self._vehicle_state)
-        except Exception:
-            log.exception("emergency_stop_plan failed; defaulting to LAND")
+        plan = self._emergency_stop_plan()
         action = getattr(getattr(plan, "action", None), "value", "land")
-
         await self._status("critical", "EMERGENCY STOP")
         await self._health_event(
             "link", "emergency_stop", f"emergency stop latched -> {action}"
@@ -3686,18 +4261,12 @@ class Companion:
         if self.vehicle is None:
             return False, "emergency stop LATCHED but no FC link: nothing commanded"
 
-        ok = True
         try:
-            if action == "disarm" or getattr(plan, "force_disarm", False):
-                ok = await self._vehicle_call(self.vehicle.disarm, force=True) is not False
-            elif action == "land":
-                ok = await self._vehicle_call(self.vehicle.land) is not False
-            else:
-                ok = await self._vehicle_call(self.vehicle.set_mode, "BRAKE") is not False
+            accepted = await self._command_emergency(plan, action)
         except Exception as exc:
             log.exception("emergencyStop vehicle action failed")
             return False, f"emergency stop LATCHED but {action} failed: {exc}"
-        if not ok:
+        if not accepted:
             await self._health_event(
                 "link", "emergency_stop_refused",
                 f"flight controller refused the emergency {action}",
@@ -3706,6 +4275,32 @@ class Companion:
                 f"emergency stop LATCHED but the flight controller refused {action}"
             )
         return True, f"emergency stop -> {action} (latched until disarmed on the ground)"
+
+    def _emergency_stop_plan(self) -> Optional[Any]:
+        """Ask the SafetyManager what to do; ``None`` means "default to LAND"."""
+        if self.safety is None:
+            return None
+        try:
+            return self.safety.emergency_stop_plan(self._vehicle_state)
+        except Exception:
+            log.exception("emergency_stop_plan failed; defaulting to LAND")
+            return None
+
+    async def _command_emergency(self, plan: Any, action: str) -> bool:
+        """Issue the emergency action and REPORT whether the FC took it.
+
+        The result is checked, unlike the original path: ``land()`` /
+        ``set_mode()`` can be refused (an unknown mode map, a dead link, LAND
+        while disarmed), and swallowing that acked ``success: true`` -- the
+        ordinary ``land`` command was verified harder than the emergency one.
+        """
+        if action == "disarm" or getattr(plan, "force_disarm", False):
+            result = await self._vehicle_call(self.vehicle.disarm, force=True)
+        elif action == "land":
+            result = await self._vehicle_call(self.vehicle.land)
+        else:
+            result = await self._vehicle_call(self.vehicle.set_mode, "BRAKE")
+        return result is not False
 
     def _maybe_clear_estop(self) -> None:
         """Clear the e-stop latch once the aircraft is down and disarmed.
@@ -3720,24 +4315,29 @@ class Companion:
         if not self._estop_latched:
             return
         st = self._vehicle_state
-        if not st.armed and not st.airborne:
-            self._estop_latched = False
-            log.warning("emergency-stop latch cleared: vehicle disarmed on the ground")
+        if st.armed or st.airborne:
+            return
+        self._estop_latched = False
+        log.warning("emergency-stop latch cleared: vehicle disarmed on the ground")
 
     async def _vehicle_action(self, name: str, fn):
+        """Run one FC-bound action and turn its outcome into an ack pair.
+
+        Three outcomes, three messages: no link, the FC said no, and it
+        worked. The call goes OFF the event loop -- arm/disarm/takeoff wait on
+        a COMMAND_ACK and set_mode waits on a mode readback, so calling them
+        inline froze the 20 Hz control loop and every watchdog with it (FM-09).
+        """
         if self.vehicle is None:
             return False, f"{name}: no FC link"
         try:
-            # OFF the event loop: arm/disarm/takeoff wait on a COMMAND_ACK and
-            # set_mode now waits on a mode readback, so calling them inline
-            # froze the 20 Hz control loop and every watchdog with it (FM-09).
-            result = await self._vehicle_call(fn)
-            if result is False:
-                return False, f"{name}: flight controller rejected command"
-            return True, f"{name} ok"
+            accepted = await self._vehicle_call(fn)
         except Exception as exc:
             log.exception("%s failed", name)
             return False, f"{name} failed: {exc}"
+        if accepted is False:
+            return False, f"{name}: flight controller rejected command"
+        return True, f"{name} ok"
 
     # ---- manualInput (high-rate, FIRE-AND-FORGET, NEVER acked) -----------
     def _handle_manual_input(self, msg: Dict[str, Any]) -> None:
@@ -3752,51 +4352,93 @@ class Companion:
         wire parser already rejects the bare NaN/Infinity JSON literals; this
         is the second gate, because ``_clamp01(nan)`` used to read as FULL
         stick deflection -- full climb, full forward, max yaw (FM-05)."""
-        axes = ("throttle", "yaw", "pitch", "roll")
-        try:
-            values = {name: float(msg.get(name, 0.0)) for name in axes}
-        except (TypeError, ValueError):
-            log.warning("manualInput dropped: non-numeric axis")
+        sticks = self._usable_sticks(msg)
+        if sticks is None:
             return
-        if not all(math.isfinite(v) for v in values.values()):
-            log.warning(
-                "manualInput dropped: non-finite axis %r (watchdog NOT refreshed)",
-                {k: v for k, v in values.items() if not math.isfinite(v)},
-            )
-            return
-
+        # Only a WHOLE usable frame refreshes the watchdog, so a stream of
+        # broken ones ages out into the zero-and-hold instead of holding the
+        # watchdog open on garbage.
         self._last_manual_input_ms = _now_ms()
         if not self._manual_engaged or self.manual is None:
             return
         try:
-            self.manual.set_input(**values)
+            self.manual.set_input(**sticks)
         except Exception:
             log.exception("manual set_input failed")
+
+    #: The four stick axes, in the contract's ManualInputMessage order.
+    _STICK_AXES = ("throttle", "yaw", "pitch", "roll")
+
+    @classmethod
+    def _usable_sticks(cls, msg: Dict[str, Any]) -> Optional[Dict[str, float]]:
+        """The four axes as finite floats, or ``None`` to drop the frame whole.
+
+        A partially usable stick frame is not a stick frame: an aircraft
+        commanded on three axes and NaN on the fourth is not being flown, it
+        is being guessed at. The wire parser already rejects the bare
+        NaN/Infinity JSON literals; this is the second gate, because
+        ``_clamp01(nan)`` used to read as FULL stick deflection -- full climb,
+        full forward, max yaw (FM-05).
+        """
+        sticks: Dict[str, float] = {}
+        broken: Dict[str, Any] = {}
+        for axis in cls._STICK_AXES:
+            try:
+                value = float(msg.get(axis, 0.0))
+            except (TypeError, ValueError):
+                log.warning("manualInput dropped: non-numeric axis %r", axis)
+                return None
+            if math.isfinite(value):
+                sticks[axis] = value
+            else:
+                broken[axis] = value
+        if broken:
+            log.warning(
+                "manualInput dropped: non-finite axis %r (watchdog NOT refreshed)",
+                broken,
+            )
+            return None
+        return sticks
 
     # ======================================================================
     # State helpers (single active control source)
     # ======================================================================
     def _set_control_source(self, source: str) -> None:
+        """The ONE place the active source is written.
+
+        The orchestrator field and the telemetry-facing VehicleState field are
+        set together so the wire can never disagree with the arbiter about who
+        is flying (PRD 11).
+        """
         self._control_source = source
         self._vehicle_state.control_source = source
 
+    #: Every engagement flag, cleared together by _release_all. Keeping the
+    #: list here rather than in the body is what makes "exactly one control
+    #: source" auditable: a new source has to appear in this tuple to be
+    #: releasable, and a release can never miss one by omission.
+    _ENGAGEMENT_FLAGS = ("_tracking_engaged", "_manual_engaged", "_planner_engaged")
+
     def _release_all(self, source: str) -> None:
-        self._tracking_engaged = False
-        self._manual_engaged = False
-        self._planner_engaged = False
-        # rtl / land / disarm / e-stop / deadman all release. Every one of them
-        # used to leave the takeoff window ARMED, so the control tick kept
-        # returning early (armed, below 0.9x target) and emitted no setpoints
-        # at all for the remainder of the 60 s (FM-04 / FM-24).
+        """Drop every claim on the aircraft and land on ``source``.
+
+        rtl / land / disarm / e-stop / deadman all come through here. Each of
+        them used to leave the takeoff window ARMED, so the control tick kept
+        returning early (armed, below 0.9x target) and emitted no setpoints at
+        all for the remainder of the 60 s (FM-04 / FM-24).
+        """
+        for flag in self._ENGAGEMENT_FLAGS:
+            setattr(self, flag, False)
         self._takeoff_deadline_ms = 0.0
+        self._planner_tracking_tool = ""
+        # Wind-down, in order: PID state, stick smoothing, then the plan
+        # itself. A plan must never survive a failsafe/release, and neither
+        # must the integrator state the next engage would otherwise inherit.
         if self.guidance is not None:
             self.guidance.reset()
-        if self.manual is not None:
-            _safe_call(getattr(self.manual, "reset", None))
-        self._planner_tracking_tool = ""
-        if self.planner is not None:
-            # Full reset: a plan must never survive a failsafe/release.
-            _safe_call(getattr(self.planner, "reset", None))
+        for component in (self.manual, self.planner):
+            if component is not None:
+                _safe_call(getattr(component, "reset", None))
         self._restore_operator_standoff()
         self._disarm_envelope()
         self._set_control_source(source)
@@ -3835,24 +4477,30 @@ class Companion:
         self._gimbal_leg_index = -1
 
     def _sync_safety_limits(self) -> None:
-        if self.safety is not None:
+        """Push the live Limits to every component that clamps against them.
+
+        ``Limits`` is shared by reference, but the SafetyManager and the
+        Vehicle each keep derived numbers; ``goto_global`` clamps to the
+        Vehicle-held copy, which is the global-position path's second clamp.
+        A holder that cannot take the update must not stop the others.
+        """
+        for holder in (self.safety, self.vehicle):
+            if holder is None:
+                continue
             try:
-                self.safety.update_limits(self.limits)
-            except Exception:
-                pass
-        if self.vehicle is not None:
-            # goto_global clamps to the Vehicle-held Limits; keep it current.
-            try:
-                self.vehicle.update_limits(self.limits)
+                holder.update_limits(self.limits)
             except Exception:
                 pass
 
     async def _status(self, severity: str, text: str) -> None:
-        if self.api is not None:
-            try:
-                await self.api.push_status(severity, text)
-            except Exception:
-                pass
+        """Broadcast one statusText. Never fatal: it is a courtesy rail, and a
+        broken socket must not take down whatever was reporting through it."""
+        if self.api is None:
+            return
+        try:
+            await self.api.push_status(severity, text)
+        except Exception:
+            pass
 
     # ======================================================================
     # timing
@@ -3871,12 +4519,12 @@ class Companion:
             return None
         if asyncio.iscoroutinefunction(fn):
             return await fn(*args, **kwargs)
-        result = await asyncio.to_thread(fn, *args, **kwargs)
-        return await _maybe_await(result)
+        return await _maybe_await(await asyncio.to_thread(fn, *args, **kwargs))
 
     async def _sleep_remaining(self, t0: float, period: float) -> None:
-        elapsed = time.monotonic() - t0
-        await asyncio.sleep(max(0.0, period - elapsed))
+        """Sleep out the rest of ``period``. An overrunning tick sleeps 0 --
+        the next one starts immediately rather than accumulating a debt."""
+        await asyncio.sleep(max(0.0, period - (time.monotonic() - t0)))
 
 
 # ==========================================================================
@@ -3901,20 +4549,28 @@ class _CameraSource:
         self._det = detector
 
     async def observe(self) -> List[TargetObservation]:
-        result = await _maybe_await(self._cap.read())
-        # Capture.read() returns (ok, frame); tolerate a bare-frame impl too.
-        if isinstance(result, tuple):
-            ok, frame = result
-        else:
-            ok, frame = (result is not None), result
-        if not ok or frame is None:
-            # RAISE, do not return []. Returning [] made a dead camera present
-            # as a healthy empty observation (FM-100).
+        """One frame -> detections, RAISING when there was no usable frame.
+
+        Every failure on this path raises ``FrameUnavailable`` rather than
+        returning []. Returning [] made a dead camera present as a healthy
+        empty observation, which is the evidence a ``false_alarm`` verdict is
+        allowed to rest on (FM-100).
+        """
+        frame = self._frame(await _maybe_await(self._cap.read()))
+        if frame is None:
             raise FrameUnavailable("camera read failed")
-        dets = await _maybe_await(self._det.detect(frame))
+        detections = await _maybe_await(self._det.detect(frame))
         if getattr(self._det, "last_inference_failed", False):
             raise FrameUnavailable("detector inference failed")
-        return list(dets) if dets else []
+        return list(detections or [])
+
+    @staticmethod
+    def _frame(read_result: Any) -> Any:
+        """Unpack ``Capture.read()``: an (ok, frame) pair or a bare frame."""
+        if isinstance(read_result, tuple):
+            ok, frame = read_result
+            return frame if ok else None
+        return read_result
 
 
 async def _maybe_await(value: Any) -> Any:
@@ -3925,12 +4581,20 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _wire_value(value: Any) -> str:
+    """The wire string for an enum-or-string field (``.value`` when present)."""
+    return value.value if hasattr(value, "value") else str(value)
+
+
 def _safe_call(fn) -> None:
-    if callable(fn):
-        try:
-            fn()
-        except Exception:
-            pass
+    """Invoke an OPTIONAL no-arg hook. A missing or raising hook is not news:
+    every caller is already on a path whose next step is the safe state."""
+    if not callable(fn):
+        return
+    try:
+        fn()
+    except Exception:
+        pass
 
 
 def _plan_envelope_shape(plan: Dict[str, Any]) -> Tuple[float, float, float]:
@@ -3972,31 +4636,49 @@ def _plan_envelope_shape(plan: Dict[str, Any]) -> Tuple[float, float, float]:
     return (altitude, laps, hold_s)
 
 
+#: What a degraded frame reports for a link it cannot measure. This path is
+#: only reached when the FC layer could NOT supply telemetry: reporting a 0 ms
+#: latency there advertised a PERFECT link at exactly the moment the link was
+#: dead -- the inverse of the truth (FM-08).
+_DEAD_LINK_LATENCY_MS = 9999.0
+
+
 def _telemetry_from_state(st: VehicleState) -> Dict[str, Any]:
     """Build a minimal contract telemetry dict from a VehicleState.
 
     Used when the Vehicle layer doesn't supply a full telemetry dict (e.g. in a
-    degraded/no-FC dev run) so the UI still receives well-formed frames."""
+    degraded/no-FC dev run) so the UI still receives well-formed frames. Every
+    value it cannot know is stated as unknown-and-bad rather than as a
+    plausible default."""
+    heading = float(st.heading)
+    lat, lon = float(st.lat), float(st.lon)
+    rel_alt = float(st.relAlt)
     return {
         "type": "telemetry",
         "ts": _now_ms(),
         "armed": bool(st.armed),
         "mode": str(st.mode),
         "controlSource": str(st.control_source),
-        "attitude": {"roll": float(st.roll), "pitch": float(st.pitch), "yaw": float(st.heading)},
-        "position": {"lat": float(st.lat), "lon": float(st.lon),
-                     "relAlt": float(st.relAlt), "absAlt": float(st.relAlt)},
-        "velocity": {"groundspeed": float(st.groundspeed), "verticalSpeed": float(st.vspeed)},
-        "heading": float(st.heading),
+        "attitude": {
+            "roll": float(st.roll), "pitch": float(st.pitch), "yaw": heading,
+        },
+        "position": {
+            "lat": lat, "lon": lon, "relAlt": rel_alt, "absAlt": rel_alt,
+        },
+        "velocity": {
+            "groundspeed": float(st.groundspeed),
+            "verticalSpeed": float(st.vspeed),
+        },
+        "heading": heading,
         "battery": {"voltage": 0.0, "current": 0.0, "remaining": 0.0},
         "gps": {"fixType": 0, "satellites": 0, "hdop": 99.0},
-        "home": {"lat": float(st.lat), "lon": float(st.lon), "distance": 0.0},
-        # This path is only reached when the FC layer could NOT supply
-        # telemetry. Reporting a 0 ms latency there advertised a perfect link
-        # at exactly the moment the link was dead -- the inverse of the truth
-        # (FM-08).
-        "link": {"rssi": 0.0, "latencyMs": 9999.0},
-        "fcLink": {"lost": True, "heartbeatAgeS": 9999.0, "telemetryStale": True},
+        "home": {"lat": lat, "lon": lon, "distance": 0.0},
+        "link": {"rssi": 0.0, "latencyMs": _DEAD_LINK_LATENCY_MS},
+        "fcLink": {
+            "lost": True,
+            "heartbeatAgeS": _DEAD_LINK_LATENCY_MS,
+            "telemetryStale": True,
+        },
     }
 
 
@@ -4004,14 +4686,36 @@ def _telemetry_from_state(st: VehicleState) -> Dict[str, Any]:
 # CLI entry point
 # ==========================================================================
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
+    parser = argparse.ArgumentParser(
         prog="python -m eis_companion.app",
         description="Drone Safety Platform -- Jetson companion orchestrator.",
     )
-    p.add_argument("--config", default=None, help="path to a config YAML (else EIS_CONFIG / default.yaml)")
-    p.add_argument("--sitl", action="store_true", help="force SITL mode (overrides config)")
-    p.add_argument("--log-level", default="INFO", help="logging level (DEBUG/INFO/WARNING/...)")
-    return p.parse_args(argv)
+    parser.add_argument(
+        "--config", default=None,
+        help="path to a config YAML (else EIS_CONFIG / default.yaml)",
+    )
+    parser.add_argument(
+        "--sitl", action="store_true", help="force SITL mode (overrides config)",
+    )
+    parser.add_argument(
+        "--log-level", default="INFO",
+        help="logging level (DEBUG/INFO/WARNING/...)",
+    )
+    return parser.parse_args(argv)
+
+
+def _install_signal_handlers(companion: "Companion") -> None:
+    """Ask for a graceful stop on SIGINT/SIGTERM where the loop supports it.
+
+    Windows and non-main threads do not; there the KeyboardInterrupt caught in
+    ``main`` is the fallback, which is why this never raises.
+    """
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, companion.request_stop)
+        except (NotImplementedError, ValueError):
+            pass
 
 
 async def _amain(argv: Optional[List[str]] = None) -> None:
@@ -4021,19 +4725,13 @@ async def _amain(argv: Optional[List[str]] = None) -> None:
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
     )
     config = load_config(args.config)
+    # --sitl is a one-way override: the flag can turn SITL ON, never off, so a
+    # hardware config cannot be talked into SITL leniency by omitting it.
     if args.sitl:
         config.sitl = True
 
     companion = Companion(config)
-
-    # graceful shutdown on SIGINT/SIGTERM where supported.
-    loop = asyncio.get_running_loop()
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        try:
-            loop.add_signal_handler(sig, companion.request_stop)
-        except (NotImplementedError, ValueError):
-            pass  # Windows / non-main-thread: rely on KeyboardInterrupt below
-
+    _install_signal_handlers(companion)
     await companion.run()
 
 

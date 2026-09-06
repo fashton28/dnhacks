@@ -47,7 +47,7 @@ describe('blue-force RF whitelisting', () => {
   it('suppresses an emitter sitting on top of an authenticated own position', async () => {
     const { scheduler, rail, seen } = rfRail();
     rail.registerOwnVehicle({
-      vehicleId: 'eis-2', lat: -26.0913, lon: 29.4702, ts: QUIET_START_MS + 5_800, authenticated: true,
+      vehicleId: 'eis-2', lat: 41.2001797, lon: -98.4007163, ts: QUIET_START_MS + 5_800, authenticated: true,
     });
     await rail.start();
     scheduler.advance(10_000);
@@ -59,8 +59,8 @@ describe('blue-force RF whitelisting', () => {
     const { scheduler, rail, seen } = rfRail();
     rail.registerOwnVehicle({
       vehicleId: 'eis-2',
-      lat: -26.0913,
-      lon: 29.4702,
+      lat: 41.2001797,
+      lon: -98.4007163,
       ts: QUIET_START_MS - 600_000, // ten minutes old
       authenticated: true,
     });
@@ -142,11 +142,11 @@ describe('site normalcy', () => {
 
   it('handles a window that wraps past midnight', () => {
     const nightShift = { days: [3 as const], startMinute: 1_320, endMinute: 360 };
-    // Wednesday 23:00 SAST — inside, on the starting day.
+    // Wednesday 23:00 at UTC+120 — inside, on the starting day.
     expect(windowContains(nightShift, Date.UTC(2024, 0, 10, 21, 0, 0), 120)).toBe(true);
-    // Thursday 02:00 SAST — still inside, carried over from Wednesday.
+    // Thursday 02:00 at UTC+120 — still inside, carried over from Wednesday.
     expect(windowContains(nightShift, Date.UTC(2024, 0, 11, 0, 0, 0), 120)).toBe(true);
-    // Thursday 08:00 SAST — outside.
+    // Thursday 08:00 at UTC+120 — outside.
     expect(windowContains(nightShift, Date.UTC(2024, 0, 11, 6, 0, 0), 120)).toBe(false);
   });
 

@@ -2,32 +2,42 @@
 ============================================================================
 Drone Safety Platform -- Video capture (Capture)
 ----------------------------------------------------------------------------
-Wraps camera / video-file / simulated sources behind a unified interface:
+One façade (``Capture``) in front of a family of interchangeable *frame
+sources*.  The façade owns nothing but settings and lifecycle state; each
+backend owns exactly one way of getting pixels:
 
-    cap = Capture(config)
+    cap = Capture(config)               # dict of settings, or keyword args
     cap.open()
-    ok, frame = cap.read()   # frame is a HxWx3 uint8 BGR numpy array, or None
+    ok, frame = cap.read()              # HxWx3 uint8 BGR ndarray, or None
     cap.release()
 
-Supported modes (config['source']):
-  'csi'  -- Jetson CSI camera via nvarguscamerasrc GStreamer pipeline.
-            Requires cv2 built with GStreamer support (standard on JetPack).
-            Low-latency 720p pipeline documented below.
-  'v4l2' -- USB/V4L2 camera via cv2.VideoCapture(device_index_or_path).
-  'file' -- Video file (development / replay).
-  'mock' -- Delegates to SimTargetSource; no real camera needed.
-  'sim'  -- Alias for 'mock'.
+Backends (selected by ``source``)
+  'csi'  -- Jetson CSI camera through the nvarguscamerasrc GStreamer pipeline
+            built by :func:`_csi_pipeline`.  Needs a cv2 built with GStreamer
+            support (standard on JetPack).
+  'v4l2' -- USB / V4L2 camera through ``cv2.VideoCapture(index_or_path)``.
+  'file' -- Video file (bench testing / replay).  The file's own geometry
+            wins, and is published back through ``Capture.width/height``.
+  'mock' -- Synthetic scene rendered by ``SimTargetSource``; no camera, and
+  'sim'     no OpenCV, so the SITL/dev box works unmodified.
 
-Config dict keys (all optional, with sensible defaults):
-  source    str   'csi' | 'v4l2' | 'file' | 'mock' | 'sim'  (default 'csi')
-  width     int   frame width  in pixels (default 1280)
-  height    int   frame height in pixels (default 720)
-  fps       int   requested framerate   (default 30)
-  device    int|str  v4l2 device index or path (default 0)
-  file_path str   path for 'file' mode
-  flip      int   nvarguscamerasrc flip-method 0=none,2=180° (default 0)
+Settings (accepted either as a mapping or as keyword arguments; every one is
+optional and falls back to the default shown)
+  source    str      'csi' | 'v4l2' | 'file' | 'mock' | 'sim'   ('csi')
+  width     int      requested frame width  in pixels           (1280)
+  height    int      requested frame height in pixels           (720)
+  fps       int      requested framerate                        (30)
+  device    int|str  v4l2 device index or node path             (0)
+  file_path str      path for 'file' mode ('file' is an alias)  ('')
+  flip      int      nvarguscamerasrc flip-method, 0=none 2=180 (0)
+  sensor_id int      CSI sensor index                           (0)
 
-GStreamer pipeline (CSI / nvarguscamerasrc, low-latency 720p):
+An unrecognised setting raises ``TypeError`` rather than being ignored: a
+silently-dropped knob is a camera that runs with the wrong geometry and no
+evidence of why.
+
+CSI pipeline (low-latency 720p), assembled stage-by-stage below::
+
   nvarguscamerasrc sensor-id=0 !
     video/x-raw(memory:NVMM),width=1280,height=720,framerate=30/1,format=NV12 !
     nvvidconv flip-method=0 !
@@ -36,62 +46,325 @@ GStreamer pipeline (CSI / nvarguscamerasrc, low-latency 720p):
     video/x-raw,format=BGR !
     appsink drop=1 max-buffers=1
 
-Notes:
-  * ``drop=1 max-buffers=1`` keeps the pipeline live; we always get the
-    most-recent frame rather than a growing buffer queue.
-  * For 1080p, change the width/height in both the sensor and the nvvidconv
-    stages.
-  * If GStreamer support is absent from your cv2 build you will get a broken
-    capture (ok=False every read); install ``python3-opencv`` from the
-    JetPack apt overlay or build cv2 with ``-DWITH_GSTREAMER=ON``.
+``drop=1 max-buffers=1`` keeps the appsink at the live edge: a slow consumer
+loses frames instead of accumulating latency behind a growing queue.  For
+1080p raise width/height in BOTH the sensor caps and the nvvidconv caps.  A
+cv2 without GStreamer support cannot open this pipeline at all -- install
+``python3-opencv`` from the JetPack apt overlay, or rebuild cv2 with
+``-DWITH_GSTREAMER=ON``.
 ============================================================================
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional, Tuple
+from dataclasses import dataclass, fields, replace
+from typing import Any, Mapping, Optional, Tuple
 
 import numpy as np
 
 log = logging.getLogger(__name__)
 
-# cv2 is hardware-optional; sim/mock mode must work without it.
+# OpenCV is a hardware-side optional dependency: the synthetic backend must
+# stay importable and usable on a box that has never seen a camera.
 try:
     import cv2  # type: ignore
     _CV2_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - exercised on Jetson/CI with cv2
     cv2 = None  # type: ignore
     _CV2_AVAILABLE = False
 
 
+#: ``(ok, frame)`` -- the pair every backend and ``Capture.read()`` returns.
+ReadResult = Tuple[bool, Optional[np.ndarray]]
+
+#: Sources served by the synthetic renderer instead of a real device.
+SYNTHETIC_SOURCES = frozenset({"mock", "sim"})
+
+DEFAULT_SOURCE = "csi"
+
+# Settings whose spelling differs between the YAML config (``file``) and this
+# module's historical key (``file_path``).  Both are accepted.
+_SETTING_ALIASES = {"file": "file_path", "flip_method": "flip"}
+
+
 # ---------------------------------------------------------------------------
-# GStreamer pipeline builder
+# Settings
 # ---------------------------------------------------------------------------
 
-def _gstreamer_pipeline(
-    width: int,
-    height: int,
-    fps: int,
-    sensor_id: int = 0,
-    flip_method: int = 0,
-) -> str:
-    """Return the low-latency nvarguscamerasrc GStreamer pipeline string.
+@dataclass(frozen=True)
+class CaptureSettings:
+    """Normalised, validated capture settings.
 
-    This pipeline is optimised for the Jetson Orin Nano + IMX219 (or compatible
-    CSI camera).  ``drop=1 max-buffers=1`` in the appsink ensures we always
-    consume the freshest frame and never accumulate latency behind a slow
-    consumer.
+    Immutable so a backend cannot quietly retune the façade underneath the
+    caller; ``Capture`` publishes a *new* instance when a backend reports
+    different real geometry (the 'file' source does).
     """
-    return (
-        f"nvarguscamerasrc sensor-id={sensor_id} ! "
-        f"video/x-raw(memory:NVMM),width={width},height={height},"
-        f"framerate={fps}/1,format=NV12 ! "
-        f"nvvidconv flip-method={flip_method} ! "
-        f"video/x-raw,width={width},height={height},format=BGRx ! "
-        "videoconvert ! "
-        "video/x-raw,format=BGR ! "
-        "appsink drop=1 max-buffers=1"
-    )
+
+    source: str = DEFAULT_SOURCE
+    width: int = 1280
+    height: int = 720
+    fps: int = 30
+    device: Any = 0
+    file_path: str = ""
+    flip: int = 0
+    sensor_id: int = 0
+
+    @classmethod
+    def resolve(
+        cls,
+        config: Optional[Mapping[str, Any]] = None,
+        **overrides: Any,
+    ) -> "CaptureSettings":
+        """Merge a settings mapping with keyword overrides.
+
+        ``None`` values are treated as "not supplied" so a caller can forward
+        optional config fields without special-casing each one.
+        """
+        merged: dict[str, Any] = {}
+        for layer in (config or {}, overrides):
+            for key, value in layer.items():
+                if value is None:
+                    continue
+                merged[_SETTING_ALIASES.get(key, key)] = value
+
+        known = {f.name for f in fields(cls)}
+        unknown = sorted(set(merged) - known)
+        if unknown:
+            raise TypeError(
+                f"unknown capture setting(s): {', '.join(unknown)}; "
+                f"known settings are {', '.join(sorted(known))}"
+            )
+
+        return cls(
+            source=str(merged.get("source", DEFAULT_SOURCE)).strip().lower(),
+            width=int(merged.get("width", 1280)),
+            height=int(merged.get("height", 720)),
+            fps=int(merged.get("fps", 30)),
+            device=merged.get("device", 0),
+            file_path=str(merged.get("file_path", "")),
+            flip=int(merged.get("flip", 0)),
+            sensor_id=int(merged.get("sensor_id", 0)),
+        )
+
+    @property
+    def frame_size(self) -> Tuple[int, int]:
+        """``(width, height)`` in pixels."""
+        return self.width, self.height
+
+
+def _csi_pipeline(settings: CaptureSettings) -> str:
+    """Assemble the nvarguscamerasrc -> appsink pipeline for *settings*.
+
+    Built as an ordered list of stages so the caps negotiated at each hop are
+    readable next to the element that needs them.
+    """
+    stages = [
+        f"nvarguscamerasrc sensor-id={settings.sensor_id}",
+        (
+            f"video/x-raw(memory:NVMM),width={settings.width},"
+            f"height={settings.height},framerate={settings.fps}/1,format=NV12"
+        ),
+        f"nvvidconv flip-method={settings.flip}",
+        f"video/x-raw,width={settings.width},height={settings.height},format=BGRx",
+        "videoconvert",
+        "video/x-raw,format=BGR",
+        "appsink drop=1 max-buffers=1",
+    ]
+    return " ! ".join(stages)
+
+
+# ---------------------------------------------------------------------------
+# Frame sources
+# ---------------------------------------------------------------------------
+
+class _FrameSource:
+    """One way of producing frames.  Subclasses implement three methods."""
+
+    #: Whether this backend needs OpenCV to be importable.
+    needs_cv2 = True
+    #: Human label used in log lines.
+    label = "frame source"
+
+    def __init__(self, settings: CaptureSettings, sim_source: Any = None) -> None:
+        self.settings = settings
+        self._sim_source = sim_source
+        #: Geometry the backend actually delivers; may differ from the request.
+        self.frame_size: Tuple[int, int] = settings.frame_size
+
+    def open(self) -> bool:
+        raise NotImplementedError
+
+    def read(self) -> ReadResult:
+        raise NotImplementedError
+
+    def close(self) -> None:
+        """Release any device handle.  Must never raise."""
+
+
+class _CvFrameSource(_FrameSource):
+    """Shared plumbing for every backend that ends in a ``cv2.VideoCapture``."""
+
+    def __init__(self, settings: CaptureSettings, sim_source: Any = None) -> None:
+        super().__init__(settings, sim_source)
+        self._handle: Any = None
+
+    # -- subclass hooks ------------------------------------------------
+    def _acquire(self) -> Any:
+        """Return an opened ``cv2.VideoCapture`` (or one that failed to open)."""
+        raise NotImplementedError
+
+    def _configure(self, handle: Any) -> None:
+        """Post-open tuning; the default does nothing."""
+
+    def _failure_hint(self) -> str:
+        return "check the device path/permissions"
+
+    # -- _FrameSource --------------------------------------------------
+    def open(self) -> bool:
+        handle = self._acquire()
+        if handle is None or not handle.isOpened():
+            log.error("failed to open %s -- %s", self.label, self._failure_hint())
+            if handle is not None:
+                try:
+                    handle.release()
+                except Exception:
+                    pass
+            return False
+        self._configure(handle)
+        self._handle = handle
+        log.info(
+            "%s opened (%dx%d @ %d fps).",
+            self.label, self.frame_size[0], self.frame_size[1], self.settings.fps,
+        )
+        return True
+
+    def read(self) -> ReadResult:
+        if self._handle is None:
+            return False, None
+        ok, frame = self._handle.read()
+        if not ok or frame is None:
+            return False, None
+        want_w, want_h = self.frame_size
+        if frame.shape[1] != want_w or frame.shape[0] != want_h:
+            frame = cv2.resize(frame, (want_w, want_h))
+        return True, frame
+
+    def close(self) -> None:
+        if self._handle is None:
+            return
+        try:
+            self._handle.release()
+        except Exception:
+            pass
+        self._handle = None
+
+
+class _CsiFrameSource(_CvFrameSource):
+    """Jetson CSI camera driven through a GStreamer appsink."""
+
+    label = "CSI camera"
+
+    def _acquire(self) -> Any:
+        pipeline = _csi_pipeline(self.settings)
+        log.info("opening CSI camera with GStreamer pipeline:\n  %s", pipeline)
+        return cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
+
+    def _failure_hint(self) -> str:
+        return (
+            "the JetPack GStreamer plugins must be installed, cv2 must be "
+            "built with GStreamer support, and the ribbon cable must be seated"
+        )
+
+
+class _V4l2FrameSource(_CvFrameSource):
+    """USB / V4L2 camera addressed by index or device node."""
+
+    label = "V4L2 camera"
+
+    def _device(self) -> Any:
+        device = self.settings.device
+        if isinstance(device, str) and device.isdigit():
+            return int(device)
+        return device
+
+    def _acquire(self) -> Any:
+        device = self._device()
+        log.info("opening V4L2 device: %s", device)
+        return cv2.VideoCapture(device)
+
+    def _configure(self, handle: Any) -> None:
+        cfg = self.settings
+        handle.set(cv2.CAP_PROP_FRAME_WIDTH, cfg.width)
+        handle.set(cv2.CAP_PROP_FRAME_HEIGHT, cfg.height)
+        handle.set(cv2.CAP_PROP_FPS, cfg.fps)
+
+    def _failure_hint(self) -> str:
+        return f"device {self._device()!r} did not open"
+
+
+class _FileFrameSource(_CvFrameSource):
+    """Video file playback -- the file's own geometry wins."""
+
+    label = "video file"
+
+    def _acquire(self) -> Any:
+        path = self.settings.file_path
+        if not path:
+            log.error("capture source is 'file' but no file_path was provided.")
+            return None
+        log.info("opening video file: %s", path)
+        return cv2.VideoCapture(path)
+
+    def _configure(self, handle: Any) -> None:
+        width = int(handle.get(cv2.CAP_PROP_FRAME_WIDTH)) or self.frame_size[0]
+        height = int(handle.get(cv2.CAP_PROP_FRAME_HEIGHT)) or self.frame_size[1]
+        # Publish the real geometry so read() stops resizing and the caller's
+        # normalised bboxes map back onto the right pixel grid.
+        self.frame_size = (width, height)
+
+    def _failure_hint(self) -> str:
+        return f"{self.settings.file_path!r} is missing or not decodable"
+
+
+class _SyntheticFrameSource(_FrameSource):
+    """Frames rendered by ``SimTargetSource`` -- no camera, no OpenCV."""
+
+    needs_cv2 = False
+    label = "synthetic scene"
+
+    def open(self) -> bool:
+        if self._sim_source is None:
+            # Imported here so the module stays importable when numpy-only
+            # consumers never touch the synthetic path.
+            from .sim_source import SimTargetSource
+
+            width, height = self.frame_size
+            self._sim_source = SimTargetSource(
+                frame_width=width, frame_height=height,
+            )
+        log.info(
+            "%s opened (%dx%d).", self.label, self.frame_size[0], self.frame_size[1],
+        )
+        return True
+
+    def read(self) -> ReadResult:
+        if self._sim_source is None:
+            return False, None
+        return True, self._sim_source.render_frame()
+
+    @property
+    def sim_source(self) -> Any:
+        return self._sim_source
+
+
+#: source name -> backend class.  ``Capture.open()`` is a table lookup, so a
+#: new source is one entry plus one class.
+_BACKENDS: dict[str, type[_FrameSource]] = {
+    "csi": _CsiFrameSource,
+    "v4l2": _V4l2FrameSource,
+    "file": _FileFrameSource,
+    **{name: _SyntheticFrameSource for name in SYNTHETIC_SOURCES},
+}
 
 
 # ---------------------------------------------------------------------------
@@ -104,98 +377,103 @@ class Capture:
     Parameters
     ----------
     config:
-        Dictionary with capture settings (see module docstring for keys).
+        Mapping of capture settings (see the module docstring).  Optional --
+        every setting can equally be passed as a keyword argument, which is
+        how the orchestrator constructs it.
     sim_source:
-        Optional pre-created :class:`~eis_companion.vision.sim_source.SimTargetSource`
-        instance to use in 'mock'/'sim' mode.  If *None*, one is created
-        automatically when the mode is 'mock' or 'sim'.
+        A pre-built ``SimTargetSource`` for 'mock'/'sim' mode.  When *None*
+        one is created on ``open()``.
+    **overrides:
+        Individual settings; they win over the same key in *config*.
     """
 
     def __init__(
         self,
-        config: Optional[dict[str, Any]] = None,
+        config: Optional[Mapping[str, Any]] = None,
         sim_source: Any = None,
+        **overrides: Any,
     ) -> None:
-        cfg = config or {}
-        self._source: str = str(cfg.get("source", "csi")).lower()
-        self._width: int = int(cfg.get("width", 1280))
-        self._height: int = int(cfg.get("height", 720))
-        self._fps: int = int(cfg.get("fps", 30))
-        self._device: Any = cfg.get("device", 0)
-        self._file_path: str = str(cfg.get("file_path", ""))
-        self._flip: int = int(cfg.get("flip", 0))
-        self._sensor_id: int = int(cfg.get("sensor_id", 0))
-
-        self._cap: Any = None           # cv2.VideoCapture
-        self._sim: Any = sim_source     # SimTargetSource (lazy-created)
-        self._opened: bool = False
+        self._settings = CaptureSettings.resolve(config, **overrides)
+        self._sim_source = sim_source
+        self._backend: Optional[_FrameSource] = None
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def open(self) -> bool:
-        """Open the video source.  Returns True on success."""
-        if self._source in ("mock", "sim"):
-            return self._open_sim()
-        if not _CV2_AVAILABLE:
-            log.error("cv2 is not installed; cannot open '%s' source.", self._source)
+        """Open the configured source.  Returns True on success."""
+        if self._backend is not None:
+            return True
+
+        name = self._settings.source
+        factory = _BACKENDS.get(name)
+        if factory is None:
+            log.error(
+                "unknown capture source %r; known sources: %s",
+                name, ", ".join(sorted(_BACKENDS)),
+            )
             return False
-        if self._source == "csi":
-            return self._open_csi()
-        if self._source == "v4l2":
-            return self._open_v4l2()
-        if self._source == "file":
-            return self._open_file()
-        log.error("Unknown capture source: '%s'", self._source)
-        return False
+        if factory.needs_cv2 and not _CV2_AVAILABLE:
+            log.error("cv2 is not installed; cannot open '%s' source.", name)
+            return False
+
+        backend = factory(self._settings, sim_source=self._sim_source)
+        try:
+            opened = backend.open()
+        except Exception:
+            log.exception("capture backend %r raised while opening", name)
+            opened = False
+        if not opened:
+            backend.close()
+            return False
+
+        # Adopt whatever geometry the backend actually delivers.
+        width, height = backend.frame_size
+        self._settings = replace(self._settings, width=width, height=height)
+        self._backend = backend
+        return True
 
     def release(self) -> None:
-        """Release the underlying capture device."""
-        if self._cap is not None:
-            try:
-                self._cap.release()
-            except Exception:
-                pass
-            self._cap = None
-        self._opened = False
-        log.debug("Capture released (source=%s)", self._source)
+        """Release the underlying device.  Safe to call repeatedly."""
+        if self._backend is not None:
+            self._backend.close()
+            self._backend = None
+        log.debug("capture released (source=%s)", self._settings.source)
 
     def is_opened(self) -> bool:
-        """True if the source has been successfully opened."""
-        return self._opened
+        """True once :meth:`open` has succeeded and before :meth:`release`."""
+        return self._backend is not None
 
     # ------------------------------------------------------------------
     # Frame read
     # ------------------------------------------------------------------
 
-    def read(self) -> Tuple[bool, Optional[np.ndarray]]:
+    def read(self) -> ReadResult:
         """Read the next frame.
 
         Returns
         -------
         (ok, frame)
-            ok    -- True if a valid frame was returned.
-            frame -- HxWx3 uint8 BGR numpy array, or None on failure.
+            ``ok`` is True only when ``frame`` is a usable HxWx3 uint8 BGR
+            array.  A failure returns ``(False, None)`` -- never a blank
+            frame, because the orchestrator treats a failed read as "no
+            observation" and a blank frame as a real one.
         """
-        if not self._opened:
+        backend = self._backend
+        if backend is None:
             return False, None
-
-        if self._source in ("mock", "sim"):
-            return self._read_sim()
-
-        if self._cap is None:
+        try:
+            ok, frame = backend.read()
+        except Exception:
+            log.exception("capture backend %r raised while reading", self._settings.source)
             return False, None
-
-        ok, frame = self._cap.read()
         if not ok or frame is None:
-            log.warning("Capture.read(): failed to read frame (source=%s)", self._source)
+            log.warning(
+                "Capture.read(): failed to read frame (source=%s)",
+                self._settings.source,
+            )
             return False, None
-
-        # Resize if the actual frame doesn't match requested size (file mode).
-        if frame.shape[1] != self._width or frame.shape[0] != self._height:
-            frame = cv2.resize(frame, (self._width, self._height))
-
         return True, frame
 
     # ------------------------------------------------------------------
@@ -203,103 +481,28 @@ class Capture:
     # ------------------------------------------------------------------
 
     @property
+    def settings(self) -> CaptureSettings:
+        """The resolved settings, including any geometry the source imposed."""
+        return self._settings
+
+    @property
     def width(self) -> int:
-        return self._width
+        return self._settings.width
 
     @property
     def height(self) -> int:
-        return self._height
+        return self._settings.height
 
     @property
     def fps(self) -> int:
-        return self._fps
+        return self._settings.fps
 
     @property
     def source(self) -> str:
-        return self._source
+        return self._settings.source
 
     # ------------------------------------------------------------------
-    # Private helpers
-    # ------------------------------------------------------------------
-
-    def _open_csi(self) -> bool:
-        pipeline = _gstreamer_pipeline(
-            self._width, self._height, self._fps,
-            sensor_id=self._sensor_id,
-            flip_method=self._flip,
-        )
-        log.info("Opening CSI camera with GStreamer pipeline:\n  %s", pipeline)
-        cap = cv2.VideoCapture(pipeline, cv2.CAP_GSTREAMER)
-        if not cap.isOpened():
-            log.error(
-                "Failed to open CSI camera via GStreamer. "
-                "Ensure JetPack GStreamer plugins are installed and the "
-                "camera ribbon cable is seated."
-            )
-            return False
-        self._cap = cap
-        self._opened = True
-        log.info("CSI camera opened (%dx%d @ %d fps).", self._width, self._height, self._fps)
-        return True
-
-    def _open_v4l2(self) -> bool:
-        device = self._device
-        if isinstance(device, str) and device.isdigit():
-            device = int(device)
-        log.info("Opening V4L2 device: %s", device)
-        cap = cv2.VideoCapture(device)
-        if not cap.isOpened():
-            log.error("Failed to open V4L2 device: %s", device)
-            return False
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
-        cap.set(cv2.CAP_PROP_FPS, self._fps)
-        self._cap = cap
-        self._opened = True
-        log.info(
-            "V4L2 device %s opened (%dx%d @ %d fps).",
-            device, self._width, self._height, self._fps,
-        )
-        return True
-
-    def _open_file(self) -> bool:
-        if not self._file_path:
-            log.error("Capture source is 'file' but no file_path was provided.")
-            return False
-        log.info("Opening video file: %s", self._file_path)
-        cap = cv2.VideoCapture(self._file_path)
-        if not cap.isOpened():
-            log.error("Failed to open video file: %s", self._file_path)
-            return False
-        # Read actual dimensions from the file.
-        self._width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)) or self._width
-        self._height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)) or self._height
-        self._cap = cap
-        self._opened = True
-        log.info("Video file opened (%dx%d).", self._width, self._height)
-        return True
-
-    def _open_sim(self) -> bool:
-        if self._sim is None:
-            from .sim_source import SimTargetSource
-            self._sim = SimTargetSource(
-                frame_width=self._width,
-                frame_height=self._height,
-            )
-        self._opened = True
-        log.info(
-            "Capture opened in sim/mock mode (%dx%d).",
-            self._width, self._height,
-        )
-        return True
-
-    def _read_sim(self) -> Tuple[bool, Optional[np.ndarray]]:
-        """Return a synthetic BGR frame from the SimTargetSource."""
-        frame = self._sim.render_frame()
-        return True, frame
-
-    # ------------------------------------------------------------------
-    # Context manager support
+    # Context manager
     # ------------------------------------------------------------------
 
     def __enter__(self) -> "Capture":
@@ -308,3 +511,6 @@ class Capture:
 
     def __exit__(self, *_: Any) -> None:
         self.release()
+
+
+__all__ = ["Capture", "CaptureSettings", "ReadResult", "SYNTHETIC_SOURCES"]

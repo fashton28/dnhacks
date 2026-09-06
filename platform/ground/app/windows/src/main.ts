@@ -1,233 +1,226 @@
 /**
- * main.ts — Electron main process entry point.
+ * main.ts — Electron main process for the Windows ground-control shell.
  *
- * Responsibilities:
- *   1. Load .env (dotenv) early so all process.env vars are available.
- *   2. Enforce single-instance lock.
- *   3. Create the BrowserWindow with the security hardening the PRD requires:
- *        • contextIsolation: true
- *        • nodeIntegration: false
- *        • sandbox: true   (renderer process is a sandboxed OS child)
- *        • webSecurity: true
- *        • Only the preload script is injected into the renderer context.
- *   4. Load the UI: in dev mode load the Vite dev server; in production load
- *      the built ../ui/dist/index.html (extraResources path at runtime).
- *   5. Build the app menu (minimal; includes Reload and DevTools in dev).
- *   6. Intercept navigation / new-window events — open external URLs in the
- *      OS browser, never in Electron (defence-in-depth against XSS).
- *   7. Register all IPC handlers.
+ * What this file guarantees (the shell contract):
+ *   • platform/.env is loaded before anything reads process.env
+ *   • exactly one instance runs; a second launch focuses the first
+ *   • the renderer is fully isolated: contextIsolation + sandbox + webSecurity
+ *     on, nodeIntegration off, only preload.js injected
+ *   • dev (EIS_DEV=true / NODE_ENV=development) loads the Vite server on
+ *     EIS_UI_PORT (default 5173) and checks that what answers is THIS app
+ *     (FM-131); packaged builds load resources/ui/dist/index.html, unpackaged
+ *     builds load ground/ui/dist/index.html
+ *   • the renderer can never navigate away or open a window: any such URL is
+ *     handed to the OS browser (documented as FM-151; there is no CSP)
+ *
+ * Structure: `describeRuntime()` decides dev-vs-packaged once; `probeDevServer()`
+ * is the FM-131 identity check; `guardNavigation()` and `menuFor()` are the
+ * per-window policies; `bootstrap()` wires the lifecycle.
  */
 
 import * as path from 'path';
-import { app, BrowserWindow, Menu, shell, ipcMain } from 'electron';
-import { config as dotenvConfig } from 'dotenv';
+import { app, BrowserWindow, Menu, shell } from 'electron';
+import { config as loadDotenv } from 'dotenv';
 
-// ── 0. Load .env from the repo root (dist-electron → ground/app/windows → repo root) ─
-dotenvConfig({ path: path.join(__dirname, '..', '..', '..', '..', '.env') });
+// dist-electron → ground/app/windows → ground/app → ground → platform
+const PLATFORM_ROOT = path.resolve(__dirname, '..', '..', '..', '..');
+loadDotenv({ path: path.join(PLATFORM_ROOT, '.env') });
 
-// ── 1. Import IPC handler registration ───────────────────────────────────────
 import { registerIpcHandlers } from './ipc';
 
-// ── 2. Constants ─────────────────────────────────────────────────────────────
-const IS_DEV =
-  process.env['EIS_DEV'] === 'true' ||
-  process.env['NODE_ENV'] === 'development';
+/* ── Runtime description ────────────────────────────────────────────────── */
+
+export interface ShellRuntime {
+  /** Load the Vite dev server instead of the built UI. */
+  readonly dev: boolean;
+  /** Port the dev server is expected on — the same EIS_UI_PORT vite.config.ts reads. */
+  readonly devPort: number;
+  readonly devUrl: string;
+}
+
+const DEFAULT_DEV_PORT = 5173;
+
+export function describeRuntime(env: NodeJS.ProcessEnv): ShellRuntime {
+  const dev = env['EIS_DEV'] === 'true' || env['NODE_ENV'] === 'development';
+  const requested = Number(env['EIS_UI_PORT'] ?? DEFAULT_DEV_PORT);
+  const devPort = Number.isInteger(requested) && requested > 0 ? requested : DEFAULT_DEV_PORT;
+  return { dev, devPort, devUrl: `http://localhost:${devPort}` };
+}
 
 /**
- * The dev server this shell loads (FM-131).
- *
- * Reads `EIS_UI_PORT`, the SAME variable `ground/ui/vite.config.ts` reads, so
- * moving the UI moves the shell with it. Vite's `strictPort` is now true, so
- * the server either binds this port or refuses to start: it can no longer
- * slide to 5174 and leave the shell rendering whatever else answers 5173 —
- * a teammate's Console dev server, a sibling worktree, a leftover Vite.
- *
- * `wait-on` only proves that SOMETHING answers, so `verifyDevServer` below
- * checks that what answered is this app before the window is shown.
+ * The built UI's index.html:
+ *   packaged   → electron-builder's extraResources land in process.resourcesPath/ui/dist
+ *   unpackaged → dist-electron → ground/app/windows → ground/app → ground → ui/dist
  */
-const DEV_PORT = Number(process.env['EIS_UI_PORT'] ?? 5173) || 5173;
-const DEV_URL = `http://localhost:${DEV_PORT}`;
+function builtUiEntry(): string {
+  return app.isPackaged
+    ? path.join(process.resourcesPath, 'ui', 'dist', 'index.html')
+    : path.join(__dirname, '..', '..', '..', 'ui', 'dist', 'index.html');
+}
+
+/* ── FM-131: is the thing on the dev port our UI? ───────────────────────── */
+
+/** Strings ground/ui/index.html (or its Vite-served form) always contains. */
+const UI_MARKERS = ['Drone Safety Platform', 'eis-root', '/src/main.tsx'] as const;
+
+/** Pure classification of a dev-server response body. */
+export function looksLikeGroundUi(html: string): boolean {
+  return UI_MARKERS.some((marker) => html.includes(marker));
+}
 
 /**
- * Is the thing answering DEV_URL our own UI?
- *
- * `ground/ui/index.html` carries the app's own title; another Vite app on the
- * same port does not. A mismatch is reported and the window still loads, so a
- * false negative (a changed title, an offline check) never blocks the demo —
- * but the operator is told what they are looking at.
+ * Report (never block on) a foreign or missing dev server. `wait-on` only
+ * proves that SOMETHING answers the port; this says whether it is this app.
+ * The window loads regardless, so a false negative can never stop a demo.
  */
-async function verifyDevServer(url: string): Promise<string | null> {
+async function probeDevServer(runtime: ShellRuntime): Promise<string | null> {
   try {
-    const response = await fetch(url, { method: 'GET' });
-    if (!response.ok) return `dev server at ${url} responded ${response.status}`;
-    const html = await response.text();
-    if (!/Drone Safety Platform|eis-root|\/src\/main\.tsx/.test(html)) {
-      return `the server on port ${DEV_PORT} is NOT the ground-control UI — ` +
-        'free the port (or set EIS_UI_PORT) and restart';
+    const response = await fetch(runtime.devUrl, { method: 'GET' });
+    if (!response.ok) return `dev server at ${runtime.devUrl} responded ${response.status}`;
+    if (!looksLikeGroundUi(await response.text())) {
+      return `the server on port ${runtime.devPort} is NOT the ground-control UI — `
+        + 'free the port (or set EIS_UI_PORT) and restart';
     }
     return null;
   } catch (err) {
-    return `dev server at ${url} is not reachable: ${(err as Error).message}`;
+    return `dev server at ${runtime.devUrl} is not reachable: ${(err as Error).message}`;
   }
 }
 
-/**
- * Resolve the path to the built UI's index.html.
- * In a packaged app, electron-builder copies ../ui/dist → resources/ui/dist.
- * In an unpackaged dev build the dist folder is a sibling of ground/app.
- */
-function getUIPath(): string {
-  if (app.isPackaged) {
-    // electron-builder extraResources lands in process.resourcesPath/ui/dist
-    return path.join(process.resourcesPath, 'ui', 'dist', 'index.html');
+/* ── Navigation policy ──────────────────────────────────────────────────── */
+
+/** The renderer may stay on file:// content, or on the dev server in dev. */
+export function isNavigationAllowed(url: string, runtime: ShellRuntime): boolean {
+  let protocol: string;
+  try {
+    protocol = new URL(url).protocol;
+  } catch {
+    return false;
   }
-  // Unpackaged: dist-electron → ground/app/windows → ground/app → ground → ui/dist
-  return path.join(__dirname, '..', '..', '..', 'ui', 'dist', 'index.html');
+  if (protocol === 'file:') return true;
+  return runtime.dev && url.startsWith(runtime.devUrl);
 }
 
-// ── 3. Single-instance lock ───────────────────────────────────────────────────
-const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) {
-  app.quit();
-  process.exit(0);
+function openExternally(url: string): void {
+  shell.openExternal(url).catch(() => undefined);
 }
 
-// ── 4. Window creation ────────────────────────────────────────────────────────
-let mainWindow: BrowserWindow | null = null;
-
-function createWindow(): void {
-  mainWindow = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    minWidth: 1024,
-    minHeight: 640,
-    title: 'Drone Safety Platform — Ground Control',
-    backgroundColor: '#09090b', // match UI dark background
-    show: false, // shown after content is ready (avoids white flash)
-    webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-      allowRunningInsecureContent: false,
-      experimentalFeatures: false,
-    },
+function guardNavigation(window: BrowserWindow, runtime: ShellRuntime): void {
+  window.webContents.on('will-navigate', (event, url) => {
+    if (isNavigationAllowed(url, runtime)) return;
+    event.preventDefault();
+    openExternally(url);
   });
-
-  // Show the window once the initial paint is done
-  mainWindow.once('ready-to-show', () => {
-    mainWindow?.show();
-    if (IS_DEV) mainWindow?.webContents.openDevTools({ mode: 'detach' });
-  });
-
-  // ── Navigation / new-window safety guard ─────────────────────────────────
-  // Prevent the renderer from navigating away (e.g. a rogue <a href> or XSS).
-  mainWindow.webContents.on('will-navigate', (event, url) => {
-    const parsed = new URL(url);
-    const isLocalFile = parsed.protocol === 'file:';
-    const isDevServer = IS_DEV && url.startsWith(DEV_URL);
-    if (!isLocalFile && !isDevServer) {
-      event.preventDefault();
-      shell.openExternal(url).catch(() => undefined);
-    }
-  });
-
-  // Open any window.open() / target="_blank" link in the OS browser
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url).catch(() => undefined);
+  window.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url);
     return { action: 'deny' };
   });
-
-  // ── Load the UI ────────────────────────────────────────────────────────────
-  if (IS_DEV) {
-    void verifyDevServer(DEV_URL).then(problem => {
-      if (problem) console.error(`[main] ${problem}`);
-    });
-    mainWindow.loadURL(DEV_URL).catch(err => {
-      console.error('[main] Failed to load dev server:', err);
-    });
-  } else {
-    mainWindow.loadFile(getUIPath()).catch(err => {
-      console.error('[main] Failed to load production UI:', err);
-    });
-  }
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
 }
 
-// ── 5. App menu ───────────────────────────────────────────────────────────────
-function buildMenu(): void {
-  const template: Electron.MenuItemConstructorOptions[] = [
+/* ── Menu ───────────────────────────────────────────────────────────────── */
+
+function menuFor(runtime: ShellRuntime): Menu {
+  const item = (role: Electron.MenuItemConstructorOptions['role']): Electron.MenuItemConstructorOptions => ({ role });
+  const separator: Electron.MenuItemConstructorOptions = { type: 'separator' };
+
+  const view: Electron.MenuItemConstructorOptions[] = [
+    item('resetZoom'), item('zoomIn'), item('zoomOut'), separator, item('togglefullscreen'),
+  ];
+  if (runtime.dev) view.push(separator, item('reload'), item('forceReload'), item('toggleDevTools'));
+
+  return Menu.buildFromTemplate([
     {
       label: 'Drone Safety Platform',
-      submenu: [
-        { role: 'about' },
-        { type: 'separator' },
-        { role: 'hide' },
-        { role: 'hideOthers' },
-        { type: 'separator' },
-        { role: 'quit' },
-      ],
+      submenu: [item('about'), separator, item('hide'), item('hideOthers'), separator, item('quit')],
     },
-    {
-      label: 'View',
-      submenu: [
-        { role: 'resetZoom' },
-        { role: 'zoomIn' },
-        { role: 'zoomOut' },
-        { type: 'separator' },
-        { role: 'togglefullscreen' },
-        ...(IS_DEV
-          ? ([
-              { type: 'separator' } as Electron.MenuItemConstructorOptions,
-              { role: 'reload' } as Electron.MenuItemConstructorOptions,
-              { role: 'forceReload' } as Electron.MenuItemConstructorOptions,
-              { role: 'toggleDevTools' } as Electron.MenuItemConstructorOptions,
-            ])
-          : []),
-      ],
-    },
-    {
-      label: 'Window',
-      submenu: [
-        { role: 'minimize' },
-        { role: 'zoom' },
-        { type: 'separator' },
-        { role: 'close' },
-      ],
-    },
-  ];
-
-  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+    { label: 'View', submenu: view },
+    { label: 'Window', submenu: [item('minimize'), item('zoom'), separator, item('close')] },
+  ]);
 }
 
-// ── 6. Electron lifecycle ─────────────────────────────────────────────────────
-app.whenReady().then(() => {
-  registerIpcHandlers();
-  buildMenu();
-  createWindow();
+/* ── Window ─────────────────────────────────────────────────────────────── */
 
-  // macOS: re-create the window when the dock icon is clicked
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+const WINDOW_OPTIONS: Electron.BrowserWindowConstructorOptions = {
+  width: 1440,
+  height: 900,
+  minWidth: 1024,
+  minHeight: 640,
+  title: 'Drone Safety Platform — Ground Control',
+  backgroundColor: '#09090b', // the UI's dark ground; avoids a white flash
+  show: false,                // shown on ready-to-show
+  webPreferences: {
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    sandbox: true,
+    webSecurity: true,
+    allowRunningInsecureContent: false,
+    experimentalFeatures: false,
+  },
+};
+
+let mainWindow: BrowserWindow | null = null;
+
+function openMainWindow(runtime: ShellRuntime): BrowserWindow {
+  const window = new BrowserWindow(WINDOW_OPTIONS);
+  mainWindow = window;
+
+  window.once('ready-to-show', () => {
+    window.show();
+    if (runtime.dev) window.webContents.openDevTools({ mode: 'detach' });
   });
-});
+  window.on('closed', () => {
+    if (mainWindow === window) mainWindow = null;
+  });
+  guardNavigation(window, runtime);
 
-// Second-instance: focus the existing window
-app.on('second-instance', () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+  const loading = runtime.dev
+    ? window.loadURL(runtime.devUrl)
+    : window.loadFile(builtUiEntry());
+  loading.catch((err: unknown) => {
+    console.error(`[main] failed to load the ${runtime.dev ? 'dev server' : 'production UI'}:`, err);
+  });
+  if (runtime.dev) {
+    void probeDevServer(runtime).then((problem) => {
+      if (problem) console.error(`[main] ${problem}`);
+    });
   }
-});
+  return window;
+}
 
-// Windows / Linux: quit when all windows are closed
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit();
-});
+function focusMainWindow(): void {
+  if (!mainWindow) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.focus();
+}
 
-// Prevent unused ipcMain import warning — handlers are registered above
-void ipcMain;
+/* ── Lifecycle ──────────────────────────────────────────────────────────── */
+
+function bootstrap(): void {
+  // Single instance: the loser exits immediately, the winner gets 'second-instance'.
+  if (!app.requestSingleInstanceLock()) {
+    app.quit();
+    process.exit(0);
+  }
+  app.on('second-instance', focusMainWindow);
+
+  const runtime = describeRuntime(process.env);
+
+  app.whenReady().then(() => {
+    registerIpcHandlers();
+    Menu.setApplicationMenu(menuFor(runtime));
+    openMainWindow(runtime);
+
+    // macOS convention, harmless elsewhere: dock click re-creates the window.
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) openMainWindow(runtime);
+    });
+  });
+
+  // Windows / Linux: closing the last window quits the app.
+  app.on('window-all-closed', () => {
+    if (process.platform !== 'darwin') app.quit();
+  });
+}
+
+bootstrap();

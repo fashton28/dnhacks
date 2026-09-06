@@ -73,8 +73,8 @@
         "kind": "drone_link",
         "band": "2.4GHz",
         "power_delta_db": 14.0,
-        "lat": -26.0895,
-        "lon": 29.4735,
+        "lat": 41.200539,
+        "lon": -98.3992837,
         "confidence": 0.66
       }
     }

@@ -1,68 +1,43 @@
-import React from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 
-/** Tabs — segmented control / view switcher. Items: [{id,label,icon?}]. */
+/**
+ * Tabs — segmented control / view switcher. Controlled: the owner passes the
+ * selected `value` and receives the next id through `onChange`. Each item is
+ * a `role="tab"` button whose `aria-selected` state is what `.eis-tab` styles.
+ */
 
 export interface TabItem {
   id: string;
   label: string;
-  icon?: React.ReactNode;
+  icon?: ReactNode;
 }
+
+export type TabsSize = 'sm' | 'md';
 
 export interface TabsProps {
   items?: TabItem[];
   value: string;
   onChange?: (id: string) => void;
-  size?: 'sm' | 'md';
-  style?: React.CSSProperties;
+  size?: TabsSize;
+  style?: CSSProperties;
 }
 
-export function Tabs({ items = [], value, onChange, size = 'md', style = {} }: TabsProps) {
-  const h = size === 'sm' ? 26 : 30;
+export function Tabs({ items = [], value, onChange, size = 'md', style }: TabsProps) {
   return (
-    <div
-      role="tablist"
-      style={{
-        display: 'inline-flex',
-        alignItems: 'center',
-        gap: 2,
-        padding: 2,
-        height: h + 4,
-        background: 'var(--bg-sunken)',
-        border: '1px solid var(--border-subtle)',
-        borderRadius: 'var(--radius-md)',
-        ...style,
-      }}
-    >
-      {items.map((it) => {
-        const on = it.id === value;
+    <div role="tablist" className="eis-tabs" data-size={size} style={style}>
+      {items.map((item) => {
+        const selected = item.id === value;
         return (
           <button
-            key={it.id}
+            key={item.id}
+            type="button"
             role="tab"
-            aria-selected={on}
-            onClick={() => onChange && onChange(it.id)}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: 6,
-              height: h,
-              padding: '0 12px',
-              borderRadius: 'var(--radius-sm)',
-              border: 'none',
-              background: on ? 'var(--surface-input)' : 'transparent',
-              boxShadow: on ? 'var(--shadow-raised)' : 'none',
-              color: on ? 'var(--text-primary)' : 'var(--text-tertiary)',
-              fontFamily: 'var(--font-sans)',
-              fontSize: 'var(--text-sm)',
-              fontWeight: 'var(--weight-semibold)',
-              letterSpacing: '0.01em',
-              cursor: 'pointer',
-              transition: 'color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out)',
-              whiteSpace: 'nowrap',
-            }}
+            className="eis-tab"
+            aria-selected={selected}
+            onClick={() => onChange?.(item.id)}
           >
-            {it.icon}
-            {it.label}
+            {item.icon}
+            {item.label}
           </button>
         );
       })}

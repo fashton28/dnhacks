@@ -4,7 +4,7 @@ A baked satellite cue becomes a schema-bound mission proposal, a deterministic
 verifier checks the complete route, a companion process independently clamps
 the approved commands, and real ArduCopter SITL enforces the final flight and
 fence behavior. The demo site is selected through `site/site.json`, with the
-included Komati model in `site/site.stub.json` as the offline fallback.
+included Meridian Station model in `site/site.stub.json` as the offline fallback.
 
 The normal demonstration is fully offline. Satellite imagery, SDR samples,
 sensor observations, and planner decisions all have deterministic baked or
@@ -41,7 +41,7 @@ container created by the launcher. Logs are written under `logs/demo/`.
 The operator sequence is short:
 
 1. Wait for **READY**, then select **Start live inspection** to load the baked
-   Komati cue into the host planner.
+   Meridian Station cue into the host planner.
 2. Review the proposed route and the verifier's ordered checks. A corrected
    route shows every change and is rechecked as a complete path.
 3. Approve the effective plan. The companion reclamps it before sending GUIDED
@@ -266,7 +266,6 @@ for the brief and [`PORT_AUDIT.md`](PORT_AUDIT.md) for the Windows-coupling audi
 ├── Makefile                    # Delegates to scripts/npm/pytest
 ├── justfile                    # just alternative (same targets)
 ├── .env.example                # Every env variable documented
-├── DESIGN_SYSTEM.md            # Design-system reference (was readme.md)
 └── README.md                   # This file
 ```
 
@@ -322,7 +321,7 @@ for the brief and [`PORT_AUDIT.md`](PORT_AUDIT.md) for the Windows-coupling audi
 | [docs/network.md](docs/network.md) | WiFi, static IPs, ports (8765 / 8554), firewall |
 | [docs/runbook.md](docs/runbook.md) | Commissioning checklist, first-flight sequence, emergencies |
 | [docs/operator-manual.md](docs/operator-manual.md) | Day-to-day GCS use, every indicator explained |
-| [DESIGN_SYSTEM.md](DESIGN_SYSTEM.md) | Design-system reference (tokens, components, UI kit) |
+| [../docs/DISCREPANCY_REWRITE.md](../docs/DISCREPANCY_REWRITE.md) | Discrepancy rewrite: what was removed, what was re-implemented, and the evidence |
 
 ---
 

@@ -9,8 +9,9 @@ parent directory.
 > filesystem (ADR D18).
 
 The demo shows one thing: **a cue becomes a bounded, verified, evidenced look,
-and every layer that could refuse it is visible while it happens.** Site is Komati
-Power Station, Mpumalanga — simulation only, said out loud once, early.
+and every layer that could refuse it is visible while it happens.** Site is
+Meridian Station, a fictional generating station — simulation only, said out loud
+once, early.
 
 ---
 
@@ -25,8 +26,8 @@ nothing here is debugged live.
       cue rails on fixtures. Nothing on the demo path may block on the network,
       and nothing on the demo path calls a model provider.
 - [ ] `EIS_SITE_FILE=site/site.stub.json` selected explicitly; the console shows
-      Komati geometry — perimeter, inset geofence, chimney and switchyard NFZs
-      with the 25 m buffer drawn.
+      Meridian Station geometry — site-footprint perimeter, inset geofence,
+      reactor-exclusion and switchyard NFZs with the 25 m buffer drawn.
 - [ ] SITL up with two vehicles; both report `eis-1` / `eis-2` and sit on their
       pads, armed-capable, SoC ≥ 80%, `charge_state=charged`.
 - [ ] Ground station connected; the operator session is live and the approval
@@ -50,9 +51,10 @@ nothing here is debugged live.
       known-good before they are needed.
 - [ ] Backup recording of the full sequence exists and is openable in one click.
 
-**Say-once framing** (before beat 1, ~8 seconds): decommissioned Eskom station,
-critical infrastructure, copper theft is the real threat, everything you are about
-to see is simulated, and the system observes and reports — it never intervenes.
+**Say-once framing** (before beat 1, ~8 seconds): a generating station wound down
+from generation, critical infrastructure, copper theft is the real threat, the
+site itself is fictional and everything you are about to see is simulated, and
+the system observes and reports — it never intervenes.
 
 ---
 
@@ -63,7 +65,7 @@ already has.
 
 | Time | Beat | On screen | The line |
 |---|---|---|---|
-| 0:00–0:08 | Framing | Five panels, map on Komati, both vehicles on their pads | Site, threat, "this is simulation", "it observes and reports" |
+| 0:00–0:08 | Framing | Five panels, map on Meridian Station, both vehicles on their pads | Site, threat, "this is simulation", "it observes and reports" |
 | 0:08–0:20 | **CCTV cue** — motion at the east fence | A camera zone lights on the map; the cue appears with its zone centroid, `ttl_s`, confidence and `cameraId` | "A fixed camera sees motion in the east fence zone. That is the only thing that happened so far — a cue is not a mission" |
 | 0:20–0:30 | **Task** | Task panel shows the model's JSON: `lookFor: fence_gap`, zone, priority, rationale | "The model gets a vote on *what to look at*. It emits schema-bound JSON — no coordinates, no altitude, no plan. It cannot fly anything" |
 | 0:30–0:42 | **Plan + verification** | Plan panel draws the corridor: `inspect` profile, altitude mid-band, straight leg, orbit radius, 15 s hold, `rtl`. Verifier panel turns green with each check named | "The plan is a rule table over the site file — same task, same plan, every time. The verifier checks it against geofence, NFZ buffers, altitude band, standoff and range, and names every check" |
@@ -161,7 +163,7 @@ For a hallway demo, a hard time signal, or a judge who has already seen it.
 
 | Time | Beat |
 |---|---|
-| 0:00–0:04 | One line: Komati, copper theft, simulation, observes and reports |
+| 0:00–0:04 | One line: Meridian Station, copper theft, simulation, observes and reports |
 | 0:04–0:10 | CCTV cue at the east fence |
 | 0:10–0:16 | Task JSON — "the model picks what to look at, not where to fly" |
 | 0:16–0:22 | Plan drawn, verifier green with checks named |

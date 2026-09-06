@@ -1,7 +1,7 @@
 {
   "_fixture": {
     "purpose": "Deterministic geometry for the V01-V25 mission-verifier fixtures.",
-    "provenance": "SYNTHETIC. Home is Komati Power Station; every other coordinate is generated from metre offsets so each verifier check has a provable edge. This is not a survey and never substitutes for site/site.json.",
+    "provenance": "SYNTHETIC. A generic fixture site: home is an arbitrary anchor and every other coordinate is generated from metre offsets so each verifier check has a provable edge. It models no real place, is not a survey, and never substitutes for site/site.json.",
     "frame": "Local metres east/north of home, mapped with 111320 m/deg lat and 111320*cos(lat) m/deg lon - the planner site.ts projection.",
     "landmarks": {
       "geofence notch": "x 250..500, y -80..80 is CUT OUT of the geofence so a leg between two contained targets can still leave containment (V25).",

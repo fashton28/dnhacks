@@ -1,3 +1,10 @@
+/* StatusBar — the one-line summary across the top of the ground station.
+ *
+ * Left to right: link state, (fleet selector), host + source badge, arm state,
+ * flight mode, flight clock, battery, GPS fix, link gauge, the navigation /
+ * RF / health badges, envelope monitor, attendance mode and the escalation
+ * outbox. Right: controller indicator, tool buttons and the DISARM kill
+ * switch, which is always reachable and never gated on anything. */
 import React from 'react';
 import {
   Settings,
@@ -24,18 +31,142 @@ import type {
 } from '@/contract';
 
 /* ------------------------------------------------------------------ */
-/*  Helpers                                                             */
+/*  Pure helpers, exported for tests                                    */
 /* ------------------------------------------------------------------ */
 
-function fmtTime(s: number): string {
-  const m = Math.floor(s / 60);
-  const ss = s % 60;
-  return `${String(m).padStart(2, '0')}:${String(ss).padStart(2, '0')}`;
+/** Flight clock as MM:SS; minutes keep counting past 59. */
+export function formatFlightTime(totalSeconds: number): string {
+  const whole = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(whole / 60);
+  const seconds = whole - minutes * 60;
+  return [minutes, seconds].map((n) => String(n).padStart(2, '0')).join(':');
 }
 
-function Sep() {
+/** MAVLink GPS_FIX_TYPE → short label. Anything past RTK (or nonsense) reads as 3D. */
+export function gpsFixLabel(fixType: number): string {
+  switch (fixType) {
+    case 0: return 'NO GPS';
+    case 1: return 'NO FIX';
+    case 2: return '2D';
+    case 4: return 'DGPS';
+    case 5:
+    case 6: return 'RTK';
+    default: return '3D';
+  }
+}
+
+export interface LinkPillSpec {
+  status: 'nominal' | 'caution' | 'danger';
+  label: string;
+  pulse: boolean;
+}
+
+export function connectionPill(state: ConnectionState): LinkPillSpec {
+  switch (state) {
+    case 'connected':  return { status: 'nominal', label: 'Connected', pulse: false };
+    case 'connecting': return { status: 'caution', label: 'Connecting', pulse: true };
+    default:           return { status: 'danger', label: 'Disconnected', pulse: false };
+  }
+}
+
+/** Host caption next to the source badge. Without an explicit host the SITL
+ *  build says so; a live vehicle with no host configured shows the prototype's
+ *  placeholder address; nothing at all shows an em dash. */
+export function hostCaption(host: string | undefined, sitl: boolean, hasTelemetry: boolean): string {
+  if (host !== undefined) return host;
+  if (sitl) return 'sitl';
+  return hasTelemetry ? '192.168.1.42' : '—';
+}
+
+export type PadIndicatorState = 'manual' | 'pad' | 'none';
+
+export function padIndicatorState(manualActive: boolean, controllerOn: boolean): PadIndicatorState {
+  return manualActive ? 'manual' : controllerOn ? 'pad' : 'none';
+}
+
+/* ------------------------------------------------------------------ */
+/*  Pieces                                                              */
+/* ------------------------------------------------------------------ */
+
+function Divider() {
+  return <div role="separator" aria-orientation="vertical" style={{ width: 1, height: 22, background: 'var(--border-subtle)', flex: 'none' }} />;
+}
+
+/** A tiny label over a monospace value — the flight clock and the GPS block. */
+function Readout({ label, value }: { label: React.ReactNode; value: React.ReactNode }) {
   return (
-    <div style={{ width: 1, height: 22, background: 'var(--border-subtle)', flex: 'none' }} />
+    <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1, gap: 2 }}>
+      <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>{label}</span>
+      <span style={{ fontFamily: 'var(--font-mono)', fontSize: 13, color: 'var(--text-primary)', fontVariantNumeric: 'tabular-nums' }}>
+        {value}
+      </span>
+    </div>
+  );
+}
+
+const PAD_LOOK: Readonly<Record<PadIndicatorState, { label: string; title: string; fg: string; bg: string; border: string }>> = {
+  manual: { label: 'MANUAL', title: 'Manual control active', fg: 'var(--accent-text)', bg: 'var(--accent-subtle)', border: 'var(--accent-border)' },
+  pad:    { label: 'PAD',    title: 'Controller connected',  fg: 'var(--nominal-fg)',  bg: 'var(--surface-input)', border: 'var(--border-input)' },
+  none:   { label: 'NO PAD', title: 'No controller',         fg: 'var(--text-tertiary)', bg: 'var(--surface-input)', border: 'var(--border-input)' },
+};
+
+function PadIndicator({ state }: { state: PadIndicatorState }) {
+  const look = PAD_LOOK[state];
+  return (
+    <span
+      title={look.title}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        height: 26,
+        padding: '0 9px',
+        background: look.bg,
+        border: `1px solid ${look.border}`,
+        borderRadius: 'var(--radius-sm)',
+        color: look.fg,
+        fontFamily: 'var(--font-sans)',
+        fontSize: 11,
+        fontWeight: 600,
+        letterSpacing: '0.04em',
+      }}
+    >
+      <Gamepad2 size={15} />
+      {look.label}
+    </span>
+  );
+}
+
+/** DISARM / KILL. Lit red while armed; still clickable when not, because the
+ *  app treats it as emergencyStop and that must never depend on UI state. */
+function KillSwitch({ armed, onDisarm }: { armed: boolean; onDisarm: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onDisarm}
+      title="Disarm / Kill (Space)"
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 7,
+        height: 34,
+        padding: '0 16px',
+        background: armed ? 'var(--red-deep)' : 'var(--surface-input)',
+        border: `1px solid ${armed ? 'var(--red)' : 'var(--border-input)'}`,
+        borderRadius: 'var(--radius-md)',
+        color: armed ? '#fff' : 'var(--text-secondary)',
+        fontFamily: 'var(--font-sans)',
+        fontSize: 13,
+        fontWeight: 700,
+        letterSpacing: '0.04em',
+        cursor: 'pointer',
+        boxShadow: armed ? 'var(--glow-critical)' : 'none',
+        transition: 'all var(--dur-base) var(--ease-out)',
+      }}
+    >
+      <Power size={15} />
+      DISARM
+    </button>
   );
 }
 
@@ -139,24 +270,16 @@ export function StatusBar({
   onEnterUnattended,
   onExitUnattended,
 }: StatusBarProps) {
-  const b = tel?.battery?.remaining ?? 100;
-  const armed = tel?.armed ?? false;
   const connected = connState === 'connected';
-  const fixType = tel?.gps?.fixType ?? 0;
-  const fixLabel = (['NO GPS', 'NO FIX', '2D', '3D', 'DGPS', 'RTK', 'RTK'][fixType]) ?? '3D';
-  const displayHost = host ?? (sitl ? 'sitl' : tel ? '192.168.1.42' : '—');
+  const armed = tel?.armed === true;
+  const link = connectionPill(connState);
 
-  const connStatus = connected
-    ? 'nominal'
-    : connState === 'connecting'
-    ? 'caution'
-    : 'danger';
-
-  const connLabel = connected
-    ? 'Connected'
-    : connState === 'connecting'
-    ? 'Connecting'
-    : 'Disconnected';
+  const tools: { open: (() => void) | undefined; icon: React.ReactNode; title: string }[] = [
+    { open: onOpenFailsafe, icon: <ShieldAlert size={16} />, title: 'Failsafe settings' },
+    { open: onOpenPid, icon: <Sliders size={16} />, title: 'PID tuning' },
+    { open: onOpenLogs, icon: <ScrollText size={16} />, title: 'Log browser' },
+    { open: onOpenSettings, icon: <Settings size={16} />, title: 'Settings' },
+  ];
 
   return (
     <header
@@ -171,16 +294,10 @@ export function StatusBar({
         borderBottom: '1px solid var(--border-default)',
       }}
     >
-      {/* Logo */}
       <img src={logoMark} width={24} height={24} alt="" style={{ flex: 'none' }} />
 
-      {/* Connection state */}
-      <StatusPill
-        status={connStatus}
-        dot
-        pulse={connState === 'connecting'}
-      >
-        {connLabel}
+      <StatusPill status={link.status} dot pulse={link.pulse}>
+        {link.label}
       </StatusPill>
 
       {/* ARGUS fleet selector */}
@@ -202,81 +319,43 @@ export function StatusBar({
         </span>
       )}
 
-      {/* Host / SITL badge */}
+      {/* Host caption + data-source badge */}
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, marginLeft: -6 }}>
         <span style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-tertiary)' }}>
-          {displayHost}
+          {hostCaption(host, sitl, tel !== null)}
         </span>
         <Badge tone={sourceKind === 'mock' || sitl ? 'caution' : 'nominal'}>
           {sourceKind === 'mock' ? 'MOCK' : sitl ? 'SITL' : 'LIVE'}
         </Badge>
       </span>
 
-      <Sep />
+      <Divider />
 
-      {/* Armed / Disarmed */}
       <StatusPill status={armed ? 'danger' : 'neutral'} solid={armed}>
         {armed ? 'Armed' : 'Disarmed'}
       </StatusPill>
 
-      {/* Mode */}
-      <span style={{
-        fontFamily: 'var(--font-sans)',
-        fontSize: 12,
-        fontWeight: 600,
-        letterSpacing: '0.04em',
-        color: 'var(--accent-text)',
-      }}>
+      <span style={{ fontFamily: 'var(--font-sans)', fontSize: 12, fontWeight: 600, letterSpacing: '0.04em', color: 'var(--accent-text)' }}>
         {tel?.mode ?? 'LOITER'}
       </span>
 
-      <Sep />
+      <Divider />
 
-      {/* Flight timer */}
-      <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1, gap: 2 }}>
-        <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>FLIGHT</span>
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 13,
-          color: 'var(--text-primary)',
-          fontVariantNumeric: 'tabular-nums',
-        }}>
-          {fmtTime(elapsed)}
-        </span>
-      </div>
+      <Readout label="FLIGHT" value={formatFlightTime(elapsed)} />
 
-      <Sep />
+      <Divider />
 
-      {/* Battery gauge */}
       <div style={{ width: 116 }}>
-        <BatteryGauge remaining={b} voltage={tel?.battery?.voltage} compact />
+        <BatteryGauge remaining={tel?.battery?.remaining ?? 100} voltage={tel?.battery?.voltage} compact />
       </div>
 
-      <Sep />
+      <Divider />
 
-      {/* GPS */}
-      <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1, gap: 2 }}>
-        <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.08em', color: 'var(--text-tertiary)' }}>
-          GPS · {fixLabel}
-        </span>
-        <span style={{
-          fontFamily: 'var(--font-mono)',
-          fontSize: 13,
-          color: 'var(--text-primary)',
-          fontVariantNumeric: 'tabular-nums',
-        }}>
-          {tel?.gps?.satellites ?? '—'} sats
-        </span>
-      </div>
+      <Readout label={<>GPS · {gpsFixLabel(tel?.gps?.fixType ?? 0)}</>} value={<>{tel?.gps?.satellites ?? '—'} sats</>} />
 
-      <Sep />
+      <Divider />
 
-      {/* Signal gauge */}
-      <SignalGauge
-        rssi={tel?.link?.rssi ?? -60}
-        latencyMs={tel?.link?.latencyMs}
-        lost={!connected}
-      />
+      <SignalGauge rssi={tel?.link?.rssi ?? -60} latencyMs={tel?.link?.latencyMs} lost={!connected} />
 
       <span style={{ display: 'inline-flex', gap: 4 }}>
         <Badge tone={tel?.navSource === 'gps' ? 'nominal' : tel?.navSource ? 'caution' : 'outline'}>{(tel?.navSource ?? 'NAV ?').toUpperCase()}</Badge>
@@ -285,7 +364,7 @@ export function StatusBar({
         <Badge tone={health.planner?.state === 'nominal' ? 'nominal' : health.planner ? 'danger' : 'outline'}>PLAN {health.planner?.state ?? '?'}</Badge>
       </span>
 
-      <Sep />
+      <Divider />
 
       {/* Envelope monitor: state, the binding constraint, and the margin to it.
           A missing report reads as unknown — never as "fine". */}
@@ -373,96 +452,15 @@ export function StatusBar({
         {undeliveredCount > 0 ? ` · ${undeliveredCount}!` : ''}
       </button>
 
-      {/* Right side: controller indicator + actions + DISARM */}
+      {/* Right side: controller indicator, tools, kill switch */}
       <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+        <PadIndicator state={padIndicatorState(manualActive, controllerOn)} />
 
-        {/* Controller / Manual indicator */}
-        <span
-          title={manualActive ? 'Manual control active' : controllerOn ? 'Controller connected' : 'No controller'}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 6,
-            height: 26,
-            padding: '0 9px',
-            background: manualActive ? 'var(--accent-subtle)' : 'var(--surface-input)',
-            border: `1px solid ${manualActive ? 'var(--accent-border)' : 'var(--border-input)'}`,
-            borderRadius: 'var(--radius-sm)',
-            color: manualActive
-              ? 'var(--accent-text)'
-              : controllerOn
-              ? 'var(--nominal-fg)'
-              : 'var(--text-tertiary)',
-            fontFamily: 'var(--font-sans)',
-            fontSize: 11,
-            fontWeight: 600,
-            letterSpacing: '0.04em',
-          }}
-        >
-          <Gamepad2 size={15} />
-          {manualActive ? 'MANUAL' : controllerOn ? 'PAD' : 'NO PAD'}
-        </span>
-
-        {/* Optional action buttons */}
-        {onOpenFailsafe && (
-          <IconButton
-            icon={<ShieldAlert size={16} />}
-            title="Failsafe settings"
-            onClick={onOpenFailsafe}
-            variant="solid"
-          />
-        )}
-        {onOpenPid && (
-          <IconButton
-            icon={<Sliders size={16} />}
-            title="PID tuning"
-            onClick={onOpenPid}
-            variant="solid"
-          />
-        )}
-        {onOpenLogs && (
-          <IconButton
-            icon={<ScrollText size={16} />}
-            title="Log browser"
-            onClick={onOpenLogs}
-            variant="solid"
-          />
+        {tools.map((tool) =>
+          tool.open ? <IconButton key={tool.title} icon={tool.icon} title={tool.title} onClick={tool.open} variant="solid" /> : null,
         )}
 
-        {/* Settings */}
-        <IconButton
-          icon={<Settings size={16} />}
-          title="Settings"
-          onClick={onOpenSettings}
-          variant="solid"
-        />
-
-        {/* DISARM / KILL */}
-        <button
-          onClick={onDisarm}
-          title="Disarm / Kill (Space)"
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 7,
-            height: 34,
-            padding: '0 16px',
-            background: armed ? 'var(--red-deep)' : 'var(--surface-input)',
-            border: `1px solid ${armed ? 'var(--red)' : 'var(--border-input)'}`,
-            borderRadius: 'var(--radius-md)',
-            color: armed ? '#fff' : 'var(--text-secondary)',
-            fontFamily: 'var(--font-sans)',
-            fontSize: 13,
-            fontWeight: 700,
-            letterSpacing: '0.04em',
-            cursor: 'pointer',
-            boxShadow: armed ? 'var(--glow-critical)' : 'none',
-            transition: 'all var(--dur-base) var(--ease-out)',
-          }}
-        >
-          <Power size={15} />
-          DISARM
-        </button>
+        <KillSwitch armed={armed} onDisarm={onDisarm} />
       </div>
     </header>
   );

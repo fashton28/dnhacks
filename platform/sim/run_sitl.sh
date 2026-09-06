@@ -1,23 +1,43 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Drone Safety Platform -- ArduCopter SITL launcher (run_sitl.sh)
+# Drone Safety Platform :: ArduCopter SITL launcher
 # ----------------------------------------------------------------------------
-# Launches ArduCopter SITL and exposes MAVLink over udp:127.0.0.1:14550 for the
-# companion (eis_companion). Loads sim/params/eis-sitl.parm so the simulated
-# vehicle matches the flashed FC (GUIDED, geofence, failsafes, EKF3).
+# Brings up ArduCopter SITL and publishes MAVLink on udp:127.0.0.1:14550, which
+# is the endpoint companion/config/sitl.yaml points `mav_url` at. A spare feed
+# on udp:127.0.0.1:14551 is offered for MAVProxy / a second GCS, so attaching a
+# debugger never steals the companion's link.
 #
-# Two backends, tried in order:
-#   1. sim_vehicle.py from an ArduPilot source checkout  (PREFERRED -- richest)
-#   2. the prebuilt `arducopter` SITL binary             (FALLBACK)
+# The simulated airframe is parameterised from sim/params/eis-sitl.parm so it
+# matches the flashed FC: GUIDED enabled, geofence, failsafes, EKF3.
 #
-# Usage:
-#   ./run_sitl.sh                 # default: GUIDED-ready copter @ udp 14550
+# BACKENDS (probed in this order, first hit wins)
+#   sim_vehicle  ArduPilot's sim_vehicle.py from a source checkout. Preferred:
+#                it wires both --out endpoints itself and we exec into it.
+#   binary       A prebuilt `arducopter` SITL binary. It only speaks
+#                tcp:127.0.0.1:5760, so mavproxy.py is used to bridge that TCP
+#                endpoint out to the two UDP feeds above.
+#
+# EXIT CODES
+#   0    SITL ran (or --preflight found a usable backend)
+#   1    the parameter file is missing
+#   127  neither backend is installed
+#
+# USAGE
+#   ./run_sitl.sh                       # GUIDED-ready copter on udp:14550
+#   ./run_sitl.sh --preflight           # report the chosen backend, run nothing
+#   ./run_sitl.sh --help
 #   EIS_SITL_SPEEDUP=5 ./run_sitl.sh
 #   ARDUPILOT_HOME=~/ardupilot ./run_sitl.sh
 #
-# Output link for the companion:
-#   The companion connects to udp:127.0.0.1:14550 (config/sitl.yaml: mav_url).
-#   A second out is offered on udp:127.0.0.1:14551 for a separate GCS/MAVProxy.
+#   A leading --help/--preflight is consumed by this script; every other
+#   argument is forwarded verbatim to sim_vehicle.py.
+#
+# ENVIRONMENT
+#   EIS_SITL_PARAMS   parameter file            [sim/params/eis-sitl.parm]
+#   EIS_SITL_SPEEDUP  1 = realtime, >1 faster   [1]
+#   EIS_SITL_HOME     lat,lon,alt,heading       [41.1992364,-98.3995821,550,0]
+#   EIS_SITL_BIN      explicit arducopter binary (skips the search)
+#   ARDUPILOT_HOME    ArduPilot checkout        [~/ardupilot]
 #
 # ----------------------------------------------------------------------------
 # ONE-TIME ArduPilot install (Linux / WSL2 / macOS) -- do this ONCE:
@@ -45,67 +65,113 @@
 # ============================================================================
 set -euo pipefail
 
-# --- configurable knobs ------------------------------------------------------
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PARAMS="${EIS_SITL_PARAMS:-$HERE/params/eis-sitl.parm}"
-SPEEDUP="${EIS_SITL_SPEEDUP:-1}"          # 1 = realtime; >1 = faster-than-real
-# Default home: a clear open field (lat,lon,alt,heading). Override with EIS_SITL_HOME.
-HOME_LOC="${EIS_SITL_HOME:-14.5995,120.9842,10,0}"   # Manila-ish; any open spot works
-MAV_OUT_COMPANION="udp:127.0.0.1:14550"   # the companion connects here
-MAV_OUT_GCS="udp:127.0.0.1:14551"         # spare out for a separate GCS
-VEHICLE="ArduCopter"
+# --- fixed wire facts (never derived, never overridable) --------------------
+readonly VEHICLE="ArduCopter"
+readonly FRAME="quad"
+readonly MAV_OUT_COMPANION="udp:127.0.0.1:14550"
+readonly MAV_OUT_GCS="udp:127.0.0.1:14551"
+readonly SITL_TCP="tcp:127.0.0.1:5760"
 
-echo "== Drone Safety Platform :: ArduCopter SITL =="
-echo "   params : $PARAMS"
-echo "   home   : $HOME_LOC"
-echo "   speedup: ${SPEEDUP}x"
-echo "   out    : $MAV_OUT_COMPANION (companion), $MAV_OUT_GCS (spare GCS)"
-echo
+readonly EXIT_NO_PARAMS=1
+readonly EXIT_NO_BACKEND=127
 
-if [[ ! -f "$PARAMS" ]]; then
-  echo "!! params file not found: $PARAMS" >&2
-  exit 1
-fi
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# --- backend 1: sim_vehicle.py (preferred) ----------------------------------
-SIM_VEHICLE=""
-if command -v sim_vehicle.py >/dev/null 2>&1; then
-  SIM_VEHICLE="$(command -v sim_vehicle.py)"
-elif [[ -n "${ARDUPILOT_HOME:-}" && -x "$ARDUPILOT_HOME/Tools/autotest/sim_vehicle.py" ]]; then
-  SIM_VEHICLE="$ARDUPILOT_HOME/Tools/autotest/sim_vehicle.py"
-elif [[ -x "$HOME/ardupilot/Tools/autotest/sim_vehicle.py" ]]; then
-  SIM_VEHICLE="$HOME/ardupilot/Tools/autotest/sim_vehicle.py"
-fi
+# --- operator knobs ---------------------------------------------------------
+PARAMS="${EIS_SITL_PARAMS:-$SCRIPT_DIR/params/eis-sitl.parm}"
+SPEEDUP="${EIS_SITL_SPEEDUP:-1}"
+# Default home is the Meridian Station pad: lat,lon,alt,heading. It matches the
+# site model in site/site.stub.json, so plans, fences and detections line up with
+# the aircraft. Override with EIS_SITL_HOME for a different site.
+HOME_LOC="${EIS_SITL_HOME:-41.1992364,-98.3995821,550,0}"
 
-if [[ -n "$SIM_VEHICLE" ]]; then
-  echo ">> using sim_vehicle.py: $SIM_VEHICLE"
-  # --out adds extra MAVLink endpoints; --map/--console suppressed for headless.
-  exec python3 "$SIM_VEHICLE" \
-    -v "$VEHICLE" \
-    -f quad \
-    --speedup "$SPEEDUP" \
-    --custom-location="$HOME_LOC" \
-    --add-param-file="$PARAMS" \
-    --out="$MAV_OUT_COMPANION" \
-    --out="$MAV_OUT_GCS" \
-    --no-mavproxy \
-    "$@"
-fi
+# --- teardown bookkeeping ---------------------------------------------------
+SITL_PID=""
+SCRATCH_DIR=""
 
-# --- backend 2: prebuilt arducopter binary (fallback) -----------------------
-# Locate the SITL binary. Override with EIS_SITL_BIN.
-SITL_BIN="${EIS_SITL_BIN:-}"
-if [[ -z "$SITL_BIN" ]]; then
-  for cand in \
-    "$(command -v arducopter 2>/dev/null || true)" \
-    "${ARDUPILOT_HOME:-$HOME/ardupilot}/build/sitl/bin/arducopter" \
-    "$HOME/ardupilot/build/sitl/bin/arducopter"; do
-    if [[ -n "$cand" && -x "$cand" ]]; then SITL_BIN="$cand"; break; fi
-  done
-fi
+say()  { printf '%s\n' "$*"; }
+note() { printf '>> %s\n' "$*"; }
+oops() { printf '!! %s\n' "$*" >&2; }
 
-if [[ -z "$SITL_BIN" || ! -x "$SITL_BIN" ]]; then
-  cat >&2 <<'EOF'
+teardown() {
+    if [[ -n "$SITL_PID" ]]; then
+        kill "$SITL_PID" 2>/dev/null || true
+    fi
+    if [[ -n "$SCRATCH_DIR" && -d "$SCRATCH_DIR" ]]; then
+        rm -rf "$SCRATCH_DIR"
+    fi
+}
+
+usage() {
+    cat <<EOF
+Drone Safety Platform :: ArduCopter SITL launcher
+
+  run_sitl.sh [--help | --preflight] [sim_vehicle.py args...]
+
+Publishes MAVLink on $MAV_OUT_COMPANION (companion) and $MAV_OUT_GCS (spare
+GCS). A leading --help/--preflight is consumed here; anything else is passed
+straight to sim_vehicle.py.
+
+Backends, in probe order:
+  1. sim_vehicle.py  (PATH, \$ARDUPILOT_HOME/Tools/autotest, ~/ardupilot/...)
+  2. arducopter binary (\$EIS_SITL_BIN, PATH, <ardupilot>/build/sitl/bin)
+     bridged from $SITL_TCP to the UDP feeds by mavproxy.py
+
+Environment:
+  EIS_SITL_PARAMS   parameter file            [sim/params/eis-sitl.parm]
+  EIS_SITL_SPEEDUP  1 = realtime, >1 faster   [1]
+  EIS_SITL_HOME     lat,lon,alt,heading       [41.1992364,-98.3995821,550,0]
+  EIS_SITL_BIN      explicit arducopter binary
+  ARDUPILOT_HOME    ArduPilot checkout        [~/ardupilot]
+
+Exit codes: 0 ran / $EXIT_NO_PARAMS params missing / $EXIT_NO_BACKEND no backend installed
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# Backend discovery. Each locator echoes an absolute path, or nothing.
+# ---------------------------------------------------------------------------
+locate_sim_vehicle() {
+    local candidate
+    if candidate="$(command -v sim_vehicle.py 2>/dev/null)"; then
+        printf '%s' "$candidate"
+        return 0
+    fi
+    for candidate in \
+        "${ARDUPILOT_HOME:-}/Tools/autotest/sim_vehicle.py" \
+        "$HOME/ardupilot/Tools/autotest/sim_vehicle.py"
+    do
+        [[ "$candidate" == /Tools/* ]] && continue   # ARDUPILOT_HOME unset
+        if [[ -x "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+locate_sitl_binary() {
+    local candidate
+    if [[ -n "${EIS_SITL_BIN:-}" ]]; then
+        [[ -x "$EIS_SITL_BIN" ]] || return 1
+        printf '%s' "$EIS_SITL_BIN"
+        return 0
+    fi
+    for candidate in \
+        "$(command -v arducopter 2>/dev/null || true)" \
+        "${ARDUPILOT_HOME:-$HOME/ardupilot}/build/sitl/bin/arducopter" \
+        "$HOME/ardupilot/build/sitl/bin/arducopter"
+    do
+        if [[ -n "$candidate" && -x "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    return 1
+}
+
+no_backend_advice() {
+    cat >&2 <<'EOF'
 !! Could not find sim_vehicle.py OR an arducopter SITL binary.
 
    Install ArduPilot once (see the header of this script), then either:
@@ -115,51 +181,159 @@ if [[ -z "$SITL_BIN" || ! -x "$SITL_BIN" ]]; then
 
    On Windows, run this script inside WSL2 (Ubuntu).
 EOF
-  exit 127
-fi
+}
 
-echo ">> using SITL binary: $SITL_BIN"
-echo ">> NOTE: the raw binary emits MAVLink on tcp:127.0.0.1:5760."
-echo "   Bridging tcp:5760 -> $MAV_OUT_COMPANION via mavproxy if available."
+banner() {
+    say "== Drone Safety Platform :: ArduCopter SITL =="
+    say "   params : $PARAMS"
+    say "   home   : $HOME_LOC"
+    say "   speedup: ${SPEEDUP}x"
+    say "   out    : $MAV_OUT_COMPANION (companion), $MAV_OUT_GCS (spare GCS)"
+    say ""
+}
 
-# The raw binary serves a TCP MAVLink endpoint on 5760. The companion wants
-# UDP 14550, so bridge with mavproxy (preferred) or instruct the user.
-RUNDIR="$(mktemp -d)"
-trap 'rm -rf "$RUNDIR"' EXIT
-cp "$PARAMS" "$RUNDIR/eeprom-params.parm"
+require_params() {
+    if [[ ! -f "$PARAMS" ]]; then
+        oops "params file not found: $PARAMS"
+        exit "$EXIT_NO_PARAMS"
+    fi
+    # sim_vehicle.py and mavproxy are launched from other directories; make the
+    # path independent of the caller's cwd.
+    PARAMS="$(cd "$(dirname "$PARAMS")" && pwd)/$(basename "$PARAMS")"
+}
 
-# Start SITL binary in the background.
-"$SITL_BIN" \
-  --model quad \
-  --home "$HOME_LOC" \
-  --speedup "$SPEEDUP" \
-  --defaults "$PARAMS" \
-  &
-SITL_PID=$!
-trap 'kill "$SITL_PID" 2>/dev/null || true; rm -rf "$RUNDIR"' EXIT
+# ---------------------------------------------------------------------------
+# Backend 1: sim_vehicle.py -- exec, so signals and exit status pass straight
+# through to whoever launched this script.
+# ---------------------------------------------------------------------------
+launch_via_sim_vehicle() {
+    local sim_vehicle="$1"; shift
+    note "using sim_vehicle.py: $sim_vehicle"
+    # --map/--console stay off: this runs headless under the e2e harness.
+    exec python3 "$sim_vehicle" \
+        -v "$VEHICLE" \
+        -f "$FRAME" \
+        --speedup "$SPEEDUP" \
+        --custom-location="$HOME_LOC" \
+        --add-param-file="$PARAMS" \
+        --out="$MAV_OUT_COMPANION" \
+        --out="$MAV_OUT_GCS" \
+        --no-mavproxy \
+        "$@"
+}
 
-# Give SITL a moment to open its TCP server.
-sleep 3
+# ---------------------------------------------------------------------------
+# Backend 2: raw binary + mavproxy bridge.
+# The binary serves MAVLink on tcp:127.0.0.1:5760 only; the companion wants
+# udp:14550, so mavproxy fans the TCP master out to both UDP endpoints.
+# ---------------------------------------------------------------------------
+launch_via_binary() {
+    local sitl_bin="$1"
 
-if command -v mavproxy.py >/dev/null 2>&1; then
-  echo ">> mavproxy bridging tcp:127.0.0.1:5760 -> $MAV_OUT_COMPANION / $MAV_OUT_GCS"
-  exec mavproxy.py \
-    --master=tcp:127.0.0.1:5760 \
-    --out="$MAV_OUT_COMPANION" \
-    --out="$MAV_OUT_GCS" \
-    --load-module=param \
-    --cmd="param load $PARAMS" \
-    --daemon --non-interactive
-else
-  cat >&2 <<EOF
+    note "using SITL binary: $sitl_bin"
+    note "NOTE: the raw binary emits MAVLink on $SITL_TCP."
+    say  "   Bridging ${SITL_TCP#tcp:} -> $MAV_OUT_COMPANION via mavproxy if available."
+
+    SCRATCH_DIR="$(mktemp -d)"
+    trap teardown EXIT INT TERM
+    cp "$PARAMS" "$SCRATCH_DIR/eeprom-params.parm"
+
+    # Run the binary out of the scratch dir so its eeprom/log droppings do not
+    # land in the caller's cwd. PARAMS was absolutised by require_params.
+    (
+        cd "$SCRATCH_DIR"
+        exec "$sitl_bin" \
+            --model "$FRAME" \
+            --home "$HOME_LOC" \
+            --speedup "$SPEEDUP" \
+            --defaults "$PARAMS"
+    ) &
+    SITL_PID=$!
+
+    # Give the binary a moment to open its TCP server before bridging.
+    sleep 3
+
+    if command -v mavproxy.py >/dev/null 2>&1; then
+        note "mavproxy bridging ${SITL_TCP#tcp:} -> $MAV_OUT_COMPANION / $MAV_OUT_GCS"
+        exec mavproxy.py \
+            --master="$SITL_TCP" \
+            --out="$MAV_OUT_COMPANION" \
+            --out="$MAV_OUT_GCS" \
+            --load-module=param \
+            --cmd="param load $PARAMS" \
+            --daemon --non-interactive
+    fi
+
+    cat >&2 <<EOF
 !! mavproxy.py not found to bridge TCP->UDP.
 
-   The SITL binary is running and serving MAVLink on tcp:127.0.0.1:5760.
+   The SITL binary is running and serving MAVLink on ${SITL_TCP#tcp:}.
    Either install mavproxy ('pip install MAVProxy') so this script can bridge
-   to $MAV_OUT_COMPANION, or point the companion at tcp:127.0.0.1:5760 by
+   to $MAV_OUT_COMPANION, or point the companion at ${SITL_TCP#tcp:} by
    setting mav_url in companion/config/sitl.yaml accordingly.
 
    Keeping SITL alive in the foreground (Ctrl-C to stop)...
 EOF
-  wait "$SITL_PID"
-fi
+    wait "$SITL_PID"
+}
+
+# ---------------------------------------------------------------------------
+# --preflight: answer "would this box start SITL?" without starting anything.
+# ---------------------------------------------------------------------------
+preflight() {
+    local sim_vehicle sitl_bin
+    banner
+    require_params
+    say "   [OK] params readable"
+
+    if sim_vehicle="$(locate_sim_vehicle)"; then
+        say "   [OK] backend: sim_vehicle.py -> $sim_vehicle"
+        return 0
+    fi
+    say "   [--] sim_vehicle.py not found"
+
+    if sitl_bin="$(locate_sitl_binary)"; then
+        say "   [OK] backend: arducopter binary -> $sitl_bin"
+        if command -v mavproxy.py >/dev/null 2>&1; then
+            say "   [OK] mavproxy.py available to bridge ${SITL_TCP#tcp:} -> $MAV_OUT_COMPANION"
+        else
+            say "   [--] mavproxy.py missing: the companion would have to use ${SITL_TCP#tcp:}"
+        fi
+        return 0
+    fi
+    say "   [--] arducopter binary not found"
+    no_backend_advice
+    return "$EXIT_NO_BACKEND"
+}
+
+main() {
+    local rc=0
+    case "${1:-}" in
+        -h|--help)
+            usage
+            return 0
+            ;;
+        --preflight)
+            preflight || rc=$?
+            return "$rc"
+            ;;
+    esac
+
+    banner
+    require_params
+
+    local sim_vehicle sitl_bin
+    if sim_vehicle="$(locate_sim_vehicle)"; then
+        launch_via_sim_vehicle "$sim_vehicle" "$@"
+    fi
+
+    if sitl_bin="$(locate_sitl_binary)"; then
+        launch_via_binary "$sitl_bin"
+        return $?
+    fi
+
+    no_backend_advice
+    return "$EXIT_NO_BACKEND"
+}
+
+main "$@"

@@ -238,7 +238,7 @@ describe('bus admission', () => {
       ts: observedAt,
       vehicleId: 'eis-1',
       anomaly: {
-        id, lat: -26.09, lon: 29.472, type: 'drone_link', confidence: 0.5,
+        id, lat: 41.2, lon: -98.4, type: 'drone_link', confidence: 0.5,
         thumbnail: '', source: 'sdr', observedAt, ttl_s: ttlS,
       },
     };
@@ -271,7 +271,7 @@ describe('bus admission', () => {
     await bus.start();
     const payload = {
       type: 'rfEvent', ts: QUIET_START_MS, vehicleId: 'eis-1', source: 'sdr',
-      kind: 'drone_link', band: '2.4GHz', confidence: 0.5, lat: -26.09, lon: 29.472,
+      kind: 'drone_link', band: '2.4GHz', confidence: 0.5, lat: 41.2, lon: -98.4,
     };
     rail.ingest(payload);
     rail.ingest(payload);

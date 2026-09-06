@@ -34,9 +34,9 @@ const battery: BatteryState = {
 };
 
 const cue: Anomaly = {
-  id: 'cue-east-yard', lat: -26.0891, lon: 29.47515, type: 'motion', confidence: 0.92,
+  id: 'cue-east-yard', lat: 41.1997305, lon: -98.3988061, type: 'motion', confidence: 0.92,
   thumbnail: 'site/staging/stage-b.png', source: 'cctv', observedAt: NOW, ttl_s: 900,
-  cameraId: 'cam-east-north',
+  cameraId: 'cam-east-south',
 };
 
 function context(over: Partial<VerificationContext> = {}): VerificationContext {
@@ -49,8 +49,8 @@ function context(over: Partial<VerificationContext> = {}): VerificationContext {
 }
 
 const vehicles = (over: Partial<VerificationContext> = {}): FleetCandidate[] => [
-  { vehicleId: 'eis-1', context: context({ currentPosition: { lat: -26.0895, lon: 29.4750 }, ...over }) },
-  { vehicleId: 'eis-2', context: context({ currentPosition: { lat: -26.0930, lon: 29.4690 }, ...over }) },
+  { vehicleId: 'eis-1', context: context({ currentPosition: { lat: 41.1996407, lon: -98.398567 }, ...over }) },
+  { vehicleId: 'eis-2', context: context({ currentPosition: { lat: 41.1986525, lon: -98.4014327 }, ...over }) },
 ];
 
 const runInput = (over: Record<string, unknown> = {}) => ({
