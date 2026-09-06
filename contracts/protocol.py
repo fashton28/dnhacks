@@ -108,6 +108,10 @@ class RenderFrame(Command):
 
     type: Literal["render_frame"] = "render_frame"
     drone_id: str
+    # the camera state this frame must be rendered with, so evidence never races a settings message or the gimbal motion
+    mode: str | None = Field(default=None, description="rgb | thermal | lidar; None keeps the Renderer's current setting")
+    fov_deg: float | None = None
+    gimbal_pitch_deg: float | None = None
 
 
 class Scene(Command):

@@ -157,6 +157,43 @@
         "drone_id": {
           "title": "Drone Id",
           "type": "string"
+        },
+        "mode": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "rgb | thermal | lidar; None keeps the Renderer's current setting",
+          "title": "Mode"
+        },
+        "fov_deg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Fov Deg"
+        },
+        "gimbal_pitch_deg": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Gimbal Pitch Deg"
         }
       },
       "required": [

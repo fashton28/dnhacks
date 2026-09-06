@@ -221,7 +221,14 @@ const link = new RendererLink(rendererId, isHeadless ? "headless" : "browser", (
     const s = drones.get(cmd.drone_id);
     if (!s) { reply({ type: "ack", cmd_id: cmd.cmd_id, ok: false, detail: `unknown drone ${cmd.drone_id}` }); return; }
     reply({ type: "ack", cmd_id: cmd.cmd_id, ok: true });
-    reply(frameMessage(s, cmd.cmd_id));
+    // evidence is rendered with the camera state the Hub asked for, not whatever settings message or gimbal motion is in flight
+    if (cmd.mode || cmd.fov_deg) { const cur = cameraSettings.get(s.drone_id) ?? { mode: "rgb", fov_deg: 70 }; cameraSettings.set(s.drone_id, { mode: (cmd.mode as any) ?? cur.mode, fov_deg: cmd.fov_deg ?? cur.fov_deg }); if (s.drone_id === selected) reflectVision((cmd.mode as any) ?? cur.mode); }
+    const pose = world.poseOf(s.drone_id);
+    const savedGimbal = pose?.gimbal;
+    if (cmd.gimbal_pitch_deg != null && pose) pose.gimbal = cmd.gimbal_pitch_deg;
+    const frame = frameMessage({ ...s, gimbal_pitch_deg: cmd.gimbal_pitch_deg ?? s.gimbal_pitch_deg }, cmd.cmd_id);
+    if (pose && savedGimbal != null) pose.gimbal = savedGimbal;
+    reply(frame);
     log(`Renderer: evidence frame for ${cmd.drone_id}`);
   } else if (cmd.type === "capture_overhead") {
     reply({ type: "ack", cmd_id: cmd.cmd_id, ok: true });

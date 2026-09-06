@@ -64,6 +64,7 @@ class Inspector:
         self.describe = describe
         self.emit = emit
         self.live = live
+        self._gimbal_target: dict[str, float] = {}  # last pitch the agent asked for, per Drone
 
     def _run(self, coro, timeout: float = 30.0):
         return asyncio.run_coroutine_threadsafe(coro, self.loop).result(timeout=timeout)
@@ -75,7 +76,15 @@ class Inspector:
     def _look_at(self, drone_id: str, pitch: float) -> str:
         pitch = max(-30.0, min(90.0, pitch))
         self._run(self.app.state.registry.send(drone_id, LookAt(cmd_id=self.app.state.registry.new_cmd_id(), pitch_deg=pitch)))
-        time.sleep(0.6)
+        self._gimbal_target[drone_id] = pitch
+        # wait for the gimbal to settle (telemetry within 2 degrees) so a capture right after looks where the agent asked
+        deadline = time.time() + 1.5
+        while time.time() < deadline:
+            st = self._state(drone_id)
+            if st is not None and abs(st.gimbal_pitch_deg - pitch) <= 2.0:
+                break
+            time.sleep(0.1)
+        time.sleep(0.3)  # and the Renderer's eased pose to catch up
         return f"gimbal at {pitch:.0f} deg"
 
     def _set_camera(self, drone_id: str, mode: str, zoom: float) -> str:
@@ -113,7 +122,9 @@ class Inspector:
                     return await asyncio.wait_for(fut, 10.0)
                 frame = self._run(grab(), timeout=12)
             else:
-                frame = self._run(reg.ask_renderer(RenderFrame(cmd_id=reg.new_cmd_id(), drone_id=drone_id), timeout=30.0), timeout=35)
+                cam = self.app.state.camera_settings.get(drone_id, {"mode": "rgb", "fov_deg": 70.0})
+                req = RenderFrame(cmd_id=reg.new_cmd_id(), drone_id=drone_id, mode=cam["mode"], fov_deg=cam["fov_deg"], gimbal_pitch_deg=self._gimbal_target.get(drone_id))
+                frame = self._run(reg.ask_renderer(req, timeout=30.0), timeout=35)
         except Exception as e:  # noqa: BLE001
             self.app.state.audit.append("inspect_capture_failed", mission_id=mission_id, drone_id=drone_id, error=repr(e)[:200])
         path = None
