@@ -212,7 +212,26 @@ def _mock_assess(anomaly: dict[str, Any], result: dict[str, Any]) -> dict[str, A
     caption = observations[0].get("caption", "") if observations else ""
     aid = anomaly["anomaly_id"]
 
-    if labels.get("fence_damage", 0) > 0.5 or labels.get("person", 0) > 0.6:
+    if labels.get("fire", 0) > 0.4 or (labels.get("smoke", 0) > 0.4 and thermal > 300.0):
+        decision, severity, event_type = "escalate", "critical", "safety"
+        title = "Active fire at a switchyard transformer bay, confirmed on thermal"
+        rationale = (
+            f"Open flame and a dark smoke column at the transformer bay; the thermal camera saturates at the source "
+            f"(peak {thermal:.0f} C). No personnel visible near it."
+        )
+        action = (
+            "Page the operations and fire desks now: dispatch fire response to the switchyard, prepare to de-energize the "
+            "affected bay, keep personnel upwind, and keep a Drone on station at standoff to report spread."
+        )
+    elif labels.get("steam_plume", 0) > 0.4 and thermal < 75.0:
+        decision, severity, event_type = "log_only", "low", "operational"
+        title = "Unplanned steam release from a roof relief vent, cool in thermal"
+        rationale = (
+            f"A white column from the auxiliary building relief vent reads cool in the thermal camera "
+            f"(peak {thermal:.0f} C): water vapour, no hot source, structure intact. Nothing was declared for it."
+        )
+        action = "Open a maintenance ticket for an unplanned relief lift and have the shift check the vent line; no emergency response."
+    elif labels.get("fence_damage", 0) > 0.5 or labels.get("person", 0) > 0.6:
         decision, severity, event_type = "escalate", "high", "security"
         title = "Perimeter breach indicated at north fence line"
         rationale = (

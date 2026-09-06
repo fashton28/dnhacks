@@ -401,7 +401,13 @@ export class SiteScene {
     for (const g of this.props.children) {
       if (!g.userData.fire) continue;
       for (const f of g.children) {
-        if (f.name === "flame") { const t = elapsedSeconds * 9 + f.userData.seed; f.scale.y = 0.75 + 0.35 * Math.sin(t) * Math.sin(t * 0.37 + 1); f.scale.x = f.scale.z = 0.9 + 0.15 * Math.sin(t * 1.7); f.position.y = (f.userData.h * f.scale.y) / 2 + 0.2; }
+        if (f.name === "flame") {
+          const t = elapsedSeconds * 9 + f.userData.seed;
+          f.scale.y = 0.7 + 0.4 * Math.abs(Math.sin(t) * Math.sin(t * 0.37 + 1)); f.scale.x = 0.85 + 0.2 * Math.sin(t * 1.7);
+          f.position.y = (f.userData.h * f.scale.y) / 2 + 0.15;
+          ((f as THREE.Mesh).material as THREE.MeshBasicMaterial).opacity = 0.75 + 0.25 * Math.sin(t * 2.3);
+          if (cameraPosition) { const wp = new THREE.Vector3(); f.getWorldPosition(wp); f.rotation.set(0, Math.atan2(cameraPosition.x - wp.x, cameraPosition.z - wp.z) - g.rotation.y, 0); }  // billboard about the vertical
+        }
         else if (f.name === "fireglow") (f as THREE.PointLight).intensity = 34 + 12 * Math.sin(elapsedSeconds * 11) * Math.sin(elapsedSeconds * 4.3);
       }
     }
@@ -617,16 +623,20 @@ export class SiteScene {
       const g = new THREE.Group(); g.name = "fire";
       const scorch = new THREE.Mesh(new THREE.CircleGeometry(4.2, 28), new THREE.MeshStandardMaterial({ color: 0x0b0a09, roughness: 1 }));
       scorch.rotation.x = -Math.PI / 2; scorch.position.y = 0.03; scorch.receiveShadow = true; g.add(scorch);
-      const flameMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.9, toneMapped: false, depthWrite: false });
-      const coreMat = new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.95, toneMapped: false, depthWrite: false });
-      for (let i = 0; i < 7; i++) {
-        const h = 1.6 + Math.random() * 1.8;
-        const f = new THREE.Mesh(new THREE.ConeGeometry(0.45 + Math.random() * 0.35, h, 7), i % 3 === 0 ? coreMat : flameMat);
-        f.position.set((Math.random() - 0.5) * 3.2, h / 2 + 0.2, (Math.random() - 0.5) * 2.2); f.name = "flame"; f.userData.h = h; f.userData.seed = Math.random() * 6.28;
+      // Flames: billboarded additive planes with a soft flame texture. The texture doubles as alphaMap so the thermal
+      // camera keeps the flame shape (classify.ts reads "flame" as saturated). They flicker in update().
+      const tex = flameTexture();
+      for (let i = 0; i < 9; i++) {
+        const w = 1.3 + Math.random() * 1.2, h = 2.2 + Math.random() * 2.0;
+        const m = new THREE.MeshBasicMaterial({ map: tex, alphaMap: tex, color: i % 3 === 0 ? 0xfff0b0 : i % 3 === 1 ? 0xffa030 : 0xff5a12, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false, side: THREE.DoubleSide });
+        const f = new THREE.Mesh(new THREE.PlaneGeometry(w, h), m);
+        f.position.set((Math.random() - 0.5) * 3.4, h / 2 + 0.15, (Math.random() - 0.5) * 2.4); f.name = "flame"; f.userData.h = h; f.userData.w = w; f.userData.seed = Math.random() * 6.28; f.renderOrder = 2;
         g.add(f);
       }
+      const ember = new THREE.Mesh(new THREE.CircleGeometry(1.6, 24), new THREE.MeshBasicMaterial({ color: 0xff6a1c, transparent: true, opacity: 0.55, blending: THREE.AdditiveBlending, depthWrite: false, toneMapped: false }));
+      ember.rotation.x = -Math.PI / 2; ember.position.y = 0.06; ember.name = "ember"; g.add(ember);
       const glow = new THREE.PointLight(0xff8c2a, 40, 30, 1.6); glow.position.set(0, 2.2, 0); glow.name = "fireglow"; g.add(glow);
-      const smoke = new Plume(0, 0, 3.0, 2.2, this.quality === "high" ? 220 : 90, { color: 0x2a2a2c, heat: 1.0, vigour: 1.35, opacity: 0.62, minPx: 9 });
+      const smoke = new Plume(0, 0, 2.6, 2.8, this.quality === "high" ? 340 : 120, { color: 0x26272a, heat: 1.0, vigour: 1.3, opacity: 0.72, minPx: 9 });
       smoke.points.name = "smoke"; g.add(smoke.points); this.animated.push(smoke);
       g.userData.fire = true;
       o = g;
@@ -674,6 +684,22 @@ export class SiteScene {
 
 /** Last telemetry sample (s*) plus the smoothed, predicted pose actually drawn. ENU metres, altitude metres, degrees. */
 export interface PoseTrack { x: number; y: number; alt: number; hdg: number; gimbal: number; roll: number; pitch: number; sx: number; sy: number; salt: number; shdg: number; sgimbal: number; sroll: number; spitch: number; vx: number; vy: number; vz: number; t: number }
+
+/** A soft teardrop flame: bright core, orange body, feathered edges. Used as colour and alpha. */
+let flameTex: THREE.CanvasTexture | null = null;
+function flameTexture(): THREE.CanvasTexture {
+  if (flameTex) return flameTex;
+  const c = document.createElement("canvas"); c.width = 128; c.height = 256;
+  const ctx = c.getContext("2d")!;
+  ctx.clearRect(0, 0, 128, 256);
+  for (let i = 0; i < 4; i++) {
+    const g = ctx.createRadialGradient(64, 200 - i * 34, 4, 64, 190 - i * 30, 44 - i * 6);
+    g.addColorStop(0, `rgba(255,${230 - i * 30},${150 - i * 40},${0.95 - i * 0.12})`); g.addColorStop(0.55, `rgba(255,${140 - i * 20},30,${0.55 - i * 0.08})`); g.addColorStop(1, "rgba(255,80,10,0)");
+    ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(64, 190 - i * 30, 40 - i * 5, 62 - i * 8, 0, 0, Math.PI * 2); ctx.fill();
+  }
+  flameTex = new THREE.CanvasTexture(c); flameTex.colorSpace = THREE.SRGBColorSpace;
+  return flameTex;
+}
 
 function textLabel(text: string): THREE.CanvasTexture {
   const c = document.createElement("canvas"); c.width = 512; c.height = 128;

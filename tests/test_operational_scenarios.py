@@ -52,7 +52,7 @@ async def test_transformer_fire_is_confirmed_by_thermal_and_escalated(hub: HubHa
     assert {"fire", "smoke"} <= labels, labels
     thermal = [o for o in out["result"]["observations"] if o.get("camera_mode") == "thermal"]
     assert thermal and max(o["thermal_max_c"] for o in thermal) > 500
-    assert out["triage"]["decision"] == "escalate" and out["triage"]["severity"] == "high", out["triage"]
+    assert out["triage"]["decision"] == "escalate" and out["triage"]["severity"] == "critical", out["triage"]
     assert out["result"]["threat_assessment"] in ("suspicious", "hostile", "benign")  # the mock sweep's own reading; triage is what decides
 
 
