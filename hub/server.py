@@ -530,6 +530,11 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
 
     async def clear_operational_props(scene: SceneState) -> None:
         """Remove fire and steam props and tell the plant feed their sensors read normal again (info, no Detection)."""
+        # a Scenario's own signal Detections (det-sig-*) belong to the story that is ending: drop them so no stale card lingers
+        removed = dets().remove_where(lambda d: d.id.startswith("det-sig-") or d.metadata.get("source") == "plant-signal")
+        if removed:
+            app.state.audit.append("detections_removed", ids=removed, reason="scenario story reset")
+            reg().publish({"type": "detections_reset", "removed": removed, "remaining": [d.id for d in dets().all()]})
         gone = [p for p in scene.props if p.kind in OPERATIONAL]
         if not gone:
             return

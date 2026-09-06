@@ -50,6 +50,15 @@ class DetectionStore:
                 f.write(detection.model_dump_json() + "\n")
         return detection
 
+    def remove_where(self, pred) -> list[str]:
+        """Drop the Detections `pred` selects (a Scenario's own signals when the story resets) and rewrite the file."""
+        gone = [d.id for d in self._items.values() if pred(d)]
+        for did in gone:
+            self._items.pop(did, None)
+        if gone and self._path is not None:
+            self._path.write_text("".join(d.model_dump_json() + "\n" for d in self._items.values()))
+        return gone
+
     def get(self, detection_id: str) -> Detection | None:
         return self._items.get(detection_id)
 
