@@ -8,51 +8,37 @@
  * the HubDataProvider streams into it and turns Operator actions into Hub REST.
  * ========================================================================== */
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import type { Anomaly, ManualInput, MissionPlan, PlanTool, StatusText } from '@/contract';
+import type { ManualInput, StatusText } from '@/contract';
 import { dataSource, consoleUrl } from '@/dataSource';
 import { HubDataProvider } from '@/dataSource/HubDataProvider';
 import type { HubDetection, HubDroneState, HubMission, AgentPlan } from '@/dataSource/HubDataProvider';
 import { useSettings } from '@/store';
 import { getSiteModel } from '@/site';
 import type { SiteModel } from '@/site';
-import { Tabs, Badge, Toast } from '@/components';
+import { Toast } from '@/components';
 import { LogConsole } from '@/panels';
 import { SiteMap } from './panels/SiteMap';
 import { ArgusVideo } from './panels/ArgusVideo';
-import { useArgus, activeMission, CAMERA_MODES, FOV_MAX, FOV_MIN, fovToZoom, zoomToFov, type CameraMode, type CameraView, type SceneProp } from './store';
+import { useArgus, activeMission, liveDetection, CAMERA_MODES, FOV_MAX, FOV_MIN, fovToZoom, zoomToFov, type CameraMode, type CameraView, type SceneProp } from './store';
 import { FleetPanel } from './panels/FleetPanel';
 import { OpsPanel, type OpsActions } from './panels/OpsPanel';
 import { DetectionsPanel, SpecPanel, ValidatorPanel, ReportPanel } from './panels/MissionPanel';
 import { ArgusTelemetry } from './panels/ArgusTelemetry';
-import { ArgusStatusBar } from './panels/ArgusStatusBar';
+import { TopBar } from './panels/TopBar';
+import { Rail, type View, type DrawerId } from './panels/Rail';
+import { Drawer } from './panels/Drawer';
+import { DetectionCard } from './panels/DetectionCard';
+import { BottomStrip } from './panels/BottomStrip';
 import { ClampBanner } from './panels/ClampBanner';
 import { GIMBAL_MAX, GIMBAL_MIN } from './panels/OpsPanel';
 import { useArgusDocument } from './Brand';
-import { Video, Crosshair, Globe, Keyboard } from 'lucide-react';
+import { Keyboard, SlidersHorizontal, Radar, ScrollText, ShieldCheck } from 'lucide-react';
 import './argus.css';
 
-type CenterView = 'flight' | 'mission' | 'world';
+type CenterView = View;
 interface ToastItem { id: number; severity: 'info' | 'success' | 'warning' | 'error' | 'critical'; title: string; message?: string }
 
 const hub = dataSource as unknown as HubDataProvider;
-
-function detectionToAnomaly(d: HubDetection, base: string): Anomaly {
-  const n = d.polygon.length || 1;
-  return {
-    id: d.id, type: d.change_type, confidence: d.confidence, source: 'sentinel2',
-    lat: d.polygon.reduce((a, p) => a + p.lat, 0) / n, lon: d.polygon.reduce((a, p) => a + p.lon, 0) / n,
-    thumbnail: `${base}/evidence/${d.after_ref}`,
-  };
-}
-function agentPlanToRoute(mission_id: string, plan: AgentPlan): MissionPlan {
-  const tools: PlanTool[] = [];
-  for (const w of plan.waypoints ?? []) {
-    tools.push({ tool: 'goto_gps', lat: w.lat, lon: w.lon, alt: w.alt_m, alt_m: w.alt_m, profile: 'inspect' });
-    if (w.action === 'hover') tools.push({ tool: 'hold', durationS: w.duration_s ?? 10, duration_s: w.duration_s ?? 10 });
-  }
-  tools.push({ tool: 'rtl' });
-  return { requestId: mission_id, anomalyId: plan.anomaly_id, tools, profile: 'inspect', rationale: plan.reasoning ?? '' };
-}
 
 export default function ArgusApp(): JSX.Element {
   const worldFrameRef = useRef<HTMLIFrameElement | null>(null);
@@ -69,6 +55,7 @@ export default function ArgusApp(): JSX.Element {
   const [site, setSite] = useState<SiteModel | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
   const [help, setHelp] = useState(false);
+  const [drawer, setDrawer] = useState<DrawerId | null>(null);
   const base = hub.httpBase();
 
   const toast = useCallback((t: Omit<ToastItem, 'id'>) => {
@@ -101,7 +88,7 @@ export default function ArgusApp(): JSX.Element {
       hub.onTelemetry((t) => { if (t.vehicleId === (st.getState().selected ?? hub.getVehicle())) st.getState().setTel(t); }),
       hub.onStatusText((x) => st.getState().addLog(x)),
       hub.onAck((a) => { if (!a.success) toast({ severity: 'error', title: `${a.command} failed`, message: a.message }); }),
-      hub.onRawEvent((ev) => {
+      hub.onRawEvent(function handle(ev) {
         const g = st.getState();
         switch (ev.type) {
           case 'snapshot': {
@@ -110,6 +97,9 @@ export default function ArgusApp(): JSX.Element {
             for (const m of (ev.missions as HubMission[]) ?? []) g.setMission(m);
             const sel = g.selected && drones.some((d) => d.drone_id === g.selected) ? g.selected : drones.sort((a, b) => a.drone_id.localeCompare(b.drone_id))[0]?.drone_id;
             if (sel) { hub.setVehicle(sel); g.select(sel); void loadCamera(sel); }
+            // the current dispatch's story (pretriage, spec, validation, envelope, agent trace, report) replayed in order,
+            // so a dashboard opened mid-flight shows the trust column filled in
+            for (const e of (ev.trust_events as Record<string, unknown>[] | undefined) ?? []) handle(e);
             break;
           }
           case 'drone_state': {
@@ -354,7 +344,7 @@ export default function ArgusApp(): JSX.Element {
       const k = e.key.toLowerCase();
       if (/^[1-9]$/.test(k)) { const ids = Object.keys(st.getState().fleet).sort(); const id = ids[Number(k) - 1]; if (id) select(id); return; }
       if (k === '?') { setHelp((h) => !h); return; }
-      if (k === 'escape') { setHelp(false); return; }
+      if (k === 'escape') { setHelp(false); setDrawer(null); return; }
       if (k === 'h') { if (st.getState().manualActive) void act.manualRelease(); return; }
       if (k === 'r') { void act.returnHome(); return; }
       if (k === 'v') { const id = st.getState().selected; const cur = (id && st.getState().camera[id]?.mode) || 'rgb'; act.cameraMode(CAMERA_MODES[(CAMERA_MODES.indexOf(cur) + 1) % CAMERA_MODES.length]); return; }
@@ -372,72 +362,85 @@ export default function ArgusApp(): JSX.Element {
     return () => { window.removeEventListener('keydown', onDown); window.removeEventListener('keyup', onUp); };
   }, [act, select, st]);
 
-  /* ---- derived for legacy panels (selectors keep re-renders scoped) ---- */
-  const tel = useArgus((s) => s.tel);
-  const trail = useArgus((s) => s.trail);
+  /* ---- derived ---- */
   const logs = useArgus((s) => s.logs);
-  const detections = useArgus((s) => s.detections);
-  const agentPlan = useArgus((s) => s.agentPlan);
-  const selected = useArgus((s) => s.selected);
-  const mission = useArgus((s) => activeMission(s, s.selected));
-  const anomalies = useMemo(() => detections.map((d) => detectionToAnomaly(d, base)), [detections, base]);
-  const route = useMemo(() => (agentPlan ? agentPlanToRoute(agentPlan.mission_id, agentPlan.plan) : null), [agentPlan]);
+  const liveDet = useArgus(liveDetection);
   const [recording, setRecording] = useState(false);
-  const hubLabel = base.replace(/^https?:\/\//, '');
+  const siteName = (site as { name?: string } | null)?.name ?? 'Meridian Station';
+  const dismiss = useCallback((id: string, how: 'logged' | 'ignored') => {
+    st.getState().dismissDetection(id, how);
+    log(how === 'logged' ? 'info' : 'warning', `Operator ${how} Detection ${id}${how === 'logged' ? ' without flying' : ''}`);
+  }, [st, log]);
+  const detCard = useMemo(() => (liveDet ? <DetectionCard hubBase={base} onDispatch={(id) => void dispatchId(id)} onLog={dismiss} /> : null), [liveDet, base, dispatchId, dismiss]);
+  const detAnchor = useMemo(() => {
+    if (!liveDet || liveDet.polygon.length === 0) return null;
+    const n = liveDet.polygon.length;
+    return { lat: liveDet.polygon.reduce((a, p) => a + p.lat, 0) / n, lon: liveDet.polygon.reduce((a, p) => a + p.lon, 0) / n, node: detCard };
+  }, [liveDet, detCard]);
 
   return (
-    <div className="argus-root" style={{ display: 'flex', flexDirection: 'column', height: '100vh', background: 'var(--bg-app)', overflow: 'hidden', position: 'relative' }}>
-      <ArgusStatusBar hubLabel={hubLabel} onHelp={() => setHelp((h) => !h)} />
-      <ClampBanner />
-      <div className="argus-grid" style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateColumns: '250px 1fr 262px', gridTemplateRows: 'minmax(0, 1fr)', gap: 8, padding: 8 }}>
-        {/* LEFT */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, minHeight: 0 }}>
-          <FleetPanel onSelect={select} />
-          <OpsPanel act={act} />
+    <div className="argus-root a-shell">
+      {/* The stage: one full-bleed surface per view. The Console iframe is the Renderer for video, evidence and overhead
+          captures, so it stays mounted; off the World view it lives in an 8 px box (the Console scales its render to its container). */}
+      <div className="a-stage">
+        <div style={center === 'world'
+          ? { position: 'absolute', inset: 0 }
+          : { position: 'absolute', left: -100, top: -100, width: 8, height: 8, overflow: 'hidden', opacity: 0.01, pointerEvents: 'none' }}>
+          <iframe ref={worldFrameRef} title="ARGUS World view" src={consoleUrl(settings.connection)} style={{ width: '100%', height: '100%', border: 0, display: 'block' }} allow="fullscreen" />
         </div>
-
-        {/* CENTER */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0, minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 'none' }}>
-            <Tabs size="sm" value={center} onChange={(id) => setCenter(id as CenterView)} items={[{ id: 'flight', label: 'Flight', icon: <Video size={13} /> }, { id: 'mission', label: 'Mission', icon: <Crosshair size={13} /> }, { id: 'world', label: 'World', icon: <Globe size={13} /> }]} />
-            {detections.length > 0 && <Badge tone="caution" mono>{detections.length} DETECTION{detections.length === 1 ? '' : 'S'}</Badge>}
-            {mission && <Badge tone="accent" mono>MISSION {mission.phase.toUpperCase()} · WP {mission.next_waypoint}</Badge>}
-          </div>
-          {/* The Console iframe is the Renderer for video, evidence and overhead captures, so it stays mounted;
-              off the World tab it lives in an 8 px box (the Console scales its render to its container). */}
-          <div style={center === 'world'
-            ? { flex: 1, minHeight: 0, borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', background: '#000' }
-            : { position: 'absolute', left: -100, top: -100, width: 8, height: 8, overflow: 'hidden', opacity: 0.01, pointerEvents: 'none' }}>
-            <iframe ref={worldFrameRef} title="ARGUS World view" src={consoleUrl(settings.connection)} style={{ width: '100%', height: '100%', border: 0, display: 'block' }} allow="fullscreen" />
-          </div>
-          {center === 'world' ? null : center === 'flight' ? (
-            <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: 'minmax(0, 1.45fr) minmax(0, 1fr)', gap: 8 }}>
-              <div style={{ borderRadius: 'var(--radius-lg)', overflow: 'hidden', border: '1px solid var(--border-default)', minHeight: 0 }}>
-                <ArgusVideo hubBase={base} lastFrameTs={lastFrame.current + frameTick * 0} onGimbal={(p) => act.gimbal(p)} />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1fr)', gap: 8, minHeight: 0 }}>
-                <SiteMap hubBase={base} onSelect={select} compact />
-                <LogConsole logs={logs} recording={recording} onToggleRecord={() => setRecording((r) => !r)} />
-              </div>
-            </div>
-          ) : (
-            <div style={{ flex: 1, minHeight: 0, display: 'grid', gridTemplateRows: 'minmax(0, 1.15fr) minmax(0, 1fr)', gap: 8 }}>
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.15fr) minmax(0, 1fr)', gap: 8, minHeight: 0 }}>
-                <SiteMap hubBase={base} onSelect={select} />
-                <DetectionsPanel hubBase={base} onDispatch={(id) => void dispatchId(id)} />
-              </div>
-              <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr)', gap: 8, minHeight: 0 }}>
-                <SpecPanel />
-                <ValidatorPanel />
-                <ReportPanel onResolve={(r) => { st.getState().resolveIncident(r); log(r === 'escalated' ? 'critical' : 'info', `Operator ${r} the Incident Report`); }} />
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* RIGHT */}
-        <ArgusTelemetry />
+        {center === 'flight' && <ArgusVideo hubBase={base} lastFrameTs={lastFrame.current + frameTick * 0} onGimbal={(p) => act.gimbal(p)} />}
+        {center === 'mission' && <SiteMap hubBase={base} onSelect={select} bare anchor={detAnchor} />}
+        {center !== 'flight' && <div className="a-shade" />}
       </div>
+
+      <TopBar hub={hub} siteName={siteName} onHelp={() => setHelp((h) => !h)} />
+      <ClampBanner />
+      <Rail view={center} drawer={drawer} onView={setCenter} onDrawer={setDrawer} />
+
+      {/* the newest Detection floats over the camera; on the Mission view it is anchored on its polygon */}
+      {center !== 'mission' && detCard && <div style={{ position: 'absolute', left: 124, top: 84, zIndex: 12 }}>{detCard}</div>}
+
+      {/* the trust story, in order: agent, then validator, then the report */}
+      {center === 'mission' && !drawer && (
+        <div className="a-glasswrap a-trust">
+          <SpecPanel />
+          <ValidatorPanel />
+          <ReportPanel onResolve={(r) => { st.getState().resolveIncident(r); log(r === 'escalated' ? 'critical' : 'info', `Operator ${r} the Incident Report`); }} />
+        </div>
+      )}
+
+      <BottomStrip onSelect={select} onCameraMode={(m) => act.cameraMode(m)} />
+
+      {drawer === 'ops' && (
+        <Drawer title="Operations" icon={<SlidersHorizontal size={13} />} onClose={() => setDrawer(null)}>
+          <OpsPanel act={act} />
+          <div className="a-glasswrap" style={{ display: 'flex', flexDirection: 'column', flex: '0 0 40%', minHeight: 0, borderTop: '1px solid rgba(255,255,255,0.08)' }}>
+            <DetectionsPanel hubBase={base} onDispatch={(id) => void dispatchId(id)} />
+          </div>
+        </Drawer>
+      )}
+      {drawer === 'fleet' && (
+        <Drawer title="Fleet and telemetry" icon={<Radar size={13} />} onClose={() => setDrawer(null)}>
+          <FleetPanel onSelect={select} />
+          <div className="a-glasswrap" style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0, padding: 8, overflow: 'auto' }}><ArgusTelemetry /></div>
+        </Drawer>
+      )}
+      {drawer === 'log' && (
+        <Drawer title="Event log" icon={<ScrollText size={13} />} onClose={() => setDrawer(null)}>
+          <LogConsole logs={logs} recording={recording} onToggleRecord={() => setRecording((r) => !r)} />
+        </Drawer>
+      )}
+      {drawer === 'safety' && (
+        <Drawer title="Safety" icon={<ShieldCheck size={13} />} onClose={() => setDrawer(null)}>
+          <ValidatorPanel />
+          <div style={{ padding: '10px 14px 14px', borderTop: '1px solid rgba(255,255,255,0.08)', display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <span className="a-label">Enforced three times</span>
+            <div className="a-body"><b style={{ color: 'var(--text-primary)' }}>At dispatch.</b> The Safety Validator checks every FlightPlan against the geofence, no-fly zones, ceiling and battery range. Rejections name the rule and go back to the agent.</div>
+            <div className="a-body"><b style={{ color: 'var(--text-primary)' }}>Under manual control.</b> The same rules clamp every velocity command at the boundary and the clamp is reported with its rule.</div>
+            <div className="a-body"><b style={{ color: 'var(--text-primary)' }}>Onboard.</b> ArduPilot's own geofence and failsafes are set from the same Site geometry. The agent cannot reach them.</div>
+          </div>
+        </Drawer>
+      )}
 
       {/* toasts */}
       <div style={{ position: 'fixed', top: 48, right: 12, display: 'flex', flexDirection: 'column', gap: 6, zIndex: 1200 }}>

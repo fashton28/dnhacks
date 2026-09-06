@@ -75,7 +75,7 @@ export function SiteMap({ hubBase, onSelect, compact = false, bare = false, anch
     const fence = geo.features.find((f: any) => f.properties.kind === 'geofence'); if (!fence) return;
     const b = new maplibregl.LngLatBounds();
     for (const c of fence.geometry.coordinates[0]) b.extend(c as [number, number]);
-    map.fitBounds(b, { padding: compact ? 14 : 22, duration: 500 });
+    map.fitBounds(b, { padding: bare ? { top: 90, right: 370, bottom: 220, left: 120 } : compact ? 14 : 22, duration: 500 });
   };
 
   /* ---- create the map once ---- */
@@ -245,12 +245,20 @@ export function SiteMap({ hubBase, onSelect, compact = false, bare = false, anch
     const map = mapRef.current; if (!map) return;
     if (!anchor) { anchorMarker.current?.remove(); anchorMarker.current = null; setAnchorEl(null); return; }
     if (!anchorMarker.current) {
-      const el = document.createElement('div');
-      anchorMarker.current = new maplibregl.Marker({ element: el, anchor: 'left', offset: [22, 0] }).setLngLat([anchor.lon, anchor.lat]).addTo(map);
+      const el = document.createElement('div'); el.className = 'a-anchor';
+      anchorMarker.current = new maplibregl.Marker({ element: el, anchor: 'center' }).setLngLat([anchor.lon, anchor.lat]).addTo(map);
       setAnchorEl(el);
     } else {
       anchorMarker.current.setLngLat([anchor.lon, anchor.lat]);
     }
+    // put the card on the side of the point with room: away from the trust column on the right and the strip below
+    const el = anchorMarker.current.getElement();
+    const place = () => {
+      const pt = map.project([anchor.lon, anchor.lat]); const w = map.getContainer().clientWidth, h = map.getContainer().clientHeight;
+      el.dataset.q = `${pt.y > h * 0.5 ? 'b' : 't'}${pt.x > w * 0.5 ? 'r' : 'l'}`;
+    };
+    place(); map.on('move', place);
+    return () => { map.off('move', place); };
   }, [anchor?.lat, anchor?.lon, !!anchor]);   // eslint-disable-line react-hooks/exhaustive-deps
   const portal = anchor && anchorEl ? createPortal(anchor.node, anchorEl) : null;
 
