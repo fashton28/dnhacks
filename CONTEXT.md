@@ -1,7 +1,7 @@
 # ARGUS
 
 ARGUS is a simulated autonomous site-monitoring platform for critical infrastructure.
-An overhead imagery layer flags change at a facility, an LLM agent decides what to investigate, a deterministic safety layer admits or rejects the plan, and a PX4-flown drone inspects the site and reports to a human operator.
+An overhead imagery layer flags change at a facility, an LLM agent decides what to investigate and declares the envelope it will work inside, a deterministic safety layer admits or shrinks that envelope and re-checks every move, and an ArduPilot-flown drone inspects the site and reports to a human operator.
 
 ## Language
 

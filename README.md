@@ -1,76 +1,89 @@
-# ARGUS: autonomous drone observability for critical infrastructure
+# ARGUS — governed autonomous site monitoring
 
-ARGUS watches a nuclear plant from two layers: an overhead pass that notices change, and an AI-flown drone that goes and finds out what the change is.
-Between the AI and the aircraft sits a trust layer that is not an AI: every plan, every flight step and every human stick input is checked against the site's geofence, no-fly zone and altitude limits before it reaches the flight controller.
-The flight controller is ArduPilot, the same open-source code that flies real multirotors, running in software-in-the-loop simulation.
+An overhead pass finds a change at a simulated critical-infrastructure site. A vision
+model says what changed, an agent decides whether it is worth a flight and declares the
+envelope it wants to work in, a deterministic layer approves or shrinks that envelope,
+and the agent then flies inside it — with every move re-checked, and real ArduPilot
+firmware underneath enforcing its own geofence.
 
-Built by a team of four for DNHacks (defense track) on a fictional site, Meridian Station.
+**To run the demo, read [`docs/DEMO.md`](docs/DEMO.md).** It is the rehearsed script,
+including the pre-flight checklist and what to do when the model API misbehaves.
 
-![Dashboard, Mission view during an agent-flown flight](docs/screenshots/dashboard-mission.jpg)
-
-## What happens on one anomaly
-
-1. **Detect.** The wide-area layer compares an overhead image before and after and flags a change: a rising column in the switchyard, a vehicle at the fence, an object where nothing should be.
-2. **Decide whether to fly.** The Triage Agent (Claude) reads the detection with the site context: which zone it is in, what is normally there, whether maintenance is declared. A contractor van in the service yard during a declared window is logged, no motor spins.
-3. **Declare an envelope.** The agent states where it intends to fly: a radius, a ceiling, a time budget. The Safety Validator checks the envelope against the site limits and refuses or shrinks it before takeoff.
-4. **Fly it.** Inside the envelope the agent is in control through tools: fly to, hold, tilt the camera, switch to thermal, zoom, capture. Every move is re-validated live, and hard stops in code (step budget, time, battery reserve, operator abort) bring the drone home no matter what the model says.
-5. **Report.** A written incident report with the frames, the agent's on-station assessment, a verdict and a recommended action. A transformer fire escalates as critical with de-energize and fire response; a steam release from a relief vent, identical from above, reads cool on thermal and is logged for maintenance.
-
-Everything the agent does is a published event and an audit line, so the operator watches the decision being made, not just the result.
-
-## Subsystems
-
-| | |
-|---|---|
-| ![Flight view](docs/screenshots/dashboard-flight.jpg) | **Ground control dashboard.** Live drone camera with a flight HUD, fleet, missions, the trust column (triage decision, validator verdicts, agent actions with their reasons), incident reports, manual control. React and TypeScript. |
-| ![World view](docs/screenshots/world-fire-wide.jpg) | **3D world.** The site in Three.js: terrain, buildings, switchyard, fences, woodland, weather. Scenarios place anomalies into it, such as this transformer fire, and the camera flies to them. 60 fps on a laptop. |
-| ![Chase view](docs/screenshots/world-chase.jpg) | **Aircraft.** Each drone is an ArduCopter instance with its own physics. The model banks and pitches with the autopilot's real attitude; telemetry at 20 Hz with per-frame interpolation. |
-| ![Overhead](docs/screenshots/overhead-fire.jpg) | **Wide-area layer.** Overhead renders before and after, differenced and georeferenced into detections with a footprint, an area and a confidence. |
-| ![Thermal](docs/screenshots/thermal-fire.jpg) | **Sensors.** The drone camera renders RGB, thermal (true per-object temperature with sensor noise and palettes) and LiDAR. This is the fire the agent confirmed: the bay saturates the sensor. |
-| ![Steam in thermal](docs/screenshots/thermal-steam.jpg) | **Same picture, different answer.** The steam release from above looks like the fire. In thermal it reads cool, water vapour, and the report says maintenance ticket, not emergency. |
-
-## Stack
-
-**Hardware.** None is required to run this, and that is the point of the pitch: the flight code is real.
-
-- Flight controller: ArduPilot ArduCopter, built natively for Apple Silicon and run as three software-in-the-loop instances with their own physics, EKF, battery model and onboard geofence. The same firmware runs on a Pixhawk; only the airframe is missing.
-- Everything runs on one MacBook: three autopilots, the Hub, both front ends and the renderer.
-
-**Software.**
-
-- `hub/` FastAPI. Drone registry, mission runner, manual control clamping, scenario engine, wide-area detection, the autonomy layer (site context, triage, envelope, agent flight, incident reports), audit log, live WebSocket feed.
-- `sim/` The MAVLink bridge between ArduPilot and the Hub, the site generator (one source of truth for geometry, geofence, zones and posture), a fake drone for tests.
-- `console/` The Three.js world and drone camera, also the renderer that produces evidence frames and overhead images for the Hub.
-- `platform/ground/ui/` The operator dashboard.
-- `contracts/` Pydantic models and JSON schemas shared by everything: Detection, MissionSpec, FlightPlan, ValidationResult, DroneState, IncidentReport.
-- AI: Claude Opus 5 for triage, envelope, the flight tool loop and vision. Every model call has a rule-based fallback so the pipeline runs identically with no API key.
-
-**Trust layer, in three independent lines.** The agent's own verifier, the Hub's Safety Validator on real site geometry, and ArduPilot's onboard polygon fence, which refuses a destination outside it regardless of what the Hub sends. Red-team cases exercise all three: an illegal first plan, a prompt injection in detection metadata, a target outside the fence, a plan beyond endurance.
-
-## Run it
+## Quick start
 
 ```bash
-uv sync
-cd console && pnpm install && pnpm build && cd ..
-cd platform/ground/ui && npm ci && npm run build && cd ../../..
-uv run python scripts/launch_sim.py --fleet 3 --speedup 1 --wipe --with-hub --renderer
+uv sync                                 # Python deps
+cd console && pnpm install && cd ..     # Console deps
+python scripts/fetch_assets.py          # ~85 MB of CC0 textures, HDRI and models — required
 ```
 
-Then open http://localhost:8000/ (dashboard) or http://localhost:8000/console/ (3D world).
-ArduPilot must be built once per [docs/sim-setup.md](docs/sim-setup.md).
-Put `ANTHROPIC_API_KEY=...` in a `.env` file for live mode; without it the same pipeline runs on rules.
+Assets are gitignored, so **every machine runs `fetch_assets.py` once**. Without it the
+scene renders untextured and dark.
 
-`uv run pytest` runs 105 tests, including full dispatches on a fake drone: detection, triage, envelope, flight, thermal confirmation, report.
+Put the model keys in `.env` at the repo root (gitignored; the Hub reads it at startup):
 
-## Read more
+```
+GEMINI_API_KEY=...      # wide-area vision
+ANTHROPIC_API_KEY=...   # triage, in-flight inspection, incident reports
+```
 
-- [docs/DEMO.md](docs/DEMO.md): the demo runbook, fire versus steam.
-- [ARCHITECTURE.md](ARCHITECTURE.md): how the pieces connect and why.
-- [CONTEXT.md](CONTEXT.md): the domain glossary and the scenarios.
-- [docs/sim-setup.md](docs/sim-setup.md): building ArduPilot and running everything on a Mac.
-- [docs/REPOSITORY_REVIEW.md](docs/REPOSITORY_REVIEW.md), [docs/BASIC_DEMO_PENDING.md](docs/BASIC_DEMO_PENDING.md) and [docs/DISCREPANCY_REWRITE.md](docs/DISCREPANCY_REWRITE.md): provenance, demo gates, and what the platform rewrite removed and re-implemented.
+Both are optional — every live model call degrades to a rule-based path and says so —
+but the live agent is the demo.
+
+Then build ArduPilot per [`docs/sim-setup.md`](docs/sim-setup.md) and:
+
+```bash
+make hub                 # Hub on :8000, serves /gcs/ and /console/
+make sim FLEET=3         # ArduCopter SITL + Bridge per Drone
+```
+
+Open <http://localhost:8000/> (redirects to the dashboard). `make fake-fleet` substitutes
+kinematic Drones when you do not want ArduPilot, and `scripts/sim_renderer.py` is a
+headless renderer for when no browser is open.
 
 ## Repository map
 
-- [`hub/`](hub/) the Hub, [`console/`](console/) the 3D console and renderer, [`sim/`](sim/) autopilot launcher, bridge and site generator, [`contracts/`](contracts/) shared models, [`scripts/`](scripts/) launch, smoke test and headless renderer, [`tests/`](tests/).
-- [`platform/`](platform/) the operator dashboard, companion software and shared wire contracts; [`argus-core/`](argus-core/) decision, validation and vision components; [`mock-drone-agent/`](mock-drone-agent/) the planner, verifier and triage the Hub's autonomy layer builds on.
+### The ARGUS stack
+
+| Path | What it is |
+|---|---|
+| [`hub/`](hub/) | One FastAPI process and the only authority. Drone registry, Mission runner, Safety Validator, agent-flown missions, in-flight inspection, detection and incident stores, Scenario engine, audit log. Serves the Console at `/console/` and the dashboard at `/gcs/`. |
+| [`console/`](console/) | Three.js World view, per-Drone view (RGB / thermal / LiDAR), MapLibre Overview, Fleet/Mission/Log panels. **Also the Renderer** — there is no camera on a simulated Drone, so the browser draws every frame the Hub asks for. |
+| [`widearea/`](widearea/) | Overhead change detection. `vision.py` (Gemini, structured output) and `detect.py` (numpy pixel differencing) both return the same `Detection`. |
+| [`sim/`](sim/) | ArduCopter SITL launcher and params, the MAVLink Bridge, the fake Drone, and the Site generator. `sim/common/site_limits.py` is read by both the Safety Validator and the firmware fence. |
+| [`contracts/`](contracts/) | Pydantic models, the controller protocol, fixtures and exported JSON schema. Every model names a term from [`CONTEXT.md`](CONTEXT.md). |
+| [`scripts/`](scripts/) | `launch_sim.py`, `sim_renderer.py`, `headless_renderer.py`, `argus_autonomy.py` (one closed loop end to end), `argus_detect.py`, `smoke_flight.py`, `fetch_assets.py`, `sitl_diag.py`, `export_schema.py` |
+| [`tests/`](tests/) | Hub API tests against the fake Drone, Safety Validator, incidents, wide-area, contracts, site |
+
+### Team components, maintained as separate roots
+
+| Path | What it is |
+|---|---|
+| [`platform/`](platform/) | Companion software, the React ground-control dashboard, hardware docs and design assets. The dashboard now talks to the ARGUS Hub and is served at `/gcs/`. |
+| [`rails/`](rails/) | An independent Python oracle for the trust layer, with parity harnesses. Scoped to `platform/`; imports nothing from it by design. |
+| [`argus-core/`](argus-core/) | Decision, validation and vision component. Its own contracts — adapt at a boundary, never share an import path. |
+| [`mock-drone-agent/`](mock-drone-agent/) | The planner, verifier, triage and report writer that `hub/autonomy.py` adapts. Also the plan-based fallback when `ARGUS_FLIGHT_MODE` is not `agent`. |
+
+## Documentation
+
+| Document | Read it for |
+|---|---|
+| [`docs/DEMO.md`](docs/DEMO.md) | **The runbook.** Pre-flight, the two acts, the codas, the API fallback. |
+| [`CONTEXT.md`](CONTEXT.md) | The vocabulary. Every term the code and the pitch use, and what to avoid calling things. |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How the pieces fit and the contracts between them. |
+| [`docs/ARGUS_AUTONOMY.md`](docs/ARGUS_AUTONOMY.md) | The autonomy loop in detail. |
+| [`docs/adr/`](docs/adr/) | Why the environment and flight stack are what they are, and why the agent flies inside an envelope. |
+| [`docs/sim-setup.md`](docs/sim-setup.md) | Building ArduPilot and running the stack. |
+| [`docs/ASSETS.md`](docs/ASSETS.md) | Asset provenance and licences. |
+| [`docs/REPOSITORY_REVIEW.md`](docs/REPOSITORY_REVIEW.md) | Provenance, contract discrepancies between roots, and the adapters they require. |
+| [`docs/specs/`](docs/specs/) | The spec and user stories. |
+
+## Tests
+
+```bash
+make test                # or: uv run pytest -q
+cd console && pnpm build # TypeScript + Vite
+```
+
+The root [CI workflow](.github/workflows/ci.yml) currently covers `platform/` only; the
+ARGUS suites above are run by hand.
