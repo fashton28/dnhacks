@@ -12,9 +12,11 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 import threading
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -247,7 +249,23 @@ class Autonomy:
         self.knowledge = SiteKnowledge.load()
         self.executor = HubExecutor(hub_app, loop, self.events, describe, live=live_vision)
         self.orchestrator = Orchestrator(self.facility, self.llm, self.executor, self.events, report_dir=runs_dir / "reports")
+        self._seed_mission_counter(runs_dir)
         self._lock = threading.Lock()
+
+    def _seed_mission_counter(self, runs_dir: Path) -> None:
+        """Mission ids are m-<date>-<n>. The agent counts from zero on every start, so after a Hub restart new
+        evidence would land in an earlier Mission's folder. Continue from the highest id already on disk."""
+        today = datetime.now(UTC).strftime("%Y%m%d")
+        highest = 0
+        ev_dir = getattr(self.app.state.settings, "evidence_dir", None) if hasattr(self.app.state, "settings") else None
+        for base in (ev_dir, runs_dir / "reports"):
+            if base is None or not Path(base).exists():
+                continue
+            for p in Path(base).iterdir():
+                m = re.match(rf"m-{today}-(\d+)", p.name)
+                if m:
+                    highest = max(highest, int(m.group(1)))
+        self.orchestrator._counter = highest
 
     @property
     def mode(self) -> str:

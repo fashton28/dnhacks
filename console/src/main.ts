@@ -59,6 +59,8 @@ const vision = new VisionModes(droneRenderer, world);
 (window as any).__argusVision = vision;
 const DRONE_W = 1280, DRONE_H = 720;
 droneCanvas.width = DRONE_W; droneCanvas.height = DRONE_H;
+// The renderer sized itself from the canvas attributes at construction; without this the viewport stays at that size and evidence frames are drawn in one corner.
+droneRenderer.setSize(DRONE_W, DRONE_H, false);
 const droneTarget = new THREE.WebGLRenderTarget(DRONE_W, DRONE_H, { samples: 4, type: THREE.HalfFloatType });
 /** In embed-drone mode the canvas fills the frame: render at its displayed size (capped at 1080p, dpr up to 2). */
 function fitDroneCanvas(): void {

@@ -27,6 +27,9 @@ def write_params(out: Path, sysid: int, fence_alt_max: float, fence_radius: floa
         "SIM_BATT_CAP_AH 5.0",
         "BATT_LOW_MAH 1000",
         "BATT_FS_LOW_ACT 2",       # RTL on low battery
+        "BATT_LOW_VOLT 0",         # capacity-based failsafe only, so the autopilot's failsafe matches the percent the Hub shows
+        "BATT_CRT_VOLT 0",
+        "BATT_FS_CRT_ACT 1",       # land when critically low
         "GPS_TYPE 1",
         "SIM_SPEEDUP 1",
         "LOG_DISARMED 0",

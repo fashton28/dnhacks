@@ -122,6 +122,10 @@ class MissionRunner:
             st = conn.state
             if st is not None and st.message.startswith("REFUSED"):
                 raise RuntimeError(f"autopilot refused waypoint ({wp.lat:.6f}, {wp.lon:.6f}, {wp.alt}): {st.message}")
+            if st is not None and st.armed and st.alt > 1.0 and st.mode in ("RTL", "LAND", "SMART_RTL"):
+                # the Mission runner only commands RTL after the last waypoint; airborne in RTL or LAND here means
+                # the autopilot took over (battery, GCS or EKF failsafe). Fail now with its reason, not after a timeout.
+                raise RuntimeError(f"autopilot took over in {st.mode} before waypoint ({wp.lat:.6f}, {wp.lon:.6f}, {wp.alt}): {st.message}")
             if st is not None and distance_m(st.lat, st.lon, wp.lat, wp.lon) <= H_TOL_M and abs(st.alt - wp.alt) <= V_TOL_M:
                 return
             if asyncio.get_running_loop().time() > deadline:
@@ -144,6 +148,10 @@ class MissionRunner:
                 frame = await self.registry.ask_renderer(RenderFrame(cmd_id=cmd_id, drone_id=m.drone_id))
             except LookupError:
                 self.audit.append("capture_skipped", mission_id=m.mission_id, waypoint=index, reason="no renderer connected")
+                return
+            except TimeoutError:
+                # a Renderer that reconnects mid-flight must not fail the Mission; the flight matters more than one frame
+                self.audit.append("capture_skipped", mission_id=m.mission_id, waypoint=index, reason="renderer did not answer in time")
                 return
         ref = f"evidence/{m.mission_id}/wp{index}.jpg"
         if self.evidence_dir is not None:
