@@ -485,7 +485,8 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         if event is not None:
             app.state.audit.append("clamp", **event.model_dump(mode="json"))
             reg().publish({"type": "clamp", **event.model_dump(mode="json")})
-        return {"ok": ack.ok, "sent": clamped.velocity_ned.model_dump(), "clamped": event.model_dump(mode="json") if event else None}
+        return {"ok": ack.ok, "sent": clamped.velocity_ned.model_dump(), "clamped": event.model_dump(mode="json") if event else None,
+                "phase": ack.detail or "live"}  # "arming" | "taking off" | "live": sticks only move the Drone when live
 
     @app.post("/drones/{drone_id}/manual/end")
     async def manual_end(drone_id: str, body: ManualEndBody) -> dict[str, Any]:

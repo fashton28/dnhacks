@@ -1,0 +1,3 @@
+/* Manual Control before the sticks are live: the autopilot is arming or climbing clear of the pad */
+.status-chip.taking-off { color: #ffc24b; border-color: rgba(245, 166, 35, 0.45); animation: argus-pulse 1s ease-in-out infinite; }
+@keyframes argus-pulse { 50% { opacity: 0.55; } }

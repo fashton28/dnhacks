@@ -1,6 +1,8 @@
 import "./style.css";
+import "./manual.css";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { RcController } from "./rc";
 import { api, liveFeed, RendererLink, type DroneState, type SceneState } from "./hub";
 import { SiteScene, enuToThree } from "./scene";
 import { VisionModes } from "./vision";
@@ -419,24 +421,47 @@ window.addEventListener("keydown", (e) => {
   }
 });
 window.addEventListener("keyup", (e) => keys.delete(e.key.toLowerCase()));
+// ---- RC controller: a gamepad is a Mode 2 transmitter (see rc.ts) -------------------------------------------------
+const rc = new RcController();
+const rcPill = $("rc-pill");
+rc.onConnect = (id) => { rcPill.textContent = `RC ${id.replace(/\(.*\)/, "").trim().slice(0, 28)}`; rcPill.className = "pill ok"; log(`RC controller connected: ${id}`, "good"); };
+rc.onDisconnect = (id) => { rcPill.textContent = "no RC"; rcPill.className = "pill"; log(`RC controller disconnected: ${id}`, "warn"); };
+const RC_SPEED = 6.0, RC_CLIMB = 2.5, RC_YAW_RATE = 90;  // full stick: metres per second, metres per second, degrees per second
+let manualPhase = "live";
+let rcSeen: string | null = null;
 setInterval(() => {
+  const sticks = rc.poll();
+  if (sticks.id !== rcSeen) { rcSeen = sticks.id; if (sticks.id) rc.onConnect?.(sticks.id); else rc.onDisconnect?.("controller"); }  // poll-driven: some browsers never fire the connect event for an already-plugged pad
+  if (sticks.buttons.release && manual) { manualEnd("resume"); return; }
+  if (sticks.buttons.home && selected) { returnHome(selected); return; }
+  if (sticks.buttons.camera && selected) { const modes = ["rgb", "thermal", "lidar"] as const; const cur = cameraSettings.get(selected)?.mode ?? "rgb"; setVision(modes[(modes.indexOf(cur) + 1) % 3]); }
+  if ((sticks.buttons.take || (sticks.active && sticks.id)) && !manual && selected) manualStart(selected).catch((err) => log(String(err), "bad"));
   if (!manual || !manualDrone) return;
   const s = drones.get(manualDrone); if (!s) return;
-  // Like a real drone: W/S fly forward and back along the nose, A/D turn the nose, the arrows slide sideways, Q/E climb
-  // and descend. Velocities are recomputed from the current heading every tick, so holding W while turning flies a curve
-  // and the airframe banks into it (the autopilot's real attitude is what the World view draws).
-  const spd = 3.0, climb = 1.5, yawRate = 60;
-  const fwd = (keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0);
-  const right = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
-  const up = (keys.has("e") ? 1 : 0) - (keys.has("q") ? 1 : 0);
-  const yaw = (keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0);
+  // Keyboard, like a real drone: W/S fly forward and back along the nose, A/D turn the nose, the arrows slide sideways,
+  // Q/E climb and descend. An RC controller's sticks take over whenever they are deflected. Velocities are recomputed from
+  // the current heading every tick, so forward plus yaw flies a curve and the airframe banks into it.
+  const kFwd = (keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0);
+  const kRight = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
+  const kUp = (keys.has("e") ? 1 : 0) - (keys.has("q") ? 1 : 0);
+  const kYaw = (keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0);
+  const useRc = sticks.id !== null && sticks.active;
+  const fwd = useRc ? sticks.pitch * RC_SPEED : kFwd * 3.0;
+  const right = useRc ? sticks.roll * RC_SPEED : kRight * 3.0;
+  const up = useRc ? sticks.throttle * RC_CLIMB : kUp * 1.5;
+  const yawRate = useRc ? sticks.yaw * RC_YAW_RATE : kYaw * 60;
   const h = s.heading_deg * Math.PI / 180;
-  const vn = spd * (fwd * Math.cos(h) - right * Math.sin(h));
-  const ve = spd * (fwd * Math.sin(h) + right * Math.cos(h));
-  api<any>(`/drones/${manualDrone}/manual/command`, { vx: vn, vy: ve, vz: -up * climb, yaw_rate_dps: yaw * yawRate })
-    .then((r) => { if (r.clamped) showClamp(r.clamped.rule); })
+  const vn = fwd * Math.cos(h) - right * Math.sin(h);
+  const ve = fwd * Math.sin(h) + right * Math.cos(h);
+  api<any>(`/drones/${manualDrone}/manual/command`, { vx: vn, vy: ve, vz: -up, yaw_rate_dps: yawRate })
+    .then((r) => {
+      if (r.clamped) showClamp(r.clamped.rule);
+      const phase = String(r.phase ?? "live");
+      if (phase !== manualPhase) { manualPhase = phase; if (phase !== "live") log(`Manual Control: ${phase}, sticks go live once airborne`, "warn"); else log("Manual Control: sticks live", "good"); }
+      const chip = $("drone-view-status"); if (manual && phase !== "live") { chip.textContent = phase; chip.className = "chip status-chip taking-off"; }
+    })
     .catch((err) => log(String(err), "bad"));
-}, 100);
+}, 50);
 
 function returnHome(id: string): void {
   manualEnd("hover");

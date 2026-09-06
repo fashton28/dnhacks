@@ -227,7 +227,9 @@ class Bridge:
             self.pending_goto = None
             self.manual_vel = (cmd.velocity_ned.vx, cmd.velocity_ned.vy, cmd.velocity_ned.vz, cmd.yaw_rate_dps)
             self.last_vel_send = 0.0
-            return Ack(cmd_id=cmd.cmd_id, ok=True)
+            # sticks are not live until the autopilot has armed and climbed clear of the pad; say so, the Console shows it
+            phase = "" if (self.armed and self.alt >= 0.5 and self.takeoff_target is None) else ("taking off" if self.armed else "arming")
+            return Ack(cmd_id=cmd.cmd_id, ok=True, detail=phase)
         if isinstance(cmd, LookAt):
             self.gimbal = max(-30.0, min(90.0, cmd.pitch_deg))
             return Ack(cmd_id=cmd.cmd_id, ok=True)
