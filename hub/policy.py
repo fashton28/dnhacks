@@ -31,7 +31,7 @@ class AutonomyPolicy:
     @classmethod
     def from_env(cls) -> AutonomyPolicy:
         return cls(
-            mode=AutonomyMode(os.environ.get("ARGUS_AUTONOMY_MODE", "supervised")),
+            mode=AutonomyMode(os.environ.get("ARGUS_AUTONOMY_MODE", "autonomous")),
             veto_window_s=float(os.environ.get("ARGUS_VETO_WINDOW_S", "15")),
             max_concurrent_flights=int(os.environ.get("ARGUS_MAX_CONCURRENT_FLIGHTS", "1")),
             asset_cooldown_s=float(os.environ.get("ARGUS_ASSET_COOLDOWN_S", "600")),
