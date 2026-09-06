@@ -46,7 +46,7 @@ class FakeDrone:
         self.home = home_xy
         self.x, self.y, self.z = home_xy[0], home_xy[1], 0.0
         self.heading = 0.0
-        self.gimbal_pitch = 45.0
+        self.gimbal_pitch = 8.0
         self.vel_ned = VelocityNED(vx=0, vy=0, vz=0)
         self.roll = 0.0   # degrees, right wing down positive: synthesized from acceleration like a real multirotor
         self.pitch = 0.0  # degrees, nose up positive

@@ -240,7 +240,7 @@ class DroneState(Strict):
     battery_pct: Annotated[float, Field(ge=0, le=100)]
     status: DroneStatus
     mission_id: str | None = None
-    gimbal_pitch_deg: Annotated[float, Field(ge=-30, le=90)] = Field(default=45.0, description="camera pitch: -30 looks up, 0 level, 90 straight down; drawn by the Renderer")
+    gimbal_pitch_deg: Annotated[float, Field(ge=-30, le=90)] = Field(default=8.0, description="camera pitch: -30 looks up, 0 level, 90 straight down; drawn by the Renderer")
     roll_deg: Annotated[float, Field(ge=-180, le=180)] = Field(default=0.0, description="airframe roll, right wing down positive (autopilot attitude)")
     pitch_deg: Annotated[float, Field(ge=-180, le=180)] = Field(default=0.0, description="airframe pitch, nose up positive (autopilot attitude)")
     armed: bool = False
