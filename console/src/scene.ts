@@ -403,7 +403,7 @@ export class SiteScene {
   /** Render the World view through a bloom pipeline (skipped on low quality). */
   renderWorld(renderer: THREE.WebGLRenderer, camera: THREE.Camera): void {
     if (this.quality === "low") { renderer.render(this.scene, camera); return; }
-    const size = renderer.getSize(new THREE.Vector2());
+    const size = renderer.getSize(this.sizeScratch);
     if (!this.composer) {
       this.composer = new EffectComposer(renderer);
       this.composer.addPass(new RenderPass(this.scene, camera));
@@ -414,9 +414,11 @@ export class SiteScene {
     }
     if (!this.composerSize.equals(size)) { this.composer.setSize(size.x, size.y); this.composerSize.copy(size); }
     (this.composer.passes[0] as RenderPass).camera = camera;
-    // shadows every other frame: the sun is static and nothing moves fast enough to notice
+    // Shadows are static: the sun does not move and Drones do not cast them (see droneModel). Refreshing the map every other
+    // frame made frame cost alternate, which reads as judder; now it refreshes every few seconds or when the Scene changes.
     renderer.shadowMap.autoUpdate = false;
-    renderer.shadowMap.needsUpdate = (this.frameCounter++ & 1) === 0;
+    renderer.shadowMap.needsUpdate = this.shadowsDirty || (this.frameCounter++ % 240) === 0;
+    this.shadowsDirty = false;
     this.composer.render();
   }
 
@@ -520,10 +522,18 @@ export class SiteScene {
    *  aircraft and its camera jump once per sample, which reads as lag however fast the page renders. */
   smoothing = true;
   private lastAnimMs = 0;
+  /** Set when static geometry changed (Scene props, fences) so the next frame refreshes the shadow map. */
+  shadowsDirty = true;
+  private sizeScratch = new THREE.Vector2();
 
   updateDrone(s: DroneState): void {
     let g = this.drones.get(s.drone_id);
-    if (!g) { g = this.droneModel(s.drone_id); this.drones.set(s.drone_id, g); this.scene.add(g); }
+    if (!g) {
+      g = this.droneModel(s.drone_id);
+      // Drones do not cast shadows: a moving caster would force the shadow map to refresh every frame
+      g.traverse((o) => { (o as THREE.Mesh).castShadow = false; });
+      this.drones.set(s.drone_id, g); this.scene.add(g);
+    }
     const [x, y] = latlonToEnu(this.anchor, s.lat, s.lon);
     const alt = Math.max(0, s.alt);
     const ud = g.userData as any;
@@ -569,13 +579,14 @@ export class SiteScene {
   }
 
   setScene(state: SceneState): void {
+    this.shadowsDirty = true;
     if (this.fenceMesh) {
       const hidden = new THREE.Matrix4().makeScale(0, 0, 0);
       for (const [id, f] of this.fenceMatrices) this.fenceMesh.setMatrixAt(f.index, state.open_fences.includes(id) ? hidden : f.matrix);
       this.fenceMesh.instanceMatrix.needsUpdate = true;
     }
     this.props.clear();
-    for (const p of state.props) this.propModel(p).then((o) => this.props.add(o));
+    for (const p of state.props) this.propModel(p).then((o) => { this.props.add(o); this.shadowsDirty = true; });
   }
 
   private async propModel(p: SceneProp): Promise<THREE.Object3D> {

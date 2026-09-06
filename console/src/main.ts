@@ -14,6 +14,8 @@ const isHeadless = params.get("headless") === "1";
 if (isHeadless) document.body.classList.add("headless");
 const isEmbed = params.get("embed") === "1" || params.get("embed") === "drone";
 const isEmbedDrone = params.get("embed") === "drone";   // Drone view only: the dashboard's live camera feed
+const isEmbedWorld = params.get("embed") === "1";       // World view only: the dashboard's World tab
+const wantStream = params.get("stream") === "1";        // produce the legacy MJPEG stream from this tab
 const sensorFx = params.get("fx") === "1";               // grain, vignette, chromatic aberration are opt-in; default is clean imagery
 if (isEmbed) document.body.classList.add("embed");
 if (isEmbedDrone) document.body.classList.add("embed-drone");
@@ -35,6 +37,7 @@ const MAX_RATIO = Math.min(window.devicePixelRatio, 1.5);
 let pixelRatio = MAX_RATIO;
 let lastRatioChange = 0;
 renderer.setPixelRatio(pixelRatio);
+renderer.info.autoReset = false;  // reset once per frame in the loop so calls and triangles cover every pass
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 0.95;
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -49,8 +52,10 @@ controls.update();
 
 // ---- Drone view (offscreen renderer with a sensor post-pass; also serves Renderer-role captures) ----
 const droneCanvas = $<HTMLCanvasElement>("drone-canvas");
-const droneRenderer = new THREE.WebGLRenderer({ canvas: droneCanvas, antialias: true, preserveDrawingBuffer: true });
+const droneRenderer = new THREE.WebGLRenderer({ canvas: droneCanvas, antialias: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
 droneRenderer.shadowMap.enabled = true;
+droneRenderer.shadowMap.autoUpdate = false;  // static sun: refreshed on a slow cadence in renderDroneView, never per frame
+let droneShadowFrame = 0;
 droneRenderer.toneMapping = THREE.ACESFilmicToneMapping;
 droneRenderer.outputColorSpace = THREE.SRGBColorSpace;
 droneRenderer.setPixelRatio(1);
@@ -65,8 +70,8 @@ const droneTarget = new THREE.WebGLRenderTarget(DRONE_W, DRONE_H, { samples: 4, 
 /** In embed-drone mode the canvas fills the frame: render at its displayed size (capped at 1080p, dpr up to 2). */
 function fitDroneCanvas(): void {
   if (!isEmbedDrone) return;
-  const dpr = Math.min(window.devicePixelRatio, 2);
-  const w = Math.min(1920, Math.round(droneCanvas.clientWidth * dpr)), h = Math.min(1080, Math.round(droneCanvas.clientHeight * dpr));
+  const dpr = Math.min(window.devicePixelRatio, 1.5);
+  const w = Math.min(1920, Math.round(layout.droneW * dpr)), h = Math.min(1080, Math.round(layout.droneH * dpr));
   if (w > 0 && h > 0 && (droneCanvas.width !== w || droneCanvas.height !== h)) {
     droneCanvas.width = w; droneCanvas.height = h; droneRenderer.setSize(w, h, false); droneTarget.setSize(w, h);
     droneCam.aspect = w / h; droneCam.updateProjectionMatrix();
@@ -129,6 +134,7 @@ function applyCamera(droneId: string): void {
 }
 function renderDroneView(s: DroneState): void {
   applyCamera(s.drone_id);
+  droneRenderer.shadowMap.needsUpdate = world.shadowsDirty || (droneShadowFrame++ % 240) === 0;
   world.aimDroneCamera(droneCam, s);
   const g = world.drones.get(s.drone_id);
   if (g) g.visible = false;
@@ -263,8 +269,9 @@ function onDrone(s: DroneState): void {
   else if (selected === null && s.status !== "offline" && (storedSelection === null || storedSelection === s.drone_id)) select(s.drone_id, { quiet: true });
   if (selected === null && !selectFallback) selectFallback = window.setTimeout(() => { if (selected === null && drones.size) select(sortedDrones()[0].drone_id, { quiet: true }); }, 2500);
   if (performance.now() - lastFleetRefresh > 200 || (prev && prev.status !== s.status)) { lastFleetRefresh = performance.now(); refreshFleet(); }
-  if (s.drone_id === selected) { refreshSelected(); syncGimbal(s); }
+  if (s.drone_id === selected && performance.now() - lastSelectedRefresh > 100) { lastSelectedRefresh = performance.now(); refreshSelected(); syncGimbal(s); }
 }
+let lastSelectedRefresh = 0;
 
 function onMission(m: Mission): void {
   const prev = missions.get(m.mission_id);
@@ -528,20 +535,35 @@ $("fly-square").onclick = async () => {
 
 // ---- render loop ---------------------------------------------------------------------------------
 let frames = 0, lastFps = performance.now(), lastStream = 0, lastDroneRender = 0, lastHud = 0;
+// Canvas sizes come from a ResizeObserver, so the render loop never forces a layout by reading clientWidth.
+const layout = { worldW: worldCanvas.clientWidth, worldH: worldCanvas.clientHeight, droneW: droneCanvas.clientWidth, droneH: droneCanvas.clientHeight };
+new ResizeObserver((entries) => {
+  for (const e of entries) {
+    const r = e.contentRect;
+    if (e.target === worldCanvas) { layout.worldW = r.width; layout.worldH = r.height; }
+    if (e.target === droneCanvas) { layout.droneW = r.width; layout.droneH = r.height; }
+  }
+}).observe(worldCanvas);
+new ResizeObserver((entries) => { for (const e of entries) { layout.droneW = e.contentRect.width; layout.droneH = e.contentRect.height; } }).observe(droneCanvas);
+// Rendering pauses while this view is not visible (a hidden dashboard tab, a background browser tab); telemetry still flows.
+let visible = !document.hidden;
+document.addEventListener("visibilitychange", () => { visible = !document.hidden; });
+new IntersectionObserver((entries) => { for (const e of entries) visible = e.isIntersecting && !document.hidden; }).observe(isEmbedDrone ? droneCanvas : worldCanvas);
 function resize(): void {
-  const w = worldCanvas.clientWidth, h = worldCanvas.clientHeight;
+  const w = Math.floor(layout.worldW), h = Math.floor(layout.worldH);
   const dpr = pixelRatio;
   if (w > 0 && h > 0 && (worldCanvas.width !== Math.floor(w * dpr) || worldCanvas.height !== Math.floor(h * dpr))) {
     renderer.setSize(w, h, false); worldCam.aspect = w / h; worldCam.updateProjectionMatrix(); overview.resize();
   }
 }
 // ---- perf instrumentation: per-stage ms averaged over the last second, on window.__argusPerf ----
-const perf = { world: 0, drone: 0, stream: 0, ui: 0, frames: 0, lastReport: performance.now(), steps: [] as number[], lastPose: null as THREE.Vector3 | null,
-  report: { world: 0, drone: 0, stream: 0, ui: 0, fps: 0, stepMean: 0, stepStd: 0, stepMax: 0, stillFrames: 0 } };
+const perf = { world: 0, drone: 0, stream: 0, ui: 0, frames: 0, lastReport: performance.now(), steps: [] as number[], lastPose: null as THREE.Vector3 | null, dts: [] as number[], lastNow: 0,
+  report: { world: 0, drone: 0, stream: 0, ui: 0, fps: 0, stepMean: 0, stepStd: 0, stepMax: 0, stillFrames: 0, p50: 0, p95: 0, p99: 0, dtMax: 0, long20: 0, long34: 0, calls: 0, tris: 0 } };
 world.smoothing = new URLSearchParams(location.search).get("smooth") !== "0";
 (window as any).__argusPerf = perf;
 function stage<T>(key: "world" | "drone" | "stream" | "ui", fn: () => T): T { const t = performance.now(); const r = fn(); (perf as any)[key] += performance.now() - t; return r; }
 let lastWorldRender = 0;
+const followDelta = new THREE.Vector3();
 function loop(now: number): void {
   requestAnimationFrame(loop);
   resize();
@@ -553,25 +575,30 @@ function loop(now: number): void {
     if (u >= 1) camTween = null;
   } else if (focusFollow && selected && world.drones.has(selected)) {
     const g = world.drones.get(selected)!;
-    const delta = g.position.clone().sub(controls.target);
-    controls.target.add(delta);
-    worldCam.position.add(delta);
+    followDelta.copy(g.position).sub(controls.target);
+    controls.target.add(followDelta);
+    worldCam.position.add(followDelta);
   }
   controls.update();
   fitDroneCanvas();
+  if (!visible && !isHeadless) { world.update(now / 1000, worldCam.position); perf.lastNow = 0; return; }  // hidden: keep poses warm, draw nothing
   // A headless Renderer only answers render requests (evidence frames, overheads), which draw on demand. Its continuous
   // World render and MJPEG stream are idled to a few frames a second so the Operator's own tabs keep the GPU.
   const worldDue = !isHeadless || now - lastWorldRender > 250;
+  renderer.info.reset();
   stage("world", () => { world.update(now / 1000, worldCam.position); if (!isEmbedDrone && worldDue) { lastWorldRender = now; world.renderWorld(renderer, worldCam); } });
   if (selected && drones.has(selected)) {
     const s = drones.get(selected)!;
-    // the Drone view is a camera feed: 30 Hz is plenty in the full Console and frees the GPU for the World view; the embed renders every frame
-    if (isEmbedDrone || now - lastDroneRender > (isHeadless ? 200 : 33)) { lastDroneRender = now; stage("drone", () => renderDroneView(s)); }
-    const streaming = s.alt > 0.3;
-    if (streaming && !isEmbedDrone && now - lastStream > (isHeadless ? 200 : 80)) { lastStream = now; stage("stream", () => streamFrame(s)); }
+    // The Drone view is a camera feed. The embed renders it every frame; the full Console at 30 Hz; the World-only embed
+    // has no Drone view on screen and skips it. The MJPEG stream (legacy /mjpeg consumers) is produced only by the headless
+    // Renderer or when ?stream=1 is set: a toBlob readback every 80 ms was a periodic hitch in every other view.
+    if (isEmbedDrone || (!isEmbedWorld && now - lastDroneRender > (isHeadless ? 200 : 33))) { lastDroneRender = now; stage("drone", () => renderDroneView(s)); }
+    const streaming = s.alt > 0.3 && (isHeadless || wantStream) && !isEmbedDrone;
+    if (streaming && now - lastStream > (isHeadless ? 200 : 80)) { lastStream = now; stage("stream", () => streamFrame(s)); }
     if (now - lastHud > 250) { lastHud = now; stage("ui", () => renderHud($("hud"), s, streaming, vision.mode)); }
   }
   frames++; perf.frames++;
+  if (perf.lastNow) perf.dts.push(now - perf.lastNow); perf.lastNow = now;
   // motion smoothness of the selected Drone: frame-to-frame step of its drawn position. Smooth motion has a low spread and
   // no still frames while moving; snapping to 10 Hz telemetry shows as five still frames then one big step.
   if (selected && world.drones.has(selected)) {
@@ -593,9 +620,13 @@ function loop(now: number): void {
     const n = Math.max(1, perf.frames);
     const st = perf.steps, m = st.length ? st.reduce((a, b) => a + b, 0) / st.length : 0;
     const sd = st.length ? Math.sqrt(st.reduce((a, b) => a + (b - m) ** 2, 0) / st.length) : 0;
+    const d = perf.dts.slice().sort((a, b) => a - b), q = (f: number) => (d.length ? d[Math.min(d.length - 1, Math.floor(f * d.length))] : 0);
+    const info = renderer.info.render;
     perf.report = { world: +(perf.world / n).toFixed(2), drone: +(perf.drone / n).toFixed(2), stream: +(perf.stream / n).toFixed(2), ui: +(perf.ui / n).toFixed(2), fps: perf.frames,
-      stepMean: +m.toFixed(3), stepStd: +sd.toFixed(3), stepMax: +(st.length ? Math.max(...st) : 0).toFixed(3), stillFrames: st.filter((x) => x < 1e-4).length };
-    perf.world = perf.drone = perf.stream = perf.ui = 0; perf.frames = 0; perf.lastReport = now; perf.steps = [];
+      stepMean: +m.toFixed(3), stepStd: +sd.toFixed(3), stepMax: +(st.length ? Math.max(...st) : 0).toFixed(3), stillFrames: st.filter((x) => x < 1e-4).length,
+      p50: +q(0.5).toFixed(1), p95: +q(0.95).toFixed(1), p99: +q(0.99).toFixed(1), dtMax: +(d.length ? d[d.length - 1] : 0).toFixed(1), long20: d.filter((x) => x > 20).length, long34: d.filter((x) => x > 34).length,
+      calls: info.calls, tris: info.triangles };
+    perf.world = perf.drone = perf.stream = perf.ui = 0; perf.frames = 0; perf.lastReport = now; perf.steps = []; perf.dts = [];
   }
 }
 requestAnimationFrame(loop);
