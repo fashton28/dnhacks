@@ -187,8 +187,9 @@ def describe_from_scene(frame: Path | None, wp: dict[str, Any], scene, index: in
     seen, dets = [], []
     thermal = wp.get("camera_mode") == "thermal"
     thermal_max: float | None = 38.0 if thermal else None  # warm switchgear and sunlit roofs read high 30s
+    alt = float(wp.get("alt_m") or 0.0)
     for p in scene.props:
-        d = ((p.x - x) ** 2 + (p.y - y) ** 2) ** 0.5
+        d = ((p.x - x) ** 2 + (p.y - y) ** 2 + alt ** 2) ** 0.5  # slant range from the camera, not ground distance
         if d < 60:
             label = {"vehicle": "vehicle", "crate": "unattended_object", "person": "person", "fire": "fire", "steam": "steam_plume"}.get(p.kind, p.kind)
             conf = round(max(0.3, min(0.95, 1.0 - d / 80)), 2)

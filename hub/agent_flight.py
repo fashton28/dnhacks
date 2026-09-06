@@ -414,12 +414,13 @@ class AgentFlight(Inspector):
 
     def _fly_mock(self) -> None:
         self.res.assessed_by = "mock"
+        off = round(min(20.0, self.env.radius_m * 0.6))  # second angle inside the envelope even after a repair
         script = [("fly_to", {"east_m": 0, "north_m": 0, "alt_m": 30, "why": "Transit over the Detection at the ceiling."}),
                   ("look_at", {"pitch_deg": 80, "why": "Look straight down for the overhead view."}),
                   ("capture", {"looking_for": "vehicles, people, objects, fence"}),
                   ("set_camera", {"mode": "thermal", "zoom": 1.0, "why": "Heat tells a running engine or a person from a cold object."}),
                   ("capture", {"looking_for": "heat signatures"}),
-                  ("fly_to", {"east_m": -20, "north_m": -20, "alt_m": 18, "why": "Low oblique from the south-west for a second angle."}),
+                  ("fly_to", {"east_m": -off, "north_m": -off, "alt_m": 18, "why": "Low oblique from the south-west for a second angle."}),
                   ("look_at", {"pitch_deg": 45, "why": "Oblique view of the side of the object."}),
                   ("set_camera", {"mode": "rgb", "zoom": 2.5, "why": "Zoom to read detail."}),
                   ("capture", {"looking_for": "detail of the flagged object"}),
@@ -427,7 +428,14 @@ class AgentFlight(Inspector):
         for name, args in script:
             self._tool(name, args)
         labels = sorted({d["label"] for o in self.res.observations for d in o.get("detections", [])})
-        self.res.summary = "Agent-flown mock flight: overhead RGB and thermal, then a low oblique zoomed view. Seen: " + (", ".join(labels) if labels else "nothing unusual") + "."
+        peaks = [o.get("thermal_max_c") for o in self.res.observations if o.get("thermal_max_c") is not None]
+        seen = {"fire": "flames and a dark smoke column at the transformer bay", "smoke": None, "steam_plume": "a white plume from the roof relief vent, cool in thermal",
+                "vehicle": "a vehicle", "unattended_object": "an unattended object", "person": "a person on foot", "fence_damage": "an opening in the fence"}
+        parts = [seen[l] for l in labels if seen.get(l)]
+        what = "; ".join(parts) if parts else "nothing unusual"
+        peak = f" Thermal peak {max(peaks):.0f} C." if peaks else ""
+        people = " No personnel near it." if labels and "person" not in labels else ""
+        self.res.summary = f"Overhead RGB and thermal passes, then a low oblique at 2.5x. Seen: {what}.{peak}{people}"
         self.res.threat_assessment = ("hostile" if "fire" in labels else "suspicious" if any(l in labels for l in ("person", "fence_damage", "smoke")) else "benign" if labels else "none")
 
     def _fly_live(self, anomaly: dict[str, Any], site_prose: str) -> None:
