@@ -119,7 +119,25 @@ class ManualEndBody(BaseModel):
     action: str = "resume"  # resume | abort | hover
 
 
+def _load_dotenv(path: Path = Path(__file__).resolve().parent.parent / ".env") -> None:
+    """Read KEY=value lines from the repo's .env into the environment without overriding what is already set.
+
+    Secrets never live in source or config; the file is gitignored and read here so `make hub`
+    and a bare `uvicorn hub.server:app` behave the same."""
+    path = path or ROOT / ".env"
+    if not path.exists():
+        return
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().removeprefix("export ").strip()
+        os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+
+
 def create_app(settings: HubSettings | None = None) -> FastAPI:
+    _load_dotenv()
     settings = settings or HubSettings(speed_factor=float(os.environ.get("ARGUS_SPEED_FACTOR", "1")))
 
     @asynccontextmanager
