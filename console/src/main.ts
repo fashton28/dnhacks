@@ -268,6 +268,7 @@ liveFeed((ev) => {
     case "incident": log(`INCIDENT REPORT [${ev.severity}] ${ev.title}: ${ev.recommended_action}`, ev.severity === "high" || ev.severity === "critical" ? "bad" : "warn"); break;
     case "dispatch_outcome": log(`Dispatch outcome for ${ev.detection_id}: ${ev.flown ? "flown by " + ev.drone_id : "NOT FLOWN"} after ${ev.attempts} attempt(s), triage ${ev.triage?.decision}`, ev.flown ? "good" : "warn"); dispatching = false; refreshDispatchButton(); break;
     case "autonomy": if (["plan_abandoned", "waypoint_reached", "observation"].includes(ev.event.type)) log(`agent ${ev.event.type}: ${ev.event.type === "observation" ? ev.event.payload.caption : JSON.stringify(ev.event.payload).slice(0, 140)}`); break;
+    case "sightings": onSightings(ev); break;
     case "ack": if (!ev.ok) log(`${ev.drone_id} refused command: ${ev.detail}`, "bad"); break;
   }
 }, (ok) => setPill("hub-status", ok, ok ? "hub live" : "hub reconnecting"));
@@ -515,6 +516,44 @@ function fitSite(): void { focusFollow = false; tweenCamera(HOME_POS, HOME_TARGE
 controls.addEventListener("start", () => { camTween = null; focusFollow = false; });
 $("focus-drone").onclick = () => { if (selected) focusOn(selected); else log("Select a Drone first", "warn"); };
 $("fit-site").onclick = fitSite;
+
+// ---- Sightings overlay: the Hub's measurements drawn over the Drone view for a few seconds ---------------------------
+type SightingRow = { id: string; label: string; temp_max_c: number | null; bbox: number[]; range_m: number; lat: number; lon: number };
+const SIGHTING_SHOW_MS = 3000;
+let sightingsTimer: number | undefined;
+function onSightings(ev: { drone_id: string; width?: number; height?: number; sightings: SightingRow[] }): void {
+  const rows = ev.sightings ?? [];
+  for (const s of rows) log(`${ev.drone_id} sighting: ${s.label.replace("_", " ")}${s.temp_max_c != null ? ` ${s.temp_max_c.toFixed(0)} C` : ""} at ${s.lat.toFixed(5)}, ${s.lon.toFixed(5)}, ${s.range_m.toFixed(0)} m`, s.label === "hot_spot" ? "warn" : "info");
+  if (ev.drone_id !== selected || rows.length === 0) return;
+  const frame = document.querySelector<HTMLElement>(".drone-frame");
+  if (!frame) return;
+  let layer = document.getElementById("sightings-layer");
+  if (!layer) {
+    layer = document.createElement("div"); layer.id = "sightings-layer";
+    layer.style.cssText = "position:absolute;pointer-events:none;overflow:hidden;z-index:4";
+    frame.appendChild(layer);
+  }
+  // frame pixels to the displayed canvas size
+  const cw = droneCanvas.clientWidth || droneCanvas.width, ch = droneCanvas.clientHeight || droneCanvas.height;
+  const fw = ev.width || droneCanvas.width, fh = ev.height || droneCanvas.height;
+  layer.style.left = `${droneCanvas.offsetLeft}px`; layer.style.top = `${droneCanvas.offsetTop}px`; layer.style.width = `${cw}px`; layer.style.height = `${ch}px`;
+  layer.replaceChildren(...rows.map((s) => {
+    const [x0, y0, x1, y1] = s.bbox;
+    const box = document.createElement("div");
+    const hot = s.label === "hot_spot";
+    box.style.cssText = `position:absolute;left:${(x0 / fw) * cw}px;top:${(y0 / fh) * ch}px;width:${((x1 - x0) / fw) * cw}px;height:${((y1 - y0) / fh) * ch}px;` +
+      `border:2px solid ${hot ? "#ff5a3c" : "#9fd3ff"};border-radius:2px;box-shadow:0 0 0 1px rgba(0,0,0,.55);`;
+    const tag = document.createElement("span");
+    tag.textContent = `${s.label.replace("_", " ")}${s.temp_max_c != null ? ` ${s.temp_max_c.toFixed(0)} C` : ""} · ${s.range_m.toFixed(0)} m`;
+    tag.style.cssText = `position:absolute;left:-2px;${y0 / fh * ch > 18 ? "bottom:100%" : "top:100%"};white-space:nowrap;padding:1px 5px;font:600 11px/1.4 ui-monospace,Menlo,monospace;` +
+      `color:#fff;background:${hot ? "rgba(255,90,60,.9)" : "rgba(60,140,220,.9)"};border-radius:2px`;
+    box.appendChild(tag);
+    return box;
+  }));
+  layer.hidden = false;
+  window.clearTimeout(sightingsTimer);
+  sightingsTimer = window.setTimeout(() => { layer!.hidden = true; }, SIGHTING_SHOW_MS);
+}
 
 // ---- vision mode switch -------------------------------------------------------------------------------
 const VISION: ("rgb" | "thermal" | "lidar")[] = ["rgb", "thermal", "lidar"];
