@@ -132,10 +132,6 @@ class AgentFlightResult:
     hard_stop: str | None = None
 
 
-async def _select(app, mission_id: str, detection_id: str, center: tuple[float, float]):
-    return select_drone(app, mission_id, detection_id, center)  # runs on the Hub loop: it publishes to the live feed
-
-
 class FlightEnded(Exception):
     """Raised inside a tool when the flight must end now (hard stop or Operator abort)."""
 
@@ -354,17 +350,24 @@ class AgentFlight(Inspector):
             res.error = "Safety Validator refused the envelope after repairs: " + ", ".join(v["rule"] for v in (res.envelope_validation or {}).get("violations", []))
             return res
         self.env = env
-        chosen, _ = self._run(_select(self.app, mission_id, detection_id, center))
-        if chosen is None:
+        async def select_and_attach():
+            # One loop turn reserves the Drone before another dispatch can select it,
+            # even while its last telemetry still says idle.
+            chosen, _ = select_drone(self.app, mission_id, detection_id, center)
+            if chosen is None:
+                return None
+            plan = FlightPlan(mission_id=mission_id, drone_id=chosen,
+                              waypoints=[Waypoint(lat=env.center_lat, lon=env.center_lon, alt=env.ceiling_m)],
+                              pattern="agent", est_duration_s=env.time_budget_s,
+                              est_battery_pct=min(100.0, env.time_budget_s / 12.0))
+            mission = Mission(mission_id=mission_id, drone_id=chosen, plan=plan, phase=MissionPhase.flying)
+            return self.app.state.missions.attach(mission)
+
+        self.mission = self._run(select_and_attach())
+        if self.mission is None:
             res.error = "no idle Drone available"
             return res
-        self.drone_id = res.drone_id = chosen
-        plan = FlightPlan(mission_id=mission_id, drone_id=self.drone_id, waypoints=[Waypoint(lat=env.center_lat, lon=env.center_lon, alt=env.ceiling_m)],
-                          pattern="agent", est_duration_s=env.time_budget_s, est_battery_pct=min(100.0, env.time_budget_s / 12.0))
-        self.mission = Mission(mission_id=mission_id, drone_id=self.drone_id, plan=plan, phase=MissionPhase.flying)
-        async def attach():
-            return self.app.state.missions.attach(self.mission)
-        self._run(attach())
+        self.drone_id = res.drone_id = self.mission.drone_id
         self.t0 = time.time()
         res.flown = True
         try:

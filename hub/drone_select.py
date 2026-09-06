@@ -21,6 +21,10 @@ def select_drone(app, mission_id: str, detection_id: str | None, target: tuple[f
         dist = round(distance_m(s.lat, s.lon, target[0], target[1])) if target else None
         if conn is None or conn.ws is None or s.status.value == "offline":
             eligible, reason = False, "offline"
+        elif app.state.missions.active_for(s.drone_id) is not None:
+            eligible, reason = False, "assigned to an active mission"
+        elif s.drone_id in app.state.manual.sessions:
+            eligible, reason = False, "operator manual control"
         elif s.status.value != "idle":
             eligible, reason = False, s.status.value.replace("_", " ")
         elif s.battery_pct < BATTERY_RESERVE_PCT + MARGIN_PCT:

@@ -2,6 +2,8 @@
 
 One idea, told twice: the same picture from above gets a different answer depending on what the Drone finds, and every decision the AI makes is checked by something that is not an AI.
 
+For simultaneous fleet response, use the [multi-drone preset](DEMO_MULTI_DRONE.md): two plume alerts, two autonomous inspections, separate fire/steam reports, and a third drone in reserve.
+
 ## Before you present (10 minutes)
 
 1. Top up the Anthropic API balance. Live mode fails over to the rule-based path when the account is empty, but the live agent is the demo.
