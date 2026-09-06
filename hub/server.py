@@ -530,7 +530,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         elif sc.kind == "transformer_fire":  # transformer bay 2 in the switchyard on fire: flames, dark smoke, scorched ground
             scene.props.append(SceneProp(id=f"{sc.id}-fire", kind="fire", x=float(p.get("x", 75)), y=float(p.get("y", 82)), yaw_deg=0.0))
         elif sc.kind == "steam_release":  # relief vent on the auxiliary building roof lifts: a white column that looks like smoke from above
-            scene.props.append(SceneProp(id=f"{sc.id}-steam", kind="steam", x=float(p.get("x", 60)), y=float(p.get("y", -40)), yaw_deg=0.0, z=float(p.get("z", 6.9))))
+            scene.props.append(SceneProp(id=f"{sc.id}-steam", kind="steam", x=float(p.get("x", 67)), y=float(p.get("y", -42)), yaw_deg=0.0, z=float(p.get("z", 6.9))))
         elif sc.kind == "authorized_activity":  # marked maintenance vehicle in the service yard during a declared window
             scene.props.append(SceneProp(id=f"{sc.id}-vehicle", kind="vehicle", x=float(p.get("x", -52)), y=float(p.get("y", -75)), yaw_deg=float(p.get("heading_deg", 0))))
         scene.scenario_ids.append(sc.id)
@@ -548,9 +548,13 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
     @app.post("/overhead/capture")
     async def capture_overhead(body: OverheadBody) -> dict[str, Any]:
         try:
-            ov = await reg().ask_renderer(CaptureOverhead(cmd_id=reg().new_cmd_id(), ref=body.ref))
+            ov = await reg().ask_renderer(CaptureOverhead(cmd_id=reg().new_cmd_id(), ref=body.ref), timeout=30.0)
         except LookupError as e:
             raise HTTPException(409, str(e)) from e
+        except TimeoutError as e:
+            # a Renderer that has just connected is still loading the Site; the next try usually works
+            app.state.audit.append("overhead_capture_timeout", ref=body.ref)
+            raise HTTPException(503, "the Renderer did not answer in time (still loading the Site?); try again") from e
         app.state.audit.append("overhead_captured", ref=body.ref)
         return ov.model_dump(mode="json", exclude={"png_b64"})
 
@@ -754,9 +758,11 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         if drone_id not in reg().drones:
             raise HTTPException(404, "unknown drone")
         try:
-            fr = await reg().ask_renderer(RenderFrame(cmd_id=reg().new_cmd_id(), drone_id=drone_id))
+            fr = await reg().ask_renderer(RenderFrame(cmd_id=reg().new_cmd_id(), drone_id=drone_id), timeout=30.0)
         except LookupError as e:
             raise HTTPException(409, str(e)) from e
+        except TimeoutError as e:
+            raise HTTPException(503, "the Renderer did not answer in time; try again") from e
         return fr.model_dump(mode="json", exclude={"jpeg_b64"})
 
     @app.get("/overheads")

@@ -626,7 +626,7 @@ export class SiteScene {
         g.add(f);
       }
       const glow = new THREE.PointLight(0xff8c2a, 40, 30, 1.6); glow.position.set(0, 2.2, 0); glow.name = "fireglow"; g.add(glow);
-      const smoke = new Plume(0, 0, 3.0, 2.2, this.quality === "high" ? 220 : 90, { color: 0x2a2a2c, heat: 1.0, vigour: 1.35, opacity: 0.62 });
+      const smoke = new Plume(0, 0, 3.0, 2.2, this.quality === "high" ? 220 : 90, { color: 0x2a2a2c, heat: 1.0, vigour: 1.35, opacity: 0.62, minPx: 9 });
       smoke.points.name = "smoke"; g.add(smoke.points); this.animated.push(smoke);
       g.userData.fire = true;
       o = g;
@@ -635,7 +635,7 @@ export class SiteScene {
       const g = new THREE.Group(); g.name = "steam";
       const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.6, 14), new THREE.MeshStandardMaterial({ color: 0x9aa4ad, metalness: 0.6, roughness: 0.5 }));
       pipe.position.y = 0.8; g.add(pipe);
-      const steam = new Plume(0, 0, 1.6, 1.4, this.quality === "high" ? 160 : 60, { color: 0xf4f8fb, heat: 0.35, vigour: 0.8, opacity: 0.6 });
+      const steam = new Plume(0, 0, 1.6, 1.4, this.quality === "high" ? 160 : 60, { color: 0xf4f8fb, heat: 0.35, vigour: 0.9, opacity: 0.75, minPx: 9 });
       steam.points.name = "steam"; g.add(steam.points); this.animated.push(steam);
       o = g;
     } else if (p.kind === "person") {

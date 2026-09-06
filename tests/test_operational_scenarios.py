@@ -58,7 +58,7 @@ async def test_transformer_fire_is_confirmed_by_thermal_and_escalated(hub: HubHa
 
 async def test_steam_release_reads_cool_and_is_logged(hub: HubHandle):
     await hub.add_fake_drone("drone-1", home=(35.0, -85.0))
-    out = await dispatch(hub, "steam_release", plume_detection("det-steam", 60, -40, "white column rising from the auxiliary building roof"))
+    out = await dispatch(hub, "steam_release", plume_detection("det-steam", 67, -42, "white column rising from the auxiliary building roof"))
     assert out["pretriage"]["action"] == "dispatch"  # nothing was declared, so the Drone goes and looks
     assert out["flown"] is True and out["result"]["status"] == "success", out.get("result")
     labels = {d["label"] for o in out["result"]["observations"] for d in o["detections"]}

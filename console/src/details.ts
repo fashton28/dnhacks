@@ -204,6 +204,7 @@ export interface PlumeOptions {
   /** apparent temperature in the thermal camera, 0 cold .. 1 saturated; steam 0.35, fire smoke 1.0 */ heat?: number;
   /** rise and drift multiplier: a fire column climbs faster than a vent */ vigour?: number;
   /** puff opacity */ opacity?: number;
+  /** smallest puff in pixels, so an overhead pass hundreds of metres up still sees the column */ minPx?: number;
 }
 
 export class Plume {
@@ -223,11 +224,11 @@ export class Plume {
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setAttribute("aAge", new THREE.BufferAttribute(this.ages, 1));
     const mat = new THREE.ShaderMaterial({
-      uniforms: { map: { value: puffTexture() }, size: { value: 900.0 }, color: { value: col }, opacity: { value: opacity } },
+      uniforms: { map: { value: puffTexture() }, size: { value: 900.0 }, color: { value: col }, opacity: { value: opacity }, minPx: { value: opts.minPx ?? 0.0 } },
       transparent: true, depthWrite: false,
-      vertexShader: `attribute float aAge; varying float vAge; uniform float size;
+      vertexShader: `attribute float aAge; varying float vAge; uniform float size; uniform float minPx;
         void main(){ vAge = aAge; vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
-          gl_PointSize = size * (0.35 + vAge * 1.4) / -mv.z; }`,
+          gl_PointSize = max(minPx, size * (0.35 + vAge * 1.4) / -mv.z); }`,  // minPx keeps a column visible from an overhead pass hundreds of metres up
       fragmentShader: `uniform sampler2D map; uniform vec3 color; uniform float opacity; varying float vAge;
         void main(){ vec4 t = texture2D(map, gl_PointCoord); float a = t.a * (1.0 - smoothstep(0.55, 1.0, vAge)) * smoothstep(0.0, 0.08, vAge) * opacity;
           gl_FragColor = vec4(color, a); }`,
