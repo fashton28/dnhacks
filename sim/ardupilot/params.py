@@ -22,10 +22,10 @@ def write_params(out: Path, sysid: int, fence_alt_max: float, fence_radius: floa
         "WPNAV_SPEED_UP 250",
         "WPNAV_SPEED_DN 150",
         "LAND_SPEED 50",
-        "BATT_CAPACITY 5000",      # mAh, Mavic-like endurance with SIM_BATT settings
+        "BATT_CAPACITY 15000",     # mAh: about 45 minutes of hover in the SITL battery model, so a demo does not run a Drone into its reserve
         "SIM_BATT_VOLTAGE 12.6",
-        "SIM_BATT_CAP_AH 5.0",
-        "BATT_LOW_MAH 1000",
+        "SIM_BATT_CAP_AH 15.0",
+        "BATT_LOW_MAH 3000",       # low battery failsafe at 20% remaining
         "BATT_FS_LOW_ACT 2",       # RTL on low battery
         "BATT_LOW_VOLT 0",         # capacity-based failsafe only, so the autopilot's failsafe matches the percent the Hub shows
         "BATT_CRT_VOLT 0",

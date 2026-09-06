@@ -2,7 +2,8 @@ import "./style.css";
 import "./manual.css";
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
-import { RcController } from "./rc";
+import { RcController, type Sticks } from "./rc";
+import { VirtualRc } from "./vrc";
 import { api, liveFeed, RendererLink, type DroneState, type SceneState } from "./hub";
 import { SiteScene, enuToThree } from "./scene";
 import { VisionModes } from "./vision";
@@ -371,7 +372,7 @@ async function manualStart(id: string): Promise<void> {
 async function manualEnd(action: "resume" | "abort" | "hover"): Promise<void> {
   if (!manualDrone) return;
   const id = manualDrone;
-  manual = false; manualDrone = null;
+  manual = false; manualDrone = null; manualPhase = "live";
   $("manual-banner").hidden = true;
   try { await api(`/drones/${id}/manual/end`, { action }); log(`${id}: handed back (${action})`, "good"); } catch (err) { log(String(err), "bad"); }
 }
@@ -427,29 +428,40 @@ const rcPill = $("rc-pill");
 rc.onConnect = (id) => { rcPill.textContent = `RC ${id.replace(/\(.*\)/, "").trim().slice(0, 28)}`; rcPill.className = "pill ok"; log(`RC controller connected: ${id}`, "good"); };
 rc.onDisconnect = (id) => { rcPill.textContent = "no RC · press a button"; rcPill.className = "pill"; log(`RC controller disconnected: ${id}`, "warn"); };
 const RC_SPEED = 6.0, RC_CLIMB = 2.5, RC_YAW_RATE = 90;  // full stick: metres per second, metres per second, degrees per second
+const KEY_STICK = 0.5;  // a held key is half stick: 3 m/s, 1.25 m/s climb, 45 deg/s
+// The on-screen transmitter under the Drone view: the same Sticks as a gamepad, driven by mouse or touch.
+const cycleCamera = () => { if (!selected) return; const modes = ["rgb", "thermal", "lidar"] as const; const cur = cameraSettings.get(selected)?.mode ?? "rgb"; setVision(modes[(modes.indexOf(cur) + 1) % 3]); };
+const vrc = new VirtualRc($("vrc"), {
+  take: () => { if (selected && !manual) manualStart(selected).catch((err) => log(String(err), "bad")); },
+  release: () => { if (manual) manualEnd("resume"); },
+  home: () => { if (selected) returnHome(selected); },
+  camera: cycleCamera,
+});
 let manualPhase = "live";
 let rcSeen: string | null = null;
 setInterval(() => {
-  const sticks = rc.poll();
-  if (sticks.id !== rcSeen) { rcSeen = sticks.id; if (sticks.id) rc.onConnect?.(sticks.id); else rc.onDisconnect?.("controller"); }  // poll-driven: some browsers never fire the connect event for an already-plugged pad
-  if (sticks.buttons.release && manual) { manualEnd("resume"); return; }
-  if (sticks.buttons.home && selected) { returnHome(selected); return; }
-  if (sticks.buttons.camera && selected) { const modes = ["rgb", "thermal", "lidar"] as const; const cur = cameraSettings.get(selected)?.mode ?? "rgb"; setVision(modes[(modes.indexOf(cur) + 1) % 3]); }
-  if ((sticks.buttons.take || (sticks.active && sticks.id)) && !manual && selected) manualStart(selected).catch((err) => log(String(err), "bad"));
+  const pad = rc.poll();
+  if (pad.id !== rcSeen) { rcSeen = pad.id; if (pad.id) rc.onConnect?.(pad.id); else rc.onDisconnect?.("controller"); }  // poll-driven: some browsers never fire the connect event for an already-plugged pad
+  const virt = vrc.poll();
+  if (pad.buttons.release && manual) { manualEnd("resume"); return; }
+  if (pad.buttons.home && selected) { returnHome(selected); return; }
+  if (pad.buttons.camera) cycleCamera();
+  // Keyboard, like a real drone: W/S along the nose, A/D turn the nose, arrows slide sideways, Q/E climb and descend.
+  const kb: Sticks = {
+    pitch: ((keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0)) * KEY_STICK, roll: ((keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0)) * KEY_STICK,
+    throttle: ((keys.has("e") ? 1 : 0) - (keys.has("q") ? 1 : 0)) * KEY_STICK, yaw: ((keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0)) * KEY_STICK,
+    active: false, id: "keyboard", buttons: { take: false, release: false, home: false, camera: false },
+  };
+  kb.active = Math.abs(kb.pitch) + Math.abs(kb.roll) + Math.abs(kb.throttle) + Math.abs(kb.yaw) > 0;
+  // Priority: a physical controller, then the on-screen sticks, then the keyboard. Any deflection takes control.
+  const sticks = pad.id && pad.active ? pad : virt.active ? virt : kb;
+  if (sticks.id !== "virtual") vrc.reflect(sticks);
+  if ((pad.buttons.take || sticks.active) && !manual && selected) manualStart(selected).catch((err) => log(String(err), "bad"));
+  vrc.setPhase(manualPhase, manual);
   if (!manual || !manualDrone) return;
   const s = drones.get(manualDrone); if (!s) return;
-  // Keyboard, like a real drone: W/S fly forward and back along the nose, A/D turn the nose, the arrows slide sideways,
-  // Q/E climb and descend. An RC controller's sticks take over whenever they are deflected. Velocities are recomputed from
-  // the current heading every tick, so forward plus yaw flies a curve and the airframe banks into it.
-  const kFwd = (keys.has("w") ? 1 : 0) - (keys.has("s") ? 1 : 0);
-  const kRight = (keys.has("arrowright") ? 1 : 0) - (keys.has("arrowleft") ? 1 : 0);
-  const kUp = (keys.has("e") ? 1 : 0) - (keys.has("q") ? 1 : 0);
-  const kYaw = (keys.has("d") ? 1 : 0) - (keys.has("a") ? 1 : 0);
-  const useRc = sticks.id !== null && sticks.active;
-  const fwd = useRc ? sticks.pitch * RC_SPEED : kFwd * 3.0;
-  const right = useRc ? sticks.roll * RC_SPEED : kRight * 3.0;
-  const up = useRc ? sticks.throttle * RC_CLIMB : kUp * 1.5;
-  const yawRate = useRc ? sticks.yaw * RC_YAW_RATE : kYaw * 60;
+  // Velocities are recomputed from the current heading every tick, so forward plus yaw flies a curve and the airframe banks into it.
+  const fwd = sticks.pitch * RC_SPEED, right = sticks.roll * RC_SPEED, up = sticks.throttle * RC_CLIMB, yawRate = sticks.yaw * RC_YAW_RATE;
   const h = s.heading_deg * Math.PI / 180;
   const vn = fwd * Math.cos(h) - right * Math.sin(h);
   const ve = fwd * Math.sin(h) + right * Math.cos(h);
@@ -457,7 +469,7 @@ setInterval(() => {
     .then((r) => {
       if (r.clamped) showClamp(r.clamped.rule);
       const phase = String(r.phase ?? "live");
-      if (phase !== manualPhase) { manualPhase = phase; if (phase !== "live") log(`Manual Control: ${phase}, sticks go live once airborne`, "warn"); else log("Manual Control: sticks live", "good"); }
+      if (phase !== manualPhase) { manualPhase = phase; vrc.setPhase(phase, manual); if (phase !== "live") log(`Manual Control: ${phase}, sticks go live once airborne`, "warn"); else log("Manual Control: sticks live", "good"); }
       const chip = $("drone-view-status"); if (manual && phase !== "live") { chip.textContent = phase; chip.className = "chip status-chip taking-off"; }
     })
     .catch((err) => log(String(err), "bad"));
