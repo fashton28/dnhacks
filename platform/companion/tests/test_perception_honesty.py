@@ -35,7 +35,7 @@ from eis_companion.vision.staging import (
 
 ROOT = Path(__file__).resolve().parents[2]
 STUB_SITE = "site/site.stub.json"
-FAR_LAT, FAR_LON = -26.09065, 29.46925
+FAR_LAT, FAR_LON = 41.198383, -98.4
 
 
 def site_raw() -> dict:
@@ -204,13 +204,13 @@ def test_the_perception_loop_cannot_overwrite_the_fixture_verdict():
 def test_connect_messages_name_the_unhealthy_fixture():
     c = make_companion()
     c._camera_fixture_valid = False
-    c._sensor_fixture_gaps = {"rgb": ("komati-west-service-road",), "thermal": ()}
+    c._sensor_fixture_gaps = {"rgb": ("meridian-south-service-road",), "thermal": ()}
     messages = c._connect_messages()
     camera = [
         m for m in messages
         if m.get("component") == "camera" and m.get("state") == "unavailable"
     ]
-    assert camera and "komati-west-service-road" in camera[0]["detail"]
+    assert camera and "meridian-south-service-road" in camera[0]["detail"]
 
 
 def test_every_site_fixture_referenced_by_the_stub_actually_exists():

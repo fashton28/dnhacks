@@ -71,15 +71,18 @@ targets ArduCopter SITL in a Docker container exposing TCP MAVLink
 (`tcp:127.0.0.1:5760`); scripts keep a native/WSL2 path for boxes that have
 a Linux userland.
 
-## D9 — Komati replaces the CMAC stub geometry
+## D9 — Meridian Station replaces the CMAC stub geometry
 
 This decision supersedes D1's temporary Canberra geometry. The demo site is
-Komati Power Station, Mpumalanga: home `-26.0900, 29.4719`, terrain elevation
-`1600 m` AMSL. `site/site.stub.json` now carries a plausible perimeter, a
-separate inset geofence, a 25 m NFZ buffer, chimney and switchyard NFZs, two
+Meridian Station (fictional), the one site the whole team consolidated on: home
+`41.1992364, -98.3995821`, terrain elevation `550 m` AMSL. `site/site.stub.json`
+now carries the site footprint as its perimeter, the ARGUS operational geofence
+inset inside it, a 25 m NFZ buffer, reactor-exclusion and switchyard NFZs, two
 staging points, clutter polygons, and a 45 m AGL LiDAR-degraded clear altitude.
-The geometry is a deterministic integration stub, not a survey. The site owner
-still supplies `site/site.json`; D2's environment-variable cutover is unchanged.
+The stub is GENERATED from the ARGUS site sources by
+[`site/gen_platform_site.py`](../site/gen_platform_site.py); it is a
+deterministic integration stub, not a survey. The site owner still supplies
+`site/site.json`; D2's environment-variable cutover is unchanged.
 
 The checked-in stage PNGs are generated scripted placeholders. Both `image` and
 `thermal_image` may point to the same placeholder only when
@@ -126,10 +129,10 @@ The RF-drone rail is a stub adapter in this run. Its fixture/event shape is:
   "kind": "hostile_drone",
   "band": "2.4GHz",
   "power_delta_db": 18.0,
-  "lat": -26.09,
-  "lon": 29.47,
-  "pilot_lat": -26.091,
-  "pilot_lon": 29.469,
+  "lat": 41.1994161,
+  "lon": -98.3993195,
+  "pilot_lat": 41.1996407,
+  "pilot_lon": -98.402746,
   "confidence": 0.9
 }
 ```

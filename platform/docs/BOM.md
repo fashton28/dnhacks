@@ -50,7 +50,7 @@ most jurisdictions.
 
 ## Tier 2 — Deployment concept (per-unit, rough)
 
-Goal: what a real Komati-class site unit would carry. Not a purchase list yet —
+Goal: what a real Meridian-class site unit would carry. Not a purchase list yet —
 ranges for the pitch's "hardware path" slide.
 
 | Item | Class | Est. USD | Notes |

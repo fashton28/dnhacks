@@ -18,7 +18,7 @@ const plan = (alt: number, requestId = REQUEST_ID): MissionPlan => ({
   profile: 'inspect',
   rationale: `deterministic inspect at ${alt} m`,
   tools: [
-    { tool: 'goto_gps', lat: -26.0906, lon: 29.4692, alt, profile: 'inspect' },
+    { tool: 'goto_gps', lat: 41.1992364, lon: -98.3995821, alt, profile: 'inspect' },
     { tool: 'rtl' },
   ],
 });

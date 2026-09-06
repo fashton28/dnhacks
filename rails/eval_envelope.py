@@ -45,9 +45,9 @@ from rails.envelope import (
     SiteGeometry,
 )
 
-#: Site anchor — Komati Power Station, the same home the fixtures use.
-HOME_LAT = -26.0900
-HOME_LON = 29.4719
+#: Site anchor — Meridian Station, the same home the fixtures use.
+HOME_LAT = 41.1992364
+HOME_LON = -98.3995821
 
 #: Sampling: 20 Hz for 8 s, the rate the orchestrator actually runs the monitor.
 SAMPLE_HZ = 20

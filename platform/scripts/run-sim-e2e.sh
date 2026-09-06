@@ -1,187 +1,363 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Drone Safety Platform -- Acceptance Demo: full SITL end-to-end test
+# Drone Safety Platform -- acceptance gate (SITL + companion + sim clients)
 # ----------------------------------------------------------------------------
-# Starts SITL + companion (mock target), waits for readiness, runs both
-# automated test scripts, then tears everything down.
+# Brings the whole vehicle-side stack up on this machine, waits until the
+# control WebSocket actually answers, then drives it with the two sim clients
+# that speak nothing but the wire contract:
 #
-# Exit codes:
-#   0  all tests passed
-#   1  one or more tests failed
-#   2  setup failure (SITL / companion did not start)
+#   sim/e2e_test.py     arm -> takeoff -> track -> hold at standoff -> land
+#   sim/manual_test.py  take/release manual control, watchdog, e-stop
 #
-# Usage:
-#   bash scripts/run-sim-e2e.sh
-#   # or via make:
+# Everything it starts, it stops -- including on Ctrl-C and on failure.
+#
+# EXIT CODES (the contract; `make e2e` and CI both read them)
+#   0  every test passed
+#   1  at least one test failed
+#   2  setup failure -- SITL or the companion never came up
+#
+# USAGE
+#   bash scripts/run-sim-e2e.sh                # the gate
+#   bash scripts/run-sim-e2e.sh --preflight    # check the box, start nothing
+#   bash scripts/run-sim-e2e.sh --skip-manual
+#   bash scripts/run-sim-e2e.sh --ws-url ws://127.0.0.1:8765 --timeout 90
 #   make e2e
 #
-# Environment variables honoured:
-#   EIS_E2E_WS_URL    WebSocket URL for the companion  [ws://127.0.0.1:8765]
-#   EIS_E2E_TIMEOUT   Seconds to wait for companion ready  [60]
-#   EIS_CONFIG        Companion config file  [companion/config/sitl.yaml]
-#   EIS_SKIP_MANUAL   Set to 1 to skip manual_test.py  [unset]
-#   ARDUPILOT_HOME    Path to ArduPilot checkout  [~/ardupilot]
+# ENVIRONMENT (flags above override these)
+#   EIS_E2E_WS_URL    companion control WebSocket  [ws://127.0.0.1:8765]
+#   EIS_E2E_TIMEOUT   seconds to wait for it       [60]
+#   EIS_CONFIG        companion config file        [companion/config/sitl.yaml]
+#   EIS_SKIP_MANUAL   "1" skips manual_test.py     [unset]
+#   ARDUPILOT_HOME    ArduPilot checkout, consumed by sim/run_sitl.sh
+#
+# The resolved WebSocket URL is exported as EIS_WS_URL for the sim clients --
+# that is the variable they read -- and also passed as --ws-url, which is the
+# flag their CLI pins.
 # ============================================================================
 set -uo pipefail
 IFS=$'\n\t'
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$HERE/.." && pwd)"
+readonly EXIT_PASS=0
+readonly EXIT_TEST_FAILED=1
+readonly EXIT_SETUP_FAILED=2
+
+readonly SITL_SETTLE_SECONDS=8   # MAVLink needs this long before it answers
+readonly POLL_INTERVAL_SECONDS=2
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+VENV_PYTHON="$REPO_ROOT/companion/.venv/bin/python"
+SITL_LAUNCHER="$REPO_ROOT/sim/run_sitl.sh"
 
 WS_URL="${EIS_E2E_WS_URL:-ws://127.0.0.1:8765}"
-COMPANION_READY_TIMEOUT="${EIS_E2E_TIMEOUT:-60}"
-EIS_CONFIG="${EIS_CONFIG:-$REPO_ROOT/companion/config/sitl.yaml}"
-VENV_PYTHON="$REPO_ROOT/companion/.venv/bin/python"
+READY_TIMEOUT="${EIS_E2E_TIMEOUT:-60}"
+COMPANION_CONFIG="${EIS_CONFIG:-$REPO_ROOT/companion/config/sitl.yaml}"
+SKIP_MANUAL="${EIS_SKIP_MANUAL:-0}"
+PREFLIGHT_ONLY=0
 
-step()  { echo; echo "==> $*"; }
-ok()    { echo "    [OK] $*"; }
-fail()  { echo "    [FAIL] $*" >&2; }
-info()  { echo "    $*"; }
-
-SITL_PID=""
-COMPANION_PID=""
+# Parallel arrays: one entry per supervised background child.
+CHILD_PIDS=()
+CHILD_LABELS=()
+# Test ledger, "<name> <PASS|FAIL|SKIP>" per entry.
+RESULTS=()
+WORK_DIR=""
+PROBE_KIND="websockets"
 
 # ---------------------------------------------------------------------------
-# Cleanup trap
+# Output helpers
 # ---------------------------------------------------------------------------
-cleanup() {
+step() { echo; echo "==> $*"; }
+ok()   { echo "    [OK] $*"; }
+fail() { echo "    [FAIL] $*" >&2; }
+info() { echo "    $*"; }
+rule() { echo "============================================================"; }
+
+die_setup() {
+    fail "$*"
+    exit "$EXIT_SETUP_FAILED"
+}
+
+usage() {
+    cat <<EOF
+Drone Safety Platform -- acceptance gate
+
+  bash scripts/run-sim-e2e.sh [options]
+
+    --preflight        verify this box can run the gate, then stop
+    --skip-manual      run e2e_test.py only
+    --ws-url URL       companion control WebSocket  (env EIS_E2E_WS_URL)
+    --timeout SECONDS  readiness budget             (env EIS_E2E_TIMEOUT)
+    --config PATH      companion config file        (env EIS_CONFIG)
+    -h, --help         this text
+
+Exit codes: $EXIT_PASS pass / $EXIT_TEST_FAILED test failed / $EXIT_SETUP_FAILED setup failed
+EOF
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --preflight)   PREFLIGHT_ONLY=1 ;;
+            --skip-manual) SKIP_MANUAL=1 ;;
+            --ws-url)      WS_URL="${2:-}"; shift ;;
+            --timeout)     READY_TIMEOUT="${2:-}"; shift ;;
+            --config)      COMPANION_CONFIG="${2:-}"; shift ;;
+            -h|--help)     usage; exit "$EXIT_PASS" ;;
+            *)             usage >&2; die_setup "unknown option: $1" ;;
+        esac
+        shift
+    done
+}
+
+# ---------------------------------------------------------------------------
+# Supervised children: spawn records them, teardown stops them in reverse.
+# ---------------------------------------------------------------------------
+spawn() {
+    local label="$1"; shift
+    "$@" &
+    local pid=$!
+    CHILD_PIDS+=("$pid")
+    CHILD_LABELS+=("$label")
+    ok "$label started (PID $pid)"
+}
+
+child_alive() {
+    kill -0 "$1" 2>/dev/null
+}
+
+teardown() {
     local rc=$?
+    local i pid label
+
     echo
     step "Tearing down..."
-    if [[ -n "$COMPANION_PID" ]] && kill -0 "$COMPANION_PID" 2>/dev/null; then
-        info "Stopping companion (PID $COMPANION_PID)"
-        kill "$COMPANION_PID" 2>/dev/null || true
-        wait "$COMPANION_PID" 2>/dev/null || true
-    fi
-    if [[ -n "$SITL_PID" ]] && kill -0 "$SITL_PID" 2>/dev/null; then
-        info "Stopping SITL (PID $SITL_PID)"
-        kill "$SITL_PID" 2>/dev/null || true
-        wait "$SITL_PID" 2>/dev/null || true
-    fi
-    if [[ $rc -eq 0 ]]; then
-        echo
-        echo "============================================================"
+    for (( i = ${#CHILD_PIDS[@]} - 1; i >= 0; i-- )); do
+        pid="${CHILD_PIDS[$i]}"
+        label="${CHILD_LABELS[$i]}"
+        if child_alive "$pid"; then
+            info "Stopping $label (PID $pid)"
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+        fi
+    done
+    [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]] && rm -rf "$WORK_DIR"
+
+    print_ledger
+    echo
+    rule
+    if [[ $rc -eq $EXIT_PASS ]]; then
         echo " ALL E2E TESTS PASSED"
-        echo "============================================================"
     else
-        echo
-        echo "============================================================"
         echo " E2E TESTS FAILED (exit $rc)"
-        echo "============================================================"
     fi
-    exit $rc
+    rule
+    exit "$rc"
 }
-trap cleanup EXIT
+
+print_ledger() {
+    local entry
+    [[ ${#RESULTS[@]} -eq 0 ]] && return 0
+    echo
+    step "Results"
+    for entry in "${RESULTS[@]}"; do
+        info "$entry"
+    done
+}
 
 # ---------------------------------------------------------------------------
-# 1. Python environment
+# Preflight: everything that can be checked without starting a process.
 # ---------------------------------------------------------------------------
-step "Checking Python environment"
+check_environment() {
+    step "Preflight"
 
-if [[ ! -x "$VENV_PYTHON" ]]; then
-    echo "ERROR: venv not found at $REPO_ROOT/companion/.venv" >&2
-    echo "  Run:  bash scripts/setup-sim.sh" >&2
-    exit 2
-fi
-ok "$VENV_PYTHON"
+    [[ -x "$VENV_PYTHON" ]] || die_setup \
+        "venv not found at $REPO_ROOT/companion/.venv -- run: bash scripts/setup-sim.sh"
+    ok "python: $VENV_PYTHON"
 
-# ---------------------------------------------------------------------------
-# 2. Start SITL
-# ---------------------------------------------------------------------------
-step "Starting ArduCopter SITL (background)"
-info "SITL script: $REPO_ROOT/sim/run_sitl.sh"
+    [[ -f "$COMPANION_CONFIG" ]] || die_setup \
+        "companion config not found: $COMPANION_CONFIG (expected companion/config/sitl.yaml)"
+    ok "config: $COMPANION_CONFIG"
 
-bash "$REPO_ROOT/sim/run_sitl.sh" &
-SITL_PID=$!
-ok "SITL PID $SITL_PID"
-info "Waiting 8 s for SITL to initialise MAVLink..."
-sleep 8
+    [[ -f "$SITL_LAUNCHER" ]] || die_setup "SITL launcher missing: $SITL_LAUNCHER"
+    ok "SITL launcher: $SITL_LAUNCHER"
 
-if ! kill -0 "$SITL_PID" 2>/dev/null; then
-    echo "ERROR: SITL exited prematurely. Check sim/run_sitl.sh output." >&2
-    exit 2
-fi
-ok "SITL running"
+    local client
+    for client in e2e_test.py manual_test.py; do
+        [[ -f "$REPO_ROOT/sim/$client" ]] || die_setup "sim client missing: sim/$client"
+        ok "sim client: sim/$client"
+    done
 
-# ---------------------------------------------------------------------------
-# 3. Start companion (SITL config, mock target source)
-# ---------------------------------------------------------------------------
-step "Starting companion (SITL mode, mock camera)"
+    if "$VENV_PYTHON" -c "import websockets" >/dev/null 2>&1; then
+        ok "websockets importable -- readiness probe opens a real WebSocket"
+    else
+        PROBE_KIND="tcp"
+        info "[WARN] websockets not importable; readiness falls back to a TCP probe"
+    fi
 
-if [[ ! -f "$EIS_CONFIG" ]]; then
-    echo "ERROR: companion config not found: $EIS_CONFIG" >&2
-    echo "  Expected: companion/config/sitl.yaml" >&2
-    exit 2
-fi
-
-(
-    cd "$REPO_ROOT"
-    EIS_CONFIG="$EIS_CONFIG" \
-    EIS_CAMERA_SOURCE=mock \
-        "$VENV_PYTHON" -m eis_companion
-) &
-COMPANION_PID=$!
-ok "Companion PID $COMPANION_PID"
+    ok "target: $WS_URL (ready budget ${READY_TIMEOUT}s)"
+}
 
 # ---------------------------------------------------------------------------
-# 4. Wait for companion WebSocket to become ready
+# Readiness probes. Both are written once into WORK_DIR and re-run each poll.
 # ---------------------------------------------------------------------------
-step "Waiting for companion WebSocket to be ready ($WS_URL, up to ${COMPANION_READY_TIMEOUT}s)"
+write_probes() {
+    WORK_DIR="$(mktemp -d)"
 
-WAITED=0
-READY=0
-while [[ $WAITED -lt $COMPANION_READY_TIMEOUT ]]; do
-    # Python one-liner: try connecting and immediately closing
-    if "$VENV_PYTHON" -c "
-import asyncio, sys
+    cat >"$WORK_DIR/probe_ws.py" <<'PY'
+import asyncio
+import sys
+
+import websockets
+
+
+async def _touch(url: str) -> None:
+    async with websockets.connect(url, open_timeout=2):
+        pass
+
+
 try:
-    import websockets
-    async def _check():
-        async with websockets.connect('$WS_URL', open_timeout=2) as ws:
-            pass
-    asyncio.run(_check())
-    sys.exit(0)
+    asyncio.run(_touch(sys.argv[1]))
 except Exception:
     sys.exit(1)
-" 2>/dev/null; then
-        READY=1
-        break
+sys.exit(0)
+PY
+
+    cat >"$WORK_DIR/probe_tcp.py" <<'PY'
+import socket
+import sys
+from urllib.parse import urlsplit
+
+parts = urlsplit(sys.argv[1])
+host = parts.hostname or "127.0.0.1"
+port = parts.port or 8765
+try:
+    with socket.create_connection((host, port), timeout=2):
+        pass
+except OSError:
+    sys.exit(1)
+sys.exit(0)
+PY
+}
+
+companion_answers() {
+    local probe="$WORK_DIR/probe_ws.py"
+    [[ "$PROBE_KIND" == "tcp" ]] && probe="$WORK_DIR/probe_tcp.py"
+    "$VENV_PYTHON" "$probe" "$WS_URL" >/dev/null 2>&1
+}
+
+# ---------------------------------------------------------------------------
+# Stage 1: SITL
+# ---------------------------------------------------------------------------
+start_sitl() {
+    step "Starting ArduCopter SITL (background)"
+    info "SITL script: $SITL_LAUNCHER"
+    spawn "SITL" bash "$SITL_LAUNCHER"
+
+    info "Waiting ${SITL_SETTLE_SECONDS} s for SITL to initialise MAVLink..."
+    sleep "$SITL_SETTLE_SECONDS"
+
+    child_alive "${CHILD_PIDS[0]}" || die_setup \
+        "SITL exited prematurely. Check sim/run_sitl.sh output."
+    ok "SITL running"
+}
+
+# ---------------------------------------------------------------------------
+# Stage 2: companion (SITL config, mock camera so no hardware is touched)
+# ---------------------------------------------------------------------------
+companion_process() {
+    # `cd` here rather than with `env -C`: BSD/macOS env has no -C.
+    cd "$REPO_ROOT" || return "$EXIT_SETUP_FAILED"
+    EIS_CONFIG="$COMPANION_CONFIG" \
+    EIS_CAMERA_SOURCE=mock \
+        exec "$VENV_PYTHON" -m eis_companion.app
+}
+
+start_companion() {
+    step "Starting companion (SITL mode, mock camera)"
+    info "EIS_CONFIG=$COMPANION_CONFIG EIS_CAMERA_SOURCE=mock"
+    spawn "companion" companion_process
+}
+
+wait_for_companion() {
+    local companion_pid="${CHILD_PIDS[$(( ${#CHILD_PIDS[@]} - 1 ))]}"
+    local waited=0
+
+    step "Waiting for companion WebSocket ($WS_URL, up to ${READY_TIMEOUT}s, $PROBE_KIND probe)"
+
+    while (( waited < READY_TIMEOUT )); do
+        if companion_answers; then
+            ok "Companion WebSocket ready after ${waited}s"
+            return 0
+        fi
+        child_alive "$companion_pid" || die_setup \
+            "Companion exited before becoming ready."
+        sleep "$POLL_INTERVAL_SECONDS"
+        waited=$(( waited + POLL_INTERVAL_SECONDS ))
+        info "  ...${waited}s"
+    done
+
+    die_setup "Companion WebSocket not ready after ${READY_TIMEOUT}s."
+}
+
+# ---------------------------------------------------------------------------
+# Stage 3: the sim clients. Their CLI is the contract: --ws-url, plus
+# EIS_WS_URL in the environment.
+# ---------------------------------------------------------------------------
+run_sim_client() {
+    local name="$1"
+    local rc=0
+
+    step "Running sim/$name"
+    EIS_WS_URL="$WS_URL" "$VENV_PYTHON" "$REPO_ROOT/sim/$name" --ws-url "$WS_URL" || rc=$?
+
+    if (( rc == 0 )); then
+        ok "$name PASSED"
+        RESULTS+=("$name PASS")
+    else
+        fail "$name FAILED (exit $rc)"
+        RESULTS+=("$name FAIL (exit $rc)")
+    fi
+    return "$rc"
+}
+
+run_acceptance() {
+    local worst=0
+
+    run_sim_client e2e_test.py || worst="$EXIT_TEST_FAILED"
+
+    if [[ "$SKIP_MANUAL" == "1" ]]; then
+        info "manual_test.py skipped (EIS_SKIP_MANUAL=1 / --skip-manual)"
+        RESULTS+=("manual_test.py SKIP")
+    else
+        run_sim_client manual_test.py || worst="$EXIT_TEST_FAILED"
     fi
 
-    if ! kill -0 "$COMPANION_PID" 2>/dev/null; then
-        echo "ERROR: Companion exited before becoming ready." >&2
-        exit 2
+    return "$worst"
+}
+
+# ---------------------------------------------------------------------------
+main() {
+    parse_args "$@"
+    check_environment
+
+    if (( PREFLIGHT_ONLY == 1 )); then
+        echo
+        rule
+        echo " PREFLIGHT OK -- nothing was started"
+        rule
+        exit "$EXIT_PASS"
     fi
-    sleep 2
-    WAITED=$((WAITED + 2))
-    info "  ...${WAITED}s"
-done
 
-if [[ $READY -eq 0 ]]; then
-    echo "ERROR: Companion WebSocket not ready after ${COMPANION_READY_TIMEOUT}s." >&2
-    exit 2
-fi
-ok "Companion WebSocket ready"
+    trap teardown EXIT
+    write_probes
+    start_sitl
+    start_companion
+    wait_for_companion
 
-# ---------------------------------------------------------------------------
-# 5. Run e2e_test.py (primary acceptance gate)
-# ---------------------------------------------------------------------------
-step "Running sim/e2e_test.py"
+    local rc=0
+    run_acceptance || rc=$?
+    exit "$rc"
+}
 
-"$VENV_PYTHON" "$REPO_ROOT/sim/e2e_test.py" \
-    --ws-url "$WS_URL"
-ok "e2e_test.py PASSED"
-
-# ---------------------------------------------------------------------------
-# 6. Run manual_test.py (manual-piloting acceptance gate)
-# ---------------------------------------------------------------------------
-if [[ "${EIS_SKIP_MANUAL:-0}" == "1" ]]; then
-    info "EIS_SKIP_MANUAL=1: skipping manual_test.py"
-else
-    step "Running sim/manual_test.py"
-    "$VENV_PYTHON" "$REPO_ROOT/sim/manual_test.py" \
-        --ws-url "$WS_URL"
-    ok "manual_test.py PASSED"
-fi
-
-# cleanup trap handles teardown and exit
+main "$@"

@@ -128,7 +128,7 @@ We would rather say this ourselves than have a judge find it.
 | Layer | Status |
 |---|---|
 | Overhead imagery | **Synthetic.** Generated tiles and a clearly labelled synthetic SAR fallback. No real Sentinel-2 pair is used. |
-| Site model | **Deterministic stub.** Komati Power Station geometry — plausible perimeter, geofence, NFZ buffer, clutter, staging points. An integration stub, not a survey. The real model drops in through one env var (`EIS_SITE_FILE`). |
+| Site model | **Deterministic stub.** Meridian Station geometry, generated from the ARGUS site sources — site-footprint perimeter, inset geofence, NFZ buffer, clutter, staging points. An integration stub, not a survey. The real model drops in through one env var (`EIS_SITE_FILE`). |
 | Staged RGB / thermal frames | **Generated placeholder PNGs**, declared as `image_kind=scripted_placeholder`. Never described in code, docs, or UI as real captures. |
 | SDR / RF feed | **Receive-only by construction** — no transmit API exists anywhere in the path. Default source is scripted; live mode needs real hardware. |
 | LLM planning | **Scripted by default.** The default demo path makes no network request. Live LLM is an explicit opt-in flag. |

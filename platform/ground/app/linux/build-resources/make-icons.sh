@@ -1,31 +1,46 @@
 #!/bin/sh
-# Drone Safety Platform — generate the Linux app icon from the brand SVG (LINUX_PRD §3).
-# Produces a 512×512 icon.png in this directory (electron-builder derives the
-# smaller sizes). Run on the build host before `npm run package:linux`.
+# Drone Safety Platform — rasterise the Linux app icon from the brand SVG (LINUX_PRD §3).
 #
-#   ./build-resources/make-icons.sh
+# Source : platform/assets/logo-mark.svg (resolved relative to this script, so
+#          it works from any working directory)
+# Output : icon.png next to this script, 512×512 by default; electron-builder
+#          derives the smaller freedesktop sizes from it.
 #
-# Requires librsvg (rsvg-convert) or Inkscape. The committed icon.png is a
-# placeholder so the build works out of the box — regenerate it from the real
-# logo before shipping.
-set -e
+#   ./build-resources/make-icons.sh            # → build-resources/icon.png
+#   ./build-resources/make-icons.sh out.png    # explicit output path
+#   ICON_SIZE=1024 ./build-resources/make-icons.sh
+#
+# Needs one rasteriser on PATH: rsvg-convert (librsvg) or inkscape. The
+# committed icon.png is a placeholder so packaging works out of the box —
+# regenerate it from the real logo before shipping.
+set -eu
 
-cd "$(dirname "$0")"
-SVG="../../../../assets/logo-mark.svg"   # repo-root assets/logo-mark.svg
-OUT="icon.png"
+here=$(cd "$(dirname "$0")" && pwd)
+SVG="$here/../../../../assets/logo-mark.svg"   # platform/assets/logo-mark.svg
+SIZE="${ICON_SIZE:-512}"
+OUT="${1:-$here/icon.png}"
 
-if [ ! -f "$SVG" ]; then
-  echo "Brand SVG not found at $SVG" >&2
-  exit 1
-fi
+die() { echo "make-icons: $*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
 
-if command -v rsvg-convert >/dev/null 2>&1; then
-  rsvg-convert -w 512 -h 512 "$SVG" -o "$OUT"
-elif command -v inkscape >/dev/null 2>&1; then
-  inkscape "$SVG" --export-type=png --export-width=512 --export-height=512 -o "$OUT"
+case "$SIZE" in
+  ''|*[!0-9]*) die "ICON_SIZE must be a positive integer, got '$SIZE'" ;;
+esac
+[ -f "$SVG" ] || die "brand SVG not found at $SVG"
+
+# Pick the first available backend; each writes $OUT at $SIZE×$SIZE.
+if have rsvg-convert; then
+  backend=rsvg-convert
+  rasterise() { rsvg-convert -w "$SIZE" -h "$SIZE" "$SVG" -o "$OUT"; }
+elif have inkscape; then
+  backend=inkscape
+  rasterise() {
+    inkscape "$SVG" --export-type=png --export-width="$SIZE" --export-height="$SIZE" -o "$OUT"
+  }
 else
-  echo "Need rsvg-convert (librsvg) or inkscape to rasterize $SVG -> $OUT" >&2
-  exit 1
+  die "need rsvg-convert (librsvg) or inkscape on PATH to rasterise $SVG -> $OUT"
 fi
 
-echo "Wrote $OUT (512x512)"
+rasterise
+[ -s "$OUT" ] || die "$backend produced no output at $OUT"
+echo "Wrote $OUT (${SIZE}x${SIZE}) via $backend from $SVG"

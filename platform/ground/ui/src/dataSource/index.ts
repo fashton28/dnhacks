@@ -10,17 +10,27 @@ export type { FleetEntry } from './HubDataProvider';
 export { isHubMode, consoleUrl, hubHttpBase } from './hubConfig';
 export { LATERAL_TOL_M, ORBIT_RADIAL_TOL_M, UNATTENDED_ENVELOPE } from './scriptedRails';
 
+type SourceKind = MissionDataSource['kind'];
+
 /** Mock remains the zero-configuration offline default. ARGUS Hub when `?hub=`,
  * VITE_DATASOURCE=hub, or served under /gcs/. Release/demo builds select the
  * companion WebSocket provider with VITE_EIS_DATA_SOURCE=live without editing source. */
-function createDataSource(): MissionDataSource {
-  if (isHubMode()) return new HubDataProvider();
-  if (import.meta.env.VITE_EIS_DATA_SOURCE === 'live') return new LiveDataProvider();
-  const mock = new MockDataProvider();
-  if (import.meta.env.VITE_EIS_DEMO_NIGHT === 'true') {
-    mock.setSimulationToggles({ simulateNight: true });
-  }
-  return mock;
+function selectSourceKind(): SourceKind {
+  if (isHubMode()) return 'hub';
+  return import.meta.env.VITE_EIS_DATA_SOURCE === 'live' ? 'live' : 'mock';
 }
 
-export const dataSource: MissionDataSource = createDataSource();
+/** One constructor per provider kind; the mock also honours the night-demo flag. */
+const PROVIDERS: Record<SourceKind, () => MissionDataSource> = {
+  hub: () => new HubDataProvider(),
+  live: () => new LiveDataProvider(),
+  mock: () => {
+    const mock = new MockDataProvider();
+    if (import.meta.env.VITE_EIS_DEMO_NIGHT === 'true') {
+      mock.setSimulationToggles({ simulateNight: true });
+    }
+    return mock;
+  },
+};
+
+export const dataSource: MissionDataSource = PROVIDERS[selectSourceKind()]();

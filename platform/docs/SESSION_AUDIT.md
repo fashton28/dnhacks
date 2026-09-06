@@ -1,4 +1,4 @@
-# Session audit — Komati safety rails
+# Session audit — Meridian Station safety rails
 
 Runtime paths in this audit are relative to [`platform/`](..), this file's
 parent directory.
@@ -14,23 +14,23 @@ handoff reference directories were outside scope.
 |---|---|---|
 | `companion/control/planner_exec.py` | Present | `companion/src/eis_companion/control/planner_exec.py` exists with plan validation/clamping and guidance mapping; baseline came from Phase 2 commit `4ced313`. Preserve and extend rather than recreate. |
 | `ground/planner/` | Present | TypeScript planner, schema validation, ScriptedPlanner, LLM adapter, deterministic verifier, report writer, CLI, and tests exist; verified in `cd7e25c`. Preserve and extend for new readiness/range/failure checks. |
-| `ground/satellite/` | Present | Offline change detection, baked tile loader, generated placeholder tiles, and tests exist; verified in `cd7e25c`. Preserve. Baked assets need regeneration after the Komati stub geometry change. |
-| `site/site.stub.json` | Present | Initially a CMAC/Canberra integration stub from commit `01faa5d`; replaced in this Phase 0 slice with the required Komati stub. `site/site.json` remains absent by design and teammate-owned. |
+| `ground/satellite/` | Present | Offline change detection, baked tile loader, generated placeholder tiles, and tests exist; verified in `cd7e25c`. Preserve. Baked assets need regeneration after the Meridian Station stub geometry change. |
+| `site/site.stub.json` | Present | Initially a CMAC/Canberra integration stub from commit `01faa5d`; replaced in this Phase 0 slice with the required Meridian Station stub. `site/site.json` remains absent by design and teammate-owned. |
 | Root `verifier_fixtures/` | Absent | No directory, V01–V25 cases, reference verifier, profiles, range model, or fixture site existed at audit time. This Phase 0 slice creates only `profiles.json` and `range_model.json`; case fixtures/reference verifier remain work for the verifier phase. |
 
 Related new-run inputs were also absent at audit time: `ground/sdr/`,
-`rf_events.json`, `rails/`, and `data/tiles/komati/`. Their absence is expected;
+`rf_events.json`, `rails/`, and `data/tiles/meridian/`. Their absence is expected;
 they are Phase 2/3 inputs, not evidence that earlier baseline work failed.
 
 ## Phase disposition at session start
 
 | Phase | Existing work | Decision for this run |
 |---|---|---|
-| Phase 0 — audit/stabilise/decide | Earlier `01faa5d` supplied a first site contract, CMAC stub, and short ADR. Failure catalogue, session audit, Komati geometry, expanded decisions, and root verifier model files were absent. | Partially complete; retain file-selection/NFZ semantics and replace the obsolete stub/decisions with this expanded Phase 0 documentation. |
+| Phase 0 — audit/stabilise/decide | Earlier `01faa5d` supplied a first site contract, CMAC stub, and short ADR. Failure catalogue, session audit, Meridian Station geometry, expanded decisions, and root verifier model files were absent. | Partially complete; retain file-selection/NFZ semantics and replace the obsolete stub/decisions with this expanded Phase 0 documentation. |
 | Phase 1 — contract | Commit `99ca61d` contains the hackathon mission envelopes and planner tool/profile vocabulary in all three mirrors. At audit time the direct planner-run observation, capabilities, plan-command/ack, and heartbeat messages were absent. | Preserve the existing mission envelopes; add the missing planner-run messages and this run's vehicle, nav, battery, RF, sensor, fleet, readiness, and health fields across all mirrors. Default `vehicleId` is `eis-1`; nested mission payloads remain compatible. |
 | Phase 2 — companion planner path | Commit `4ced313` contains planner execution, GUIDED GPS/fence support, staged vision, and tests. | Baseline slice is complete. Extend it with companion-owned navigation switching, battery/sortie/charge logic, sensing rails, and failure authority. |
 | Phase 3 — ground planner/satellite/UI/shells | Commit `cd7e25c` contains and verifies the original ground retrofit. | Original ground slice is complete and SHIP. Extend it with this run's verifier checks, SDR/RF feeds, sensor/fleet UI, and shell lifecycle wiring. |
-| Phase 4 — gate/demo | Only the earlier person-following e2e/scripts exist. The expanded Komati ISR flow and failure gauntlet do not. | Not complete; implement after Phases 1–3. |
+| Phase 4 — gate/demo | Only the earlier person-following e2e/scripts exist. The expanded Meridian Station ISR flow and failure gauntlet do not. | Not complete; implement after Phases 1–3. |
 
 ## Verified baseline results
 

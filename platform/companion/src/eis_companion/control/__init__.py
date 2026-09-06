@@ -1,14 +1,25 @@
 """
 eis_companion.control -- the safety-critical control core.
 
-Pure-logic modules (numpy + stdlib only, no hardware) so the whole control loop
-unit-tests with no FC, camera, or detector:
+Every module here is pure logic (numpy + stdlib, no I/O, no hardware), so the
+whole loop unit-tests without a flight controller, camera or detector. The
+orchestrator (``eis_companion.app``) composes these pieces; none of them
+schedules, sleeps or talks to a socket.
 
-  pid          PID controller (clamp + anti-windup, dt-aware, reset)
-  distance     monocular distance-from-bbox-height (pinhole geometry)
-  tracker      single-target multi-object tracker (IoU + Kalman, stable ids, lock)
-  guidance     visual-servoing -> BODY-frame VelocitySetpoint (HARD standoff)
-  manual       manual stick -> BODY-frame VelocitySetpoint (deadzone + watchdog)
+Servo core (person following)
+  pid        PIDGains / PIDState records around a pure ``pid_step``; the
+             ``PID`` facade adds tracking anti-windup, dt awareness and
+             refusal of non-finite samples
+  distance   pinhole range from a normalised bbox height (``PinholeCamera``)
+  tracker    generic matrix ``KalmanFilter`` -> constant-velocity ``BoxFilter``,
+             vectorised IoU association, table-driven idle/searching/locked/lost
+  guidance   image-plane error vector -> three servo channels -> one body
+             setpoint through clamp -> standoff gate -> smooth -> gate -> clamp
+             (the standoff is a HARD floor, PRD 11)
+  manual     stick frame -> body setpoint via a fixed mapping matrix, behind a
+             deadman that zeroes-and-holds on input or link loss
+
+Mission and assurance
   planner_exec MissionPlan executor -> GotoTarget / VelocitySetpoint per tick
   failsafe     failure catalogue -> exactly one of none/hold/rtl/escalate/refuse
   envelope     runtime envelope monitor -> state + constraint + action request

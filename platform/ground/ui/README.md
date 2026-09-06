@@ -5,8 +5,9 @@ tracking drone. A React 18 + TypeScript + Vite single-page app that connects to
 the companion computer (or SITL), streams live telemetry / video / tracking, and
 drives the vehicle through guarded safety flows.
 
-This package is a pixel-faithful port of the HTML/JSX prototype in
-`ui_kits/ground-control` onto the real stack and the live data seam.
+The UI is implemented against the real stack and the live data seam; the HTML/JSX
+prototype it was originally modelled on is no longer in the repository (see
+`docs/DISCREPANCY_REWRITE.md` at the repo root).
 
 ---
 

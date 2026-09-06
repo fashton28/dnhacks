@@ -23,7 +23,7 @@ describe('SAR log-ratio change detection', () => {
   });
 
   it('emits a source=sar anomaly from the clearly labelled baked synthetic fallback', () => {
-    const result = loadBakedSar(path.resolve(__dirname, '../../../data/tiles/komati'));
+    const result = loadBakedSar(path.resolve(__dirname, '../../../data/tiles/meridian'));
     expect(result.provenance.kind).toBe('synthetic');
     expect(result.provenance.claim).toContain('not Umbra imagery');
     // The baked chip brightens (fill 20 → patch 80), so the cue says so.
@@ -99,7 +99,7 @@ describe('FM-125 a thumbnail names an image or nothing at all', () => {
 
   it('refuses a non-image reference instead of passing it to a human reviewer', () => {
     expect(() => detectSarChanges(chip([]), chip([{ x: 7, y: 7, width: 2, height: 2, value: 200 }]),
-      georef, provenance, { thumbnail: 'data/tiles/komati/sar-after.json' }))
+      georef, provenance, { thumbnail: 'data/tiles/meridian/sar-after.json' }))
       .toThrow(/must reference an image file/);
   });
 
@@ -111,7 +111,7 @@ describe('FM-125 a thumbnail names an image or nothing at all', () => {
   });
 
   it('leaves the baked dataset thumbnail-free rather than inventing a path', () => {
-    const result = loadBakedSar(path.resolve(__dirname, '../../../data/tiles/komati'));
+    const result = loadBakedSar(path.resolve(__dirname, '../../../data/tiles/meridian'));
     expect(result.anomalies[0].thumbnail).toBe('');
   });
 });

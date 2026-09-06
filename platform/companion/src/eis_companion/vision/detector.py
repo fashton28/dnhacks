@@ -2,38 +2,34 @@
 ============================================================================
 Drone Safety Platform -- Person detector (PersonDetector)
 ----------------------------------------------------------------------------
-Runs inference via the ultralytics YOLO API.  Targets COCO class 0 (person)
-only.
+Single-class (COCO class 0, ``person``) detector on top of the ultralytics
+YOLO API.
 
-Engine selection (checked in order):
-  1. EIS_ENGINE_PATH env var  -- path to a TensorRT .engine file (fastest on
-                                  Jetson; export via export_tensorrt.py).
-  2. EIS_MODEL_PATH  env var  -- path to a .pt weights file.
-  3. Default: yolo11n.pt in the ultralytics cache (downloaded on first use).
+Weights resolution, in order
+  1. ``engine_path`` argument, else ``EIS_ENGINE_PATH`` -- a TensorRT
+     ``.engine`` file.  Fastest on Jetson; build one with export_tensorrt.py.
+     A path that does not exist is reported and skipped, never guessed at.
+  2. ``model_path`` argument, else ``EIS_MODEL_PATH`` -- a ``.pt`` checkpoint.
+  3. ``yolo11n.pt``, which ultralytics fetches into its cache on first use.
 
-Both env vars can also be passed explicitly to the constructor (constructor
-args take precedence over env vars, which take precedence over the default).
+The choice is made by :func:`resolve_weights`, a pure function, so the policy
+is testable without ultralytics installed.
 
-Performance targets
--------------------
-  * Orin Nano + TensorRT FP16 .engine: ≥15 FPS at 720p (detection only).
-  * Graceful degradation: if inference takes longer than one frame slot the
-    detector still returns results -- it does not drop connections or raise.
-    The ``last_inference_ms`` attribute lets the caller monitor throughput.
+Honesty invariants this module carries
+--------------------------------------
+* ``supported_classes`` / :data:`SUPPORTED_CLASSES` publish what this backend
+  can *express*.  "Found no vehicle" and "cannot represent a vehicle" are
+  different answers and callers must be able to tell them apart (FM-98).
+* ``last_inference_failed`` distinguishes a failed inference (returns ``[]``)
+  from a healthy frame that genuinely contained nobody (also ``[]``).  The two
+  support opposite incident verdicts, and collapsing them was FM-100.
+* ``last_inference_ms`` is written on every call, success or failure, so a
+  caller can watch throughput degrade rather than only notice when it stops.
 
-Installation note (raised as ImportError if ultralytics is absent)
-------------------------------------------------------------------
-The detector requires ``ultralytics`` and a CUDA-capable ``torch`` build.
-Install them on the Jetson per the project docs::
-
-    # JetPack 6 / Python 3.10 -- inside the Docker container:
-    pip install ultralytics
-    # torch is pre-installed in the JetPack L4T base image; if not:
-    # follow https://docs.ultralytics.com/guides/nvidia-jetson/
-
-If ultralytics/torch are not installed this module raises ``ImportError``
-with a clear message; the orchestrator (api/server.py) catches it and falls
-back to mock detections, so the rest of the companion keeps running.
+Never raises from ``detect()``: a slow or broken frame degrades to an empty
+result plus a raised ``last_inference_failed`` flag; only the *constructor*
+raises, with ``ImportError`` when ultralytics/torch are absent (the ordinary
+dev-box case, which callers catch to fall back to synthetic detections).
 ============================================================================
 """
 from __future__ import annotations
@@ -41,7 +37,8 @@ from __future__ import annotations
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, Any, Optional
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence, Tuple
 
 if TYPE_CHECKING:
     import numpy as np
@@ -65,26 +62,153 @@ SUPPORTED_CLASSES: tuple[str, ...] = ("person",)
 #: tests/test_staging.py pins the relationship.
 DEFAULT_CONF_THRESHOLD: float = 0.30
 
+#: Environment overrides, lowest precedence after explicit arguments.
+ENGINE_PATH_ENV = "EIS_ENGINE_PATH"
+MODEL_PATH_ENV = "EIS_MODEL_PATH"
+DEFAULT_WEIGHTS = "yolo11n.pt"
+
+_INSTALL_HINT = (
+    "ultralytics is not installed.  "
+    "Install it inside the companion Docker container:\n"
+    "    pip install ultralytics\n"
+    "On the Jetson Orin Nano with JetPack 6, torch is pre-installed; "
+    "if not, follow https://docs.ultralytics.com/guides/nvidia-jetson/ .\n"
+    "For development without a GPU, install:\n"
+    "    pip install ultralytics torch torchvision --index-url "
+    "https://download.pytorch.org/whl/cpu"
+)
+
+
 # ---------------------------------------------------------------------------
-# Lazy imports -- raise a helpful ImportError if ultralytics is missing
+# Backend resolution (pure -- no ultralytics needed to exercise it)
 # ---------------------------------------------------------------------------
 
-def _require_ultralytics() -> Any:
-    """Import ultralytics.YOLO and return it; raise ImportError with install hint."""
+@dataclass(frozen=True)
+class Weights:
+    """Which file the detector will load, and how."""
+
+    path: str
+    tensorrt: bool
+
+    @property
+    def load_kwargs(self) -> dict[str, Any]:
+        """Extra kwargs for ``YOLO(...)``.
+
+        A ``.engine`` carries no task metadata, so it has to be told what it
+        is; a ``.pt`` checkpoint knows.
+        """
+        return {"task": "detect"} if self.tensorrt else {}
+
+
+def resolve_weights(
+    engine_path: Optional[str] = None,
+    model_path: Optional[str] = None,
+    *,
+    environ: Optional[dict] = None,
+    exists=os.path.isfile,
+) -> Weights:
+    """Pick the weights file, argument > environment > packaged default.
+
+    ``exists`` is injected so the policy can be tested against a fake
+    filesystem.  A configured-but-absent engine is logged and demoted rather
+    than silently ignored: an operator who exported an engine and typo'd the
+    path deserves to see why the run is slow.
+    """
+    env = os.environ if environ is None else environ
+
+    engine = (engine_path or env.get(ENGINE_PATH_ENV, "") or "").strip()
+    if engine:
+        if exists(engine):
+            return Weights(path=engine, tensorrt=True)
+        log.warning(
+            "%s '%s' not found; falling back to model weights.",
+            ENGINE_PATH_ENV, engine,
+        )
+
+    model = (model_path or env.get(MODEL_PATH_ENV, "") or DEFAULT_WEIGHTS).strip()
+    return Weights(path=model or DEFAULT_WEIGHTS, tensorrt=False)
+
+
+def _load_yolo() -> Any:
+    """Return ``ultralytics.YOLO`` or raise ImportError with an install hint."""
     try:
-        from ultralytics import YOLO  # type: ignore  # noqa: F401
-        return YOLO
+        from ultralytics import YOLO  # type: ignore
     except ImportError as exc:
-        raise ImportError(
-            "ultralytics is not installed.  "
-            "Install it inside the companion Docker container:\n"
-            "    pip install ultralytics\n"
-            "On the Jetson Orin Nano with JetPack 6, torch is pre-installed; "
-            "if not, follow https://docs.ultralytics.com/guides/nvidia-jetson/ .\n"
-            "For development without a GPU, install:\n"
-            "    pip install ultralytics torch torchvision --index-url "
-            "https://download.pytorch.org/whl/cpu"
-        ) from exc
+        raise ImportError(_INSTALL_HINT) from exc
+    return YOLO
+
+
+# ---------------------------------------------------------------------------
+# Result conversion (pure -- shaped by the ultralytics Results contract)
+# ---------------------------------------------------------------------------
+
+def _scalar(value: Any) -> float:
+    """Unwrap a torch 0-d tensor / numpy scalar / plain number to a float."""
+    item = getattr(value, "item", None)
+    return float(item()) if callable(item) else float(value)
+
+
+def _normalise_box(
+    corners: Sequence[float],
+    frame_hw: Tuple[int, int],
+) -> Tuple[float, float, float, float]:
+    """xyxy pixel corners -> ``(x, y, w, h)`` normalised and clamped to 0..1."""
+    height, width = frame_hw
+    x1, y1, x2, y2 = (float(v) for v in corners[:4])
+    nx = min(max(x1 / width, 0.0), 1.0)
+    ny = min(max(y1 / height, 0.0), 1.0)
+    nw = min(max((x2 - x1) / width, 0.0), 1.0 - nx)
+    nh = min(max((y2 - y1) / height, 0.0), 1.0 - ny)
+    return nx, ny, nw, nh
+
+
+def observations_from_results(
+    results: Iterable[Any],
+    frame_hw: Tuple[int, int],
+    conf_gate: float,
+    ts: float,
+) -> list[TargetObservation]:
+    """Convert ultralytics ``Results`` into normalised person observations.
+
+    Keeps only class 0 at or above *conf_gate*, and returns them sorted by
+    descending confidence so a caller's "best target" is ``[0]``.
+    """
+    observations: list[TargetObservation] = []
+    for result in results or ():
+        boxes = getattr(result, "boxes", None)
+        if boxes is None:
+            continue
+        for box in boxes:
+            if int(_scalar(box.cls[0])) != _PERSON_CLASS_ID:
+                continue
+            conf = _scalar(box.conf[0])
+            if conf < conf_gate:
+                continue
+            observations.append(
+                TargetObservation(
+                    bbox=_normalise_box(box.xyxy[0].tolist(), frame_hw),
+                    conf=conf,
+                    ts=ts,
+                )
+            )
+    observations.sort(key=lambda obs: obs.conf, reverse=True)
+    return observations
+
+
+def _frame_geometry(frame: Any) -> Optional[Tuple[int, int]]:
+    """``(height, width)`` of a usable frame, or None if it is not one."""
+    if frame is None:
+        return None
+    size = getattr(frame, "size", None)
+    if size is not None and not callable(size) and int(size) == 0:
+        return None
+    shape = getattr(frame, "shape", None)
+    if shape is None or len(shape) < 2:
+        return None
+    height, width = int(shape[0]), int(shape[1])
+    if height <= 0 or width <= 0:
+        return None
+    return height, width
 
 
 # ---------------------------------------------------------------------------
@@ -101,23 +225,24 @@ class PersonDetector:
     Parameters
     ----------
     engine_path:
-        Path to a TensorRT ``.engine`` file.  Overrides ``EIS_ENGINE_PATH``
-        env var.  Pass *None* to fall through to ``model_path``.
+        TensorRT ``.engine`` file; overrides ``EIS_ENGINE_PATH``.  *None*
+        falls through to ``model_path``.
     model_path:
-        Path to a ``.pt`` weights file.  Overrides ``EIS_MODEL_PATH`` env var.
-        Defaults to ``yolo11n.pt`` (ultralytics auto-downloads on first use).
+        ``.pt`` weights file; overrides ``EIS_MODEL_PATH``.  Defaults to
+        ``yolo11n.pt`` (ultralytics auto-downloads on first use).
     conf_threshold:
-        Minimum detector confidence to include a detection.
-        Default ``DEFAULT_CONF_THRESHOLD``.
+        Minimum confidence to keep a detection.  Default
+        :data:`DEFAULT_CONF_THRESHOLD`.
     device:
-        PyTorch device string, e.g. ``'cuda:0'`` (default) or ``'cpu'``.
-        ``'cuda:0'`` is required for TensorRT engines.
+        Torch device string, ``'cuda:0'`` by default; TensorRT engines require
+        a CUDA device.
     imgsz:
-        Inference image size (square side length).  640 is the YOLO default and
-        gives the best accuracy/speed trade-off on the Orin Nano.
+        Square inference size.  640 is the accuracy/speed sweet spot on Orin.
     half:
-        Run in FP16 mode (``True`` by default).  Silently ignored for .engine
-        files because the precision is baked into the engine at export time.
+        FP16 inference.  Ignored for ``.engine`` files, where precision was
+        fixed at export time.
+    conf:
+        Accepted ALIAS for *conf_threshold* -- see the note in ``__init__``.
     """
 
     #: The object classes this backend can produce (see SUPPORTED_CLASSES).
@@ -143,47 +268,35 @@ class PersonDetector:
         if conf is not None:
             conf_threshold = conf
 
-        # Resolve model path: constructor arg > env var > default
-        resolved_engine = (
-            engine_path
-            or os.environ.get("EIS_ENGINE_PATH", "")
-            or ""
-        )
-        resolved_model = (
-            model_path
-            or os.environ.get("EIS_MODEL_PATH", "")
-            or "yolo11n.pt"
-        )
-
         self._conf = float(conf_threshold)
         self._device = device
         self._imgsz = imgsz
         self._half = half
         self._model: Any = None
-        self.last_inference_ms: float = 0.0   # updated every call to detect()
+
+        #: Wall time of the most recent detect() call, success or failure.
+        self.last_inference_ms: float = 0.0
         #: True when the LAST detect() call failed. An empty list from a failed
         #: inference is NOT a valid empty frame, and the caller has to be able
         #: to tell the two apart (FM-100).
         self.last_inference_failed: bool = False
 
-        # ultralytics raises ImportError here if not installed (propagates up)
-        YOLO = _require_ultralytics()
+        # ImportError here is the expected dev-box outcome and propagates up.
+        yolo_cls = _load_yolo()
+        self.weights = resolve_weights(engine_path, model_path)
 
-        if resolved_engine and os.path.isfile(resolved_engine):
-            log.info("PersonDetector: loading TensorRT engine from %s", resolved_engine)
-            self._model = YOLO(resolved_engine, task="detect")
-            log.info("TensorRT engine loaded.")
-        else:
-            if resolved_engine:
-                log.warning(
-                    "EIS_ENGINE_PATH '%s' not found; falling back to model weights.",
-                    resolved_engine,
-                )
-            log.info("PersonDetector: loading model weights from %s", resolved_model)
-            self._model = YOLO(resolved_model)
-            # Warm up once to trigger JIT/CUDA initialisation before live frames
+        log.info(
+            "PersonDetector: loading %s from %s",
+            "TensorRT engine" if self.weights.tensorrt else "model weights",
+            self.weights.path,
+        )
+        self._model = yolo_cls(self.weights.path, **self.weights.load_kwargs)
+        if not self.weights.tensorrt:
+            # A serialised engine is already device-resident; a checkpoint pays
+            # its JIT/CUDA initialisation on the first frame unless we spend it
+            # here, before the control loop is depending on the cadence.
             self._warmup()
-            log.info("Model loaded and warmed up.")
+        log.info("PersonDetector ready (%s).", self.weights.path)
 
     # ------------------------------------------------------------------
     # Public API
@@ -195,31 +308,25 @@ class PersonDetector:
         Parameters
         ----------
         frame:
-            A HxWx3 uint8 BGR numpy array (as returned by ``Capture.read()``).
+            HxWx3 uint8 BGR array, as returned by ``Capture.read()``.
 
         Returns
         -------
         list[TargetObservation]
-            Zero or more detections, sorted by descending confidence, each with
-            a normalised (x, y, w, h) bbox (top-left origin, 0..1 coords),
-            confidence in [0, 1], and a timestamp (``time.time()``).
+            Zero or more detections sorted by descending confidence, each with
+            a normalised ``(x, y, w, h)`` bbox (top-left origin, 0..1),
+            confidence in [0, 1] and a ``time.time()`` timestamp.  An empty
+            list means either "nobody there" or "inference failed" -- read
+            ``last_inference_failed`` to tell which.
         """
-        if frame is None or frame.size == 0:
+        geometry = _frame_geometry(frame)
+        if geometry is None:
             self.last_inference_failed = True
             return []
 
-        self.last_inference_failed = False
-        t0 = time.perf_counter()
+        started = time.perf_counter()
         try:
-            results = self._model.predict(
-                source=frame,
-                classes=[_PERSON_CLASS_ID],
-                conf=self._conf,
-                imgsz=self._imgsz,
-                device=self._device,
-                half=self._half,
-                verbose=False,
-            )
+            results = self._predict(frame)
         except Exception as exc:
             log.error("PersonDetector.detect() inference failed: %s", exc)
             # A failed inference is "no observation", not "a valid frame with
@@ -228,41 +335,12 @@ class PersonDetector:
             self.last_inference_failed = True
             return []
         finally:
-            self.last_inference_ms = (time.perf_counter() - t0) * 1000.0
+            self.last_inference_ms = (time.perf_counter() - started) * 1000.0
 
-        ts = time.time()
-        observations: list[TargetObservation] = []
-
-        for result in results:
-            if result.boxes is None:
-                continue
-            h_img, w_img = frame.shape[:2]
-            for box in result.boxes:
-                cls = int(box.cls[0].item())
-                if cls != _PERSON_CLASS_ID:
-                    continue
-                conf = float(box.conf[0].item())
-                if conf < self._conf:
-                    continue
-                # xyxy pixel coords -> normalised xywh
-                x1, y1, x2, y2 = box.xyxy[0].tolist()
-                nx = float(x1) / w_img
-                ny = float(y1) / h_img
-                nw = float(x2 - x1) / w_img
-                nh = float(y2 - y1) / h_img
-                # Clamp to [0, 1]
-                nx = max(0.0, min(1.0, nx))
-                ny = max(0.0, min(1.0, ny))
-                nw = max(0.0, min(1.0 - nx, nw))
-                nh = max(0.0, min(1.0 - ny, nh))
-                observations.append(
-                    TargetObservation(bbox=(nx, ny, nw, nh), conf=conf, ts=ts)
-                )
-
-        # Sort by descending confidence so the caller's default selection
-        # (highest-conf / most-central) is easy.
-        observations.sort(key=lambda o: o.conf, reverse=True)
-
+        self.last_inference_failed = False
+        observations = observations_from_results(
+            results, geometry, self._conf, time.time(),
+        )
         log.debug(
             "detect(): %d person(s) in %.1f ms",
             len(observations), self.last_inference_ms,
@@ -281,20 +359,37 @@ class PersonDetector:
     # Private helpers
     # ------------------------------------------------------------------
 
+    def _predict(self, frame: Any) -> Any:
+        """One ultralytics forward pass with this detector's fixed settings."""
+        return self._model.predict(
+            source=frame,
+            classes=[_PERSON_CLASS_ID],
+            conf=self._conf,
+            imgsz=self._imgsz,
+            device=self._device,
+            half=self._half,
+            verbose=False,
+        )
+
     def _warmup(self) -> None:
-        """Send one blank frame through the model to trigger JIT / CUDA init."""
+        """Push one blank frame through the model to pay JIT / CUDA init."""
         try:
-            import numpy as np  # noqa: F401 -- only used here
-            dummy = np.zeros((640, 640, 3), dtype=np.uint8)
-            self._model.predict(
-                source=dummy,
-                classes=[_PERSON_CLASS_ID],
-                conf=self._conf,
-                imgsz=self._imgsz,
-                device=self._device,
-                half=self._half,
-                verbose=False,
-            )
+            import numpy as np  # local: the module itself is numpy-free
+
+            self._predict(np.zeros((self._imgsz, self._imgsz, 3), dtype=np.uint8))
             log.debug("Warmup inference complete.")
         except Exception as exc:
             log.warning("Warmup failed (non-fatal): %s", exc)
+
+
+__all__ = [
+    "PersonDetector",
+    "Weights",
+    "SUPPORTED_CLASSES",
+    "DEFAULT_CONF_THRESHOLD",
+    "ENGINE_PATH_ENV",
+    "MODEL_PATH_ENV",
+    "DEFAULT_WEIGHTS",
+    "resolve_weights",
+    "observations_from_results",
+]

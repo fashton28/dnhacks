@@ -60,8 +60,8 @@ describe('cctv replay', () => {
       confidence: 0.72,
       ttl_s: 180,
     });
-    expect(first.anomaly.lat).toBeCloseTo(-26.09205, 6);
-    expect(first.anomaly.lon).toBeCloseTo(29.47515, 6);
+    expect(first.anomaly.lat).toBeCloseTo(41.2, 6);
+    expect(first.anomaly.lon).toBeCloseTo(-98.3985673, 6);
     expect(first.anomaly.observedAt).toBe(QUIET_START_MS);
     expect(first.vehicleId).toBe('eis-1');
 
@@ -71,8 +71,8 @@ describe('cctv replay', () => {
       type: 'vehicle_in_zone',
       confidence: 0.66,
     });
-    expect(second.anomaly.lat).toBeCloseTo(-26.0885, 6);
-    expect(second.anomaly.lon).toBeCloseTo(29.47655, 6);
+    expect(second.anomaly.lat).toBeCloseTo(41.2006289, 6);
+    expect(second.anomaly.lon).toBeCloseTo(-98.3983285, 6);
     // observedAt is when the CAMERA saw it, earlier than the message ts.
     expect(second.anomaly.observedAt).toBe(QUIET_START_MS + 3500);
     expect(second.ts).toBeGreaterThan(second.anomaly.observedAt as number);
@@ -183,8 +183,8 @@ describe('satellite, fence and survey replay', () => {
     await rail.start();
     scheduler.advance(10_000);
     expect(seen.anomalies.map((m) => m.anomaly.type)).toEqual(['fence_cut', 'fence_climb']);
-    expect(seen.anomalies[0].anomaly.lat).toBeCloseTo(-26.092, 6);
-    expect(seen.anomalies[0].anomaly.lon).toBeCloseTo(29.47655, 6);
+    expect(seen.anomalies[0].anomaly.lat).toBeCloseTo(41.1993712, 6);
+    expect(seen.anomalies[0].anomaly.lon).toBeCloseTo(-98.3983285, 6);
     expect(seen.anomalies[0].anomaly.cameraId).toBe('cam-east-south');
   });
 

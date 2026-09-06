@@ -11,7 +11,7 @@ import { HubDataProvider } from '@/dataSource/HubDataProvider';
 import type { FleetEntry, HubDroneState } from '@/dataSource/HubDataProvider';
 
 const state = (overrides: Partial<HubDroneState> & { drone_id: string }): HubDroneState => ({
-  lat: -26.0906, lon: 29.4692, alt: 40, heading_deg: 90,
+  lat: 41.1992364, lon: -98.3995821, alt: 40, heading_deg: 90,
   velocity_ned: { vx: 0, vy: 0, vz: 0 }, battery_pct: 88, status: 'on_mission',
   mission_id: 'm-1', gimbal_pitch_deg: 45, armed: true, mode: 'GUIDED', message: '',
   ts: new Date().toISOString(),
@@ -38,15 +38,15 @@ describe('Hub fleet → contract fleet', () => {
   it('carries the drone\'s real position instead of fabricating one', () => {
     const { fleet } = capture([state({ drone_id: 'drone-1' })]);
     const vehicle = fleet.at(-1)?.vehicles.find((v) => v.vehicleId === 'drone-1');
-    expect(vehicle?.position).toEqual({ lat: -26.0906, lon: 29.4692, relAlt: 40 });
+    expect(vehicle?.position).toEqual({ lat: 41.1992364, lon: -98.3995821, relAlt: 40 });
     expect(vehicle?.position.lat).not.toBe(0);
     expect(vehicle?.position.lon).not.toBe(0);
   });
 
   it('maps two drones to two distinct positions', () => {
     const { fleet } = capture([
-      state({ drone_id: 'drone-1', lat: -26.0906, lon: 29.4692 }),
-      state({ drone_id: 'drone-2', lat: -26.0880, lon: 29.4730 }),
+      state({ drone_id: 'drone-1', lat: 41.1992364, lon: -98.3995821 }),
+      state({ drone_id: 'drone-2', lat: 41.199461, lon: -98.3994389 }),
     ]);
     const vehicles = fleet.at(-1)?.vehicles ?? [];
     expect(vehicles).toHaveLength(2);

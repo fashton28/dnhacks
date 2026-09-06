@@ -1,6 +1,10 @@
-import React from 'react';
+/**
+ * SignalGauge — four link-quality bars driven by RSSI, with the dBm figure and
+ * round-trip latency beside them. Degrades green → amber → red as the signal
+ * weakens; `lost` blanks every bar and prints LOST instead of a reading.
+ */
 
-interface SignalGaugeProps {
+export interface SignalGaugeProps {
   rssi?: number;
   latencyMs?: number | null;
   lost?: boolean;
@@ -8,46 +12,53 @@ interface SignalGaugeProps {
   compact?: boolean;
 }
 
-type SignalStatus = 'nominal' | 'caution' | 'danger';
+export type SignalStatus = 'nominal' | 'caution' | 'danger';
 
-/**
- * SignalGauge — link-quality bars driven by RSSI, with latency readout.
- * Degrades to caution/danger as signal drops; shows "LINK LOST" when null.
- */
+export interface SignalLevel {
+  /** 0..1 — -100 dBm or worse is 0, -40 dBm or better is 1. */
+  strength: number;
+  /** Lit bars, 0..4. Never 0 while the link is up: a live link always shows at least one bar. */
+  bars: number;
+  status: SignalStatus;
+}
+
+export const RSSI_FLOOR_DBM = -100;
+export const RSSI_CEILING_DBM = -40;
+const BAR_COUNT = 4;
+
+/** Classify a link from its RSSI (dBm) and whether it is currently lost. */
+export function signalLevel(rssi: number, lost = false): SignalLevel {
+  const raw = (rssi - RSSI_FLOOR_DBM) / (RSSI_CEILING_DBM - RSSI_FLOOR_DBM);
+  const strength = Number.isFinite(raw) ? Math.min(1, Math.max(0, raw)) : 0;
+  if (lost) return { strength, bars: 0, status: 'danger' };
+  const bars = Math.max(1, Math.ceil(strength * BAR_COUNT));
+  const status: SignalStatus = strength < 0.3 ? 'danger' : strength < 0.55 ? 'caution' : 'nominal';
+  return { strength, bars, status };
+}
+
+/** "-62 dBm · 41ms" / "-62 dBm" — the text under the label while the link is up. */
+export function signalReadout(rssi: number, latencyMs: number | null | undefined): string {
+  const dbm = `${Math.round(rssi)} dBm`;
+  return latencyMs != null ? `${dbm} · ${latencyMs}ms` : dbm;
+}
+
 export function SignalGauge({ rssi = -60, latencyMs = null, lost = false, label = 'Link', compact = false }: SignalGaugeProps) {
-  // map rssi (-100 weak .. -40 strong) → 0..4 bars
-  const norm = Math.max(0, Math.min(1, (rssi + 100) / 60));
-  const bars = lost ? 0 : Math.max(1, Math.ceil(norm * 4));
-  const status: SignalStatus = lost ? 'danger' : norm < 0.3 ? 'danger' : norm < 0.55 ? 'caution' : 'nominal';
-  const col: Record<SignalStatus, string> = {
-    nominal: 'var(--green)',
-    caution: 'var(--amber)',
-    danger:  'var(--red)',
-  };
-  const heights = [6, 9, 12, 15];
+  const level = signalLevel(rssi, lost);
+  const readout = lost ? 'LOST' : signalReadout(rssi, latencyMs);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-      <div style={{ display: 'flex', alignItems: 'flex-end', gap: 2, height: 15 }}>
-        {heights.map((h, i) => (
-          <div key={i} style={{
-            width: 3.5, height: h, borderRadius: 1,
-            background: !lost && i < bars ? col[status] : 'var(--gray-6)',
-            opacity: !lost && i < bars ? 1 : 0.5,
-            transition: 'background var(--dur-base) var(--ease-out)',
-          }} />
+    <div className="eis-sig" data-status={level.status} data-lost={lost || undefined} role="img" aria-label={`${label}: ${readout}`}>
+      <div className="eis-sig-bars" aria-hidden="true">
+        {Array.from({ length: BAR_COUNT }, (_, i) => (
+          <span key={i} className="eis-sig-bar" data-on={i < level.bars || undefined} />
         ))}
       </div>
       {!compact && (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-          <span style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--text-2xs)', fontWeight: 600, letterSpacing: 'var(--tracking-label)', textTransform: 'uppercase', color: 'var(--text-tertiary)' }}>{label}</span>
-          {lost ? (
-            <span style={{ fontFamily: 'var(--font-sans)', fontSize: 'var(--text-xs)', fontWeight: 700, color: 'var(--danger-fg)', letterSpacing: '0.04em' }}>LOST</span>
-          ) : (
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--text-xs)', color: 'var(--text-secondary)', fontVariantNumeric: 'tabular-nums' }}>
-              {Math.round(rssi)} dBm{latencyMs != null ? ` · ${latencyMs}ms` : ''}
-            </span>
-          )}
+        <div className="eis-sig-text">
+          <span className="eis-label">{label}</span>
+          {lost
+            ? <span className="eis-sig-lost">LOST</span>
+            : <span className="eis-sig-read">{readout}</span>}
         </div>
       )}
     </div>

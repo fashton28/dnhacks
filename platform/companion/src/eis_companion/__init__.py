@@ -20,6 +20,10 @@ Sub-packages
   stream       video stream (mediamtx + GStreamer, RTSP/WebRTC)
   app          the asyncio orchestrator + CLI entry (python -m eis_companion.app)
 
+Importing this package pulls in NOTHING but the standard library: every
+sub-package is imported on demand, so a tool that only wants the version, and
+a Jetson that only wants ``control``, never pay for pymavlink or OpenCV.
+
 SAFETY-FIRST (PRD 11): standoff is a hard limit, every output is clamped to
 ``Limits``, the manual + ground-link watchdogs zero-and-hold on loss, and
 emergencyStop/disarm override everything. The whole system is SITL-first --
@@ -28,6 +32,27 @@ nothing here requires hardware to run in simulation.
 """
 from __future__ import annotations
 
-__version__ = "0.1.0"
+#: The version this source tree declares when its distribution metadata is not
+#: installed (running straight off a checkout, e.g. PYTHONPATH on the Jetson).
+#: Keep it in step with ``companion/pyproject.toml``.
+FALLBACK_VERSION = "0.1.0"
+
+
+def _installed_version() -> str:
+    """``eis-companion``'s version from its distribution metadata.
+
+    pyproject.toml is the one place the number is written, so read it back
+    from the install rather than keeping a second copy here that can drift.
+    A source-only checkout has no metadata to read; that is the fallback.
+    """
+    try:
+        from importlib.metadata import version
+
+        return version("eis-companion")
+    except Exception:
+        return FALLBACK_VERSION
+
+
+__version__ = _installed_version()
 
 __all__ = ["__version__"]
