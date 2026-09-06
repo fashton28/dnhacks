@@ -68,6 +68,7 @@ Put `ANTHROPIC_API_KEY=...` in a `.env` file for live mode; without it the same 
 - [ARCHITECTURE.md](ARCHITECTURE.md): how the pieces connect and why.
 - [CONTEXT.md](CONTEXT.md): the domain glossary and the scenarios.
 - [docs/sim-setup.md](docs/sim-setup.md): building ArduPilot and running everything on a Mac.
+- [docs/REPOSITORY_REVIEW.md](docs/REPOSITORY_REVIEW.md), [docs/BASIC_DEMO_PENDING.md](docs/BASIC_DEMO_PENDING.md) and [docs/DISCREPANCY_REWRITE.md](docs/DISCREPANCY_REWRITE.md): provenance, demo gates, and what the platform rewrite removed and re-implemented.
 
 ## Repository map
 
