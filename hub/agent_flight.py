@@ -428,7 +428,7 @@ class AgentFlight(Inspector):
             self._tool(name, args)
         labels = sorted({d["label"] for o in self.res.observations for d in o.get("detections", [])})
         self.res.summary = "Agent-flown mock flight: overhead RGB and thermal, then a low oblique zoomed view. Seen: " + (", ".join(labels) if labels else "nothing unusual") + "."
-        self.res.threat_assessment = "suspicious" if any(l in labels for l in ("person", "fence_damage")) else "benign" if labels else "none"
+        self.res.threat_assessment = ("hostile" if "fire" in labels else "suspicious" if any(l in labels for l in ("person", "fence_damage", "smoke")) else "benign" if labels else "none")
 
     def _fly_live(self, anomaly: dict[str, Any], site_prose: str) -> None:
         import anthropic
