@@ -2,10 +2,16 @@
 
 **DNHacks, Defense track, 4 people, deadline noon 2026-09-06**
 
-Vocabulary follows `CONTEXT.md`.
-Environment and flight-stack decisions are recorded in `docs/adr/0002-threejs-renderer-ardupilot-sitl.md` (supersedes 0001).
-The full spec with user stories is `docs/specs/0001-argus-simulated-site-monitoring.md` (GitHub issue #2).
-This document is the build plan: how the pieces fit and who builds what.
+Vocabulary follows [`CONTEXT.md`](CONTEXT.md).
+Decisions are recorded in [`docs/adr/`](docs/adr/): 0002 chose Three.js and ArduPilot SITL
+(superseding 0001), 0003 records why the agent flies inside a validated envelope.
+The spec with user stories is [`docs/specs/0001-argus-simulated-site-monitoring.md`](docs/specs/0001-argus-simulated-site-monitoring.md).
+
+**What this document is.** Sections 1 to 4 describe the system as built: the pitch, the
+design constraints, the architecture and the contracts. Sections 5 and 6 are the original
+build plan and timeline, kept as a record of how the work was divided — they are history,
+not instructions. Section 7 has been superseded by [`docs/DEMO.md`](docs/DEMO.md), which is
+the rehearsed runbook.
 
 ---
 
@@ -16,10 +22,11 @@ Autonomous ISR (intelligence, surveillance, reconnaissance) for critical infrast
 - **Wide-area layer.** An overhead pass of the Site produces a before and an after image.
   Change detection emits a Detection: a georeferenced polygon and a confidence.
 - **Close-up layer.** The Operator dispatches.
-  An LLM Triage Agent emits a MissionSpec, a deterministic Coverage Planner expands it into a FlightPlan, and an ArduPilot-flown Drone from the Fleet flies it.
+  An LLM Triage Agent decides whether to fly at all, then declares an Envelope — a radius around the Detection, a ceiling, a standoff, a time budget.
+  Once the Envelope is approved the agent flies inside it with tools, on a real ArduPilot Drone.
   The Renderer produces what the Drone's camera sees; a vision model turns frames into Observations and an Incident Report.
-- **Trust layer.** Before dispatch, the Safety Validator checks the FlightPlan against the geofence, no-fly zones, altitude limits, and battery range.
-  Rejections name the rule and are fed back to the agent.
+- **Trust layer.** The Safety Validator checks the Envelope before takeoff against the geofence, no-fly zones, altitude limits and battery range — and re-checks every move in flight.
+  A refused Envelope is shrunk deterministically and re-checked, up to three times, with the rule named back to the agent.
   The same rules clamp the Operator under Manual Control.
   Behind both sits ArduPilot's own onboard geofence, which the agent cannot reach.
 - **Operator surface.** A Console with an Overview of the Fleet, a photoreal World view, and a Drone view per Drone that the Operator can drop into and take Manual Control of at any moment.
@@ -39,10 +46,12 @@ And the trust layer plus its red-team demo: the autonomy stack refusing to fly, 
 
 ## 2. Design constraints (read before building)
 
-1. **The LLM does not compute geometry.**
-   The Triage Agent emits intent and judgment; the Coverage Planner derives waypoints.
-2. **Safety is enforced three times.**
-   Safety Validator at dispatch.
+1. **The LLM declares a boundary before it gets control.**
+   The agent states an Envelope — objective, radius, ceiling, standoff, time budget — and no motor turns until the Safety Validator has approved it.
+   Inside the Envelope the agent flies; outside it, it cannot.
+   The plan-based path (`ARGUS_FLIGHT_MODE` other than `agent`) keeps the older split, where the agent emits intent and a deterministic planner derives waypoints.
+2. **Safety is enforced three times, and the first one runs twice.**
+   Safety Validator on the Envelope before takeoff, then again on every `fly_to` in flight.
    Safety Validator clamping every ManualCommand.
    ArduPilot's onboard fence and failsafes, set from the same Site geometry.
    Show all three in the demo.
@@ -106,20 +115,44 @@ And the trust layer plus its red-team demo: the autonomy stack refusing to fly, 
 ### Repo layout
 
 ```
-contracts/          Pydantic models, protocol, fixtures, JSON schema     (frozen, all)
-hub/                FastAPI Hub: registry, missions, manual, scenarios   (Person D)
+contracts/          Pydantic models, controller protocol, fixtures, exported JSON schema
+hub/
+  server.py         REST, /ws/controller, /ws/live; serves /console/ and /gcs/
+  registry.py       Drone and Renderer connections, scene state
+  missions.py       Mission lifecycle, evidence capture
+  safety.py         the Safety Validator: validate(FlightPlan) and clamp(ManualCommand)
+  autonomy.py       triage, and the adapter onto mock-drone-agent's orchestrator
+  site_context.py   Zone lookup, what is normal there, open maintenance windows
+  agent_flight.py   Envelope declaration and the agent's flight tools
+  inspection.py     the on-station inspection loop
+  detections.py     Detection store, persisted to evidence/detections.jsonl
+  incidents.py      Incident Report store and the adapter that builds one
+  manual.py         Manual Control sessions and clamping
+  audit.py          events.jsonl
+widearea/
+  vision.py         Gemini structured output -> Detection
+  detect.py         numpy pixel differencing -> Detection
+  georef.py         normalised image box -> Site geography
+  prompts/          the change-detection prompt, edited without touching code
 sim/
-  site/             gen_site.py -> site.json + site.geojson              (Person A)
-  ardupilot/        SITL launcher, per-Drone params, fence from Site     (Person A)
-  bridge/           MAVLink <-> controller protocol, one per Drone       (Person A)
-  fake_drone/       protocol-compatible kinematic Drone                  (done)
-console/            Vite + TS: Three.js scene + renderer role, MapLibre  (Person D, Person B for scene)
-widearea/           overhead change detection -> Detection               (Person B)
-agent/ safety/ planner/ redteam/                                         (Person C)
-scripts/            launch_sim.py, smoke_flight.py, export_schema.py
-tests/              Hub API tests with fake Drone and fake agents; contract tests
-docs/               adr/  specs/  setup guides
+  site/             gen_site.py -> site.json + site.geojson
+  ardupilot/        SITL params, onboard fence generated from the Site
+  bridge/           MAVLink <-> controller protocol, one per Drone
+  fake_drone/       protocol-compatible kinematic Drone
+  common/           site_limits.py, read by safety.py and by the firmware fence
+console/            Vite + TS: Three.js scene, Renderer role, MapLibre Overview
+scripts/            launch_sim.py, sim_renderer.py, headless_renderer.py,
+                    argus_autonomy.py, argus_detect.py, smoke_flight.py,
+                    fetch_assets.py, sitl_diag.py, export_schema.py
+tests/              Hub API tests against the fake Drone; safety, incidents,
+                    wide-area, contracts, site
+docs/               DEMO.md (the runbook)  adr/  specs/  setup guides
 ```
+
+Separate roots, adapted at a boundary and never sharing an import path:
+`platform/` (companion + the React dashboard served at `/gcs/`), `rails/` (the trust-layer
+oracle for `platform/`), `argus-core/`, `mock-drone-agent/`. See
+[`docs/REPOSITORY_REVIEW.md`](docs/REPOSITORY_REVIEW.md).
 
 ---
 
@@ -155,6 +188,8 @@ The fake Drone still answers `capture_frame` itself with a synthetic frame so te
 ---
 
 ## 5. The four workstreams
+
+> Historical: how the build was divided. Kept for the record; see the repo layout above for what exists now.
 
 ### Person A: Flight
 
@@ -212,6 +247,8 @@ The LLM layer as built (`hub/autonomy.py`, `hub/site_context.py`, `hub/inspectio
 
 ## 6. Timeline
 
+> Historical: the plan the build followed.
+
 | Hours | What happens |
 |---|---|
 | 0-2 | Env spikes on every Mac: ArduCopter SITL boots and arms; `pnpm dev` shows the scene; API key works. Contracts already frozen. |
@@ -228,6 +265,10 @@ The LLM layer as built (`hub/autonomy.py`, `hub/site_context.py`, `hub/inspectio
 ---
 
 ## 7. The three-minute demo
+
+> Superseded by [`docs/DEMO.md`](docs/DEMO.md), which runs two acts — transformer fire
+> against steam release — plus the red-team and Manual Control codas. The sketch below was
+> the original single-scenario plan.
 
 1. World view of Meridian Station, three Drones on their pads, Overview alongside.
 2. Run the intruder vehicle Scenario; the wide-area layer flags a Detection with its confidence.

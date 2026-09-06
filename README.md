@@ -1,48 +1,89 @@
-# DNHacks drone safety platform
+# ARGUS — governed autonomous site monitoring
 
-This repository keeps the integrated flight platform and the team's complementary planning components in clear, independent roots.
+An overhead pass finds a change at a simulated critical-infrastructure site. A vision
+model says what changed, an agent decides whether it is worth a flight and declares the
+envelope it wants to work in, a deterministic layer approves or shrinks that envelope,
+and the agent then flies inside it — with every move re-checked, and real ArduPilot
+firmware underneath enforcing its own geofence.
+
+**To run the demo, read [`docs/DEMO.md`](docs/DEMO.md).** It is the rehearsed script,
+including the pre-flight checklist and what to do when the model API misbehaves.
+
+## Quick start
+
+```bash
+uv sync                                 # Python deps
+cd console && pnpm install && cd ..     # Console deps
+python scripts/fetch_assets.py          # ~85 MB of CC0 textures, HDRI and models — required
+```
+
+Assets are gitignored, so **every machine runs `fetch_assets.py` once**. Without it the
+scene renders untextured and dark.
+
+Put the model keys in `.env` at the repo root (gitignored; the Hub reads it at startup):
+
+```
+GEMINI_API_KEY=...      # wide-area vision
+ANTHROPIC_API_KEY=...   # triage, in-flight inspection, incident reports
+```
+
+Both are optional — every live model call degrades to a rule-based path and says so —
+but the live agent is the demo.
+
+Then build ArduPilot per [`docs/sim-setup.md`](docs/sim-setup.md) and:
+
+```bash
+make hub                 # Hub on :8000, serves /gcs/ and /console/
+make sim FLEET=3         # ArduCopter SITL + Bridge per Drone
+```
+
+Open <http://localhost:8000/> (redirects to the dashboard). `make fake-fleet` substitutes
+kinematic Drones when you do not want ArduPilot, and `scripts/sim_renderer.py` is a
+headless renderer for when no browser is open.
 
 ## Repository map
 
-Simulation and operator stack (Three.js renderer, ArduCopter SITL, Hub):
+### The ARGUS stack
 
-- [`hub/`](hub/) — the Hub: FastAPI process with the Drone registry, Mission runner, Manual Control clamping, Scenario engine, Renderer role and audit log. Serves the Console at `/console/`.
-- [`console/`](console/) — the Console: Three.js World view and Drone view (RGB, thermal, LiDAR), MapLibre satellite Overview, Fleet/Mission/Log panels. Vite + TypeScript.
-- [`sim/`](sim/) — ArduCopter SITL launcher and params, the MAVLink Bridge, the fake Drone, and the Site generator (`site.json` + `site.geojson`).
-- [`scripts/`](scripts/) — `launch_sim.py`, `smoke_flight.py`, `headless_renderer.py`, `sitl_diag.py`, `fetch_assets.py`.
-- [`docs/sim-setup.md`](docs/sim-setup.md) — how to build ArduPilot and run everything on a Mac; [`docs/adr/`](docs/adr/) — ADR 0002 records the Three.js + ArduPilot decision.
+| Path | What it is |
+|---|---|
+| [`hub/`](hub/) | One FastAPI process and the only authority. Drone registry, Mission runner, Safety Validator, agent-flown missions, in-flight inspection, detection and incident stores, Scenario engine, audit log. Serves the Console at `/console/` and the dashboard at `/gcs/`. |
+| [`console/`](console/) | Three.js World view, per-Drone view (RGB / thermal / LiDAR), MapLibre Overview, Fleet/Mission/Log panels. **Also the Renderer** — there is no camera on a simulated Drone, so the browser draws every frame the Hub asks for. |
+| [`widearea/`](widearea/) | Overhead change detection. `vision.py` (Gemini, structured output) and `detect.py` (numpy pixel differencing) both return the same `Detection`. |
+| [`sim/`](sim/) | ArduCopter SITL launcher and params, the MAVLink Bridge, the fake Drone, and the Site generator. `sim/common/site_limits.py` is read by both the Safety Validator and the firmware fence. |
+| [`contracts/`](contracts/) | Pydantic models, the controller protocol, fixtures and exported JSON schema. Every model names a term from [`CONTEXT.md`](CONTEXT.md). |
+| [`scripts/`](scripts/) | `launch_sim.py`, `sim_renderer.py`, `headless_renderer.py`, `argus_autonomy.py` (one closed loop end to end), `argus_detect.py`, `smoke_flight.py`, `fetch_assets.py`, `sitl_diag.py`, `export_schema.py` |
+| [`tests/`](tests/) | Hub API tests against the fake Drone, Safety Validator, incidents, wide-area, contracts, site |
 
-Quick start: `uv sync`, build ArduPilot per the setup guide, then `make hub` and `make sim FLEET=3`, open http://localhost:8000/console/.
+### Team components, maintained as separate roots
 
-Team components:
+| Path | What it is |
+|---|---|
+| [`platform/`](platform/) | Companion software, the React ground-control dashboard, hardware docs and design assets. The dashboard now talks to the ARGUS Hub and is served at `/gcs/`. |
+| [`rails/`](rails/) | An independent Python oracle for the trust layer, with parity harnesses. Scoped to `platform/`; imports nothing from it by design. |
+| [`argus-core/`](argus-core/) | Decision, validation and vision component. Its own contracts — adapt at a boundary, never share an import path. |
+| [`mock-drone-agent/`](mock-drone-agent/) | The planner, verifier, triage and report writer that `hub/autonomy.py` adapts. Also the plan-based fallback when `ARGUS_FLIGHT_MODE` is not `agent`. |
 
-- [`platform/`](platform/) — companion software, ground station, simulator, site model, shared wire contracts, scripts, hardware documentation, and imported design assets.
-- [`argus-core/`](argus-core/) — decision, validation, and vision component maintained as a separate Python package.
-- [`mock-drone-agent/`](mock-drone-agent/) — mock-agent scenarios, schemas, and reports.
-- [`contracts/`](contracts/) — the Hub's domain contracts (Pydantic); every model names a term from [`CONTEXT.md`](CONTEXT.md).
-- [`docs/`](docs/) — cross-component architecture decisions, site policy, and failure modes.
-- [`docs/REPOSITORY_REVIEW.md`](docs/REPOSITORY_REVIEW.md) — provenance evidence, contract discrepancies, and adapter guidance.
-- [`docs/BASIC_DEMO_PENDING.md`](docs/BASIC_DEMO_PENDING.md) — basic demo gates, teammate progress, and video evidence plan.
+## Documentation
 
-Shared design documents for the ARGUS stack: [`ARCHITECTURE.md`](ARCHITECTURE.md)
-(build plan), [`CONTEXT.md`](CONTEXT.md) (vocabulary), and
-[`docs/specs/0001-argus-simulated-site-monitoring.md`](docs/specs/0001-argus-simulated-site-monitoring.md)
-(spec and user stories).
+| Document | Read it for |
+|---|---|
+| [`docs/DEMO.md`](docs/DEMO.md) | **The runbook.** Pre-flight, the two acts, the codas, the API fallback. |
+| [`CONTEXT.md`](CONTEXT.md) | The vocabulary. Every term the code and the pitch use, and what to avoid calling things. |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How the pieces fit and the contracts between them. |
+| [`docs/ARGUS_AUTONOMY.md`](docs/ARGUS_AUTONOMY.md) | The autonomy loop in detail. |
+| [`docs/adr/`](docs/adr/) | Why the environment and flight stack are what they are, and why the agent flies inside an envelope. |
+| [`docs/sim-setup.md`](docs/sim-setup.md) | Building ArduPilot and running the stack. |
+| [`docs/ASSETS.md`](docs/ASSETS.md) | Asset provenance and licences. |
+| [`docs/REPOSITORY_REVIEW.md`](docs/REPOSITORY_REVIEW.md) | Provenance, contract discrepancies between roots, and the adapters they require. |
+| [`docs/specs/`](docs/specs/) | The spec and user stories. |
 
-**Two runtimes currently coexist.** The ARGUS stack above (`hub/`, `console/`,
-`sim/`, `contracts/`) and the retrofit under `platform/` both implement the same
-demo against different site models, contracts, and simulators. See
-[`docs/BASIC_DEMO_PENDING.md`](docs/BASIC_DEMO_PENDING.md) for which one the basic
-demo runs on.
-
-## Platform commands
-
-Run platform commands from the platform root so existing relative paths remain valid:
+## Tests
 
 ```bash
-cd platform
-make test
-make build-ground
+make test                # or: uv run pytest -q
+cd console && pnpm build # TypeScript + Vite
 ```
 
-The root [CI workflow](.github/workflows/ci.yml) uses the relocated paths directly.
+The root [CI workflow](.github/workflows/ci.yml) currently covers `platform/` only; the
+ARGUS suites above are run by hand.
