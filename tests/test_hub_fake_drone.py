@@ -59,7 +59,7 @@ async def test_square_flight_plan_visits_every_waypoint_and_returns_home(hub: Hu
     assert "mission_started" in kinds and kinds.count("goto") == len(plan["waypoints"]) and "mission_complete" in kinds
 
 
-async def test_telemetry_streams_live_at_about_10hz(hub: HubHandle, live):
+async def test_telemetry_streams_live_at_about_20hz(hub: HubHandle, live):
     await hub.add_fake_drone("drone-1")
     states = []
     end = asyncio.get_running_loop().time() + 1.0
@@ -67,7 +67,7 @@ async def test_telemetry_streams_live_at_about_10hz(hub: HubHandle, live):
         ev = json.loads(await asyncio.wait_for(live.recv(), 1.0))
         if ev["type"] == "drone_state":
             states.append(ev["state"])
-    assert 6 <= len(states) <= 14, len(states)
+    assert 14 <= len(states) <= 26, len(states)  # fake Drones and Bridges stream at 20 Hz (TELEMETRY_HZ)
     assert all(s["drone_id"] == "drone-1" for s in states)
 
 
