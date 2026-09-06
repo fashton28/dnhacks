@@ -24,6 +24,17 @@
       }
     ]
   },
+  "probeTask": {
+    "taskId": "probe-V16",
+    "anomalyId": "fixture-south-anomaly",
+    "lookFor": "vehicle",
+    "question": "What is at the flagged change?",
+    "urgency": "immediate",
+    "priority": 0.8,
+    "rationale": "fixture-state probe",
+    "source": "scripted"
+  },
+  "probeRequestId": "probe-V16",
   "telemetry": {
     "sensors": {
       "lidar": "failed"

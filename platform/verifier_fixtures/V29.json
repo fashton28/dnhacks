@@ -32,6 +32,17 @@
       }
     ]
   },
+  "probeTask": {
+    "taskId": "probe-V29",
+    "anomalyId": "fixture-north-anomaly",
+    "lookFor": "vehicle",
+    "question": "What is at the flagged change?",
+    "urgency": "immediate",
+    "priority": 0.8,
+    "rationale": "fixture-state probe",
+    "source": "scripted"
+  },
+  "probeRequestId": "probe-V29",
   "telemetry": {
     "currentAltitudeM": 45,
     "vehicleId": "eis-1",

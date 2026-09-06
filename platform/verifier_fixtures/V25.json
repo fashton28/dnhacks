@@ -30,6 +30,17 @@
       }
     ]
   },
+  "probeTask": {
+    "taskId": "probe-V25",
+    "anomalyId": "fixture-east-anomaly",
+    "lookFor": "vehicle",
+    "question": "What is at the flagged change?",
+    "urgency": "immediate",
+    "priority": 0.8,
+    "rationale": "fixture-state probe",
+    "source": "scripted"
+  },
+  "probeRequestId": "probe-V25",
   "telemetry": {
     "anomaly": {
       "id": "fixture-east-anomaly",

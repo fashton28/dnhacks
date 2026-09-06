@@ -25,6 +25,17 @@
       }
     ]
   },
+  "probeTask": {
+    "taskId": "probe-V10",
+    "anomalyId": "fixture-dam-anomaly",
+    "lookFor": "vehicle",
+    "question": "What is at the flagged change?",
+    "urgency": "immediate",
+    "priority": 0.8,
+    "rationale": "fixture-state probe",
+    "source": "scripted"
+  },
+  "probeRequestId": "probe-V10",
   "telemetry": {
     "currentAltitudeM": 30,
     "anomaly": {

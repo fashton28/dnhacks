@@ -2,15 +2,20 @@
 
 The executable specification for the deterministic mission trust layer.
 
-There is no second implementation of the checks in this directory. The
-reference behaviour **is** `ground/planner/src/verifier.ts` — the module the
-planner CLI, the Electron host and the SITL gate all call. These files pin what
-it must decide, so a change in verdict shows up as a failing fixture instead of
-a surprise in flight.
+The behaviour these cases pin **is** `ground/planner/src/verifier.ts` — the
+module the planner CLI, the Electron host and the SITL gate all call. These
+files say what it must decide, so a change in verdict shows up as a failing
+fixture instead of a surprise in flight.
+
+Since Phase 4 there **is** a second implementation, and it is not in this
+directory: [`rails/`](../../rails/README.md) at the repo root is a Python
+ORACLE for the same rules, written from the ADR and the contract and importing
+nothing from `platform/`. Every case below is run through both and the answers
+compared — see [Parity](#parity).
 
 | File | What it is |
 |---|---|
-| `V01.json` … `V25.json`, `V29.json` … `V36.json` | One case each: a plan, a runtime context, and the verdict + failing checks the verifier must produce. |
+| `V01.json` … `V25.json`, `V29.json` … `V36.json` | One case each: a plan, a runtime context, the task its state is planned for, and the verdict + failing checks the verifier must produce. |
 | `site.fixture.json` | The site most cases verify against (`docs/SITE_CONTRACT.md` schema). |
 | `baseline_context.json` | The healthy runtime context each case starts from. |
 | `profiles.json` | Mission profiles, aliases and hard limits, mirrored by `ground/planner/src/policy.ts`. |
@@ -19,6 +24,9 @@ a surprise in flight.
 
 `profiles.json` and `range_model.json` are the reviewable source for
 `policy.ts`; `ground/planner/test/policy-parity.test.ts` fails if they drift.
+`rails/policy.py` mirrors the same two files a third time, and
+`ground/planner/test/parity.test.ts` fails if THAT drifts, because a drifted
+constant changes a verdict.
 
 **V26–V28 do not exist.** They are reserved for the cue-budget wave, whose
 `cue_budget` check has not landed. `ground/planner/test/verifier-fixtures.test.ts`
@@ -31,29 +39,42 @@ The verifier runs `CHECK_ORDER` — all twenty checks, in this order, every time
 including the ones a prior failure has already made moot (they report *why* they
 were not evaluated rather than silently passing):
 
-| # | Check | What it decides |
-|---|---|---|
-| 1 | `schema` | The plan is a well-formed, finite `MissionPlan`. |
-| 2 | `site_valid` | The site model's own geometry and policy fields hold. |
-| 3 | `nav_source` | New missions fly on GPS, never on `extnav`/`optflow`. |
-| 4 | `readiness` | Battery dispatch gates, sensor health, night thermal, LiDAR-vs-clutter. |
-| 5 | `wind` | Reported wind is within the attended limit. |
-| 6 | `rf_environment` | GNSS interference blocks dispatch without an operator override. |
-| 7 | `airspace` | A hostile drone in mission airspace is yielded to, never contested. |
-| 8 | `anomaly_proximity` | Some mission target actually looks at the cue. |
-| 9 | `altitude` | Every target sits in the site band ∩ the profile band. |
-| 10 | `speed` | Every leg is inside the profile cap and the 8 m/s hard cap. |
-| 11 | `standoff` | Every explicit orbit radius clears the profile and 3 m hard floors. |
-| 12 | `geofence` | Targets, orbit circumferences and complete legs stay contained. |
-| 13 | `nfz_transit` | Legs clear every buffered NFZ that applies at their lowest altitude. |
-| 14 | `nfz_orbit` | Orbit circumferences clear the buffer plus their own radius. |
-| 15 | `terminal` | Exactly one `rtl`, and it is last. |
-| 16 | `loiter` | Hold durations and orbit laps are bounded. |
-| 17 | `range` | Wind-adjusted flight time fits the live pack, 25 % reserve intact. |
-| 18 | `sortie` | Wind-adjusted flight time fits the sortie cap. |
-| — | *(`cue_budget`)* | **Reserved**, with V26–V28. Not implemented on this branch. |
-| 19 | `attended` | Unattended: anything outside `UNATTENDED_ENVELOPE` is `needs_operator`. |
-| 20 | `deconfliction` | 40 m lateral or 10 m stagger from every peer corridor; no shared orbit centre. |
+| # | Check | What it decides | Oracle reference | Pinned by |
+|---|---|---|---|---|
+| 1 | `schema` | The plan is a well-formed, finite `MissionPlan`. | `rails/schemas.py::validate_mission_plan` | V02, V18 |
+| 2 | `site_valid` | The site model's own geometry and policy fields hold. | `rails/verifier.py::check_site` | V17 |
+| 3 | `nav_source` | New missions fly on GPS, never on `extnav`/`optflow`. | `check_nav_source` | V03, V22 |
+| 4 | `readiness` | Battery dispatch gates, sensor health, night thermal, LiDAR-vs-clutter. | `check_readiness` | V15, V16, V24, V34 |
+| 5 | `wind` | Reported wind is within the attended limit. | `check_wind` | V04 |
+| 6 | `rf_environment` | GNSS interference blocks dispatch without an operator override; **no SDR is `unknown`, not clear**. | `check_rf_environment` | V19, V20, V22 |
+| 7 | `airspace` | A hostile drone in mission airspace is yielded to, never contested — **pre-flight, this refuses**. | `check_airspace` | V21 |
+| 8 | `anomaly_proximity` | Some mission target actually looks at the cue. | `check_anomaly_proximity` | V05 |
+| 9 | `altitude` | Every target sits in the site band ∩ the profile band. | `check_altitude` | V06, V13 |
+| 10 | `speed` | Every leg is inside the profile cap and the 8 m/s hard cap. | `check_speed` | V07 |
+| 11 | `standoff` | Every explicit orbit radius clears the profile and 3 m hard floors. | `check_standoff` | V08 |
+| 12 | `geofence` | Targets, orbit circumferences and complete legs stay contained. | `check_geofence` | V09, V25 |
+| 13 | `nfz_transit` | Legs clear every buffered NFZ that applies at their lowest altitude. | `check_nfz_transit` | V10 |
+| 14 | `nfz_orbit` | Orbit circumferences clear the buffer plus their own radius. | `check_nfz_orbit` | V11 |
+| 15 | `terminal` | Exactly one `rtl`, and it is last. | `check_terminal` | V12 |
+| 16 | `loiter` | Hold durations and orbit laps are bounded. | `check_loiter` | V23 |
+| 17 | `range` | Wind-adjusted flight time fits the live pack, 25 % reserve intact. | `check_range` | V14, V20 |
+| 18 | `sortie` | Wind-adjusted flight time fits the sortie cap. | `check_sortie` | V23 |
+| — | *(`cue_budget`)* | **Reserved**, with V26–V28. Not implemented on this branch. | — | — |
+| 19 | `attended` | Unattended: anything outside `UNATTENDED_ENVELOPE` is `needs_operator`. | `check_attended` | V32, V33, V34, V35 |
+| 20 | `deconfliction` | 40 m lateral or 10 m stagger from every peer corridor; no shared orbit centre. | `check_deconfliction` | V29, V30, V31 |
+
+Every row is checked twice per run: once by `verifier.ts` and once by the
+oracle's `rails/verifier.py`, over the same case. The check names, the verdict
+and `requiresOperator` must agree exactly (see [Parity](#parity)).
+
+**The in-flight half of rows 6 and 7 is not here, and cannot be.** The verifier
+is a PRE-FLIGHT gate: a hostile drone found before launch refuses (V21), and
+GNSS interference before launch needs an operator override (V19). What happens
+when either appears *after* takeoff — hold, then the operator chooses continue
+or RTL (ADR D14/D18) — belongs to the runtime envelope monitor, and is pinned
+by `rails/eval_envelope.py`'s recorded trajectories through
+`platform/companion/tests/test_envelope_parity.py`. A plan fixture has no
+timeline, so it cannot express "after takeoff".
 
 `attended` sits where the cue-budget wave will put `cue_budget` immediately
 before it: budget is about *whether* to spend a sortie, attendance about *who is
@@ -91,6 +112,34 @@ node verifier_fixtures/run_fixtures.mjs --json V10 # dump the Verification
 Both paths read the same JSON and assert the same things.
 `ground/planner/test/verifier-fixtures.test.ts` is the CI hookup.
 
+## Parity
+
+```bash
+python rails/eval_planner.py            # human summary, run from the repo root
+python rails/eval_planner.py --json     # the parity document
+python -m pytest rails/test_rails.py    # the oracle's own tests
+cd platform/ground/planner && npx vitest run test/parity.test.ts
+```
+
+`ground/planner/test/parity.test.ts` shells out to `rails/eval_planner.py
+--json` (interpreter from `EIS_PYTHON`, defaulting to the companion venv then
+`python3`/`python`), runs the same cases through `verifier.ts` and
+`deterministic.ts`, and compares, per case:
+
+| Compared | Why it is the parity surface |
+|---|---|
+| `verdict` | The decision itself. |
+| `requiresOperator` | `attended` failing, or the context's lure flag — the "a human looks first" answer, derived identically on both sides. |
+| non-pass check names | *Which* rule refused, not just that one did. |
+| corrected tool sequence | Args agree within **1 m / 1 s**: the same repair, not merely the same verdict. |
+| `planTrace` rule names | Which rules FIRED, in order — the planner's reasoning, without its geometry. |
+
+The oracle is the reference for `ground/planner`. **A parity failure is a bug
+in the TypeScript port, never a reason to edit the oracle afterwards.** If the
+oracle is provably wrong against the ADR or the contract it is corrected — but
+before the first green run, and the correction is recorded, because an oracle
+edited until it agrees proves nothing.
+
 ## Case format
 
 ```jsonc
@@ -102,6 +151,8 @@ Both paths read the same JSON and assert the same things.
   "site": "site.fixture.json",        // or "../site/site.stub.json" (V36)
   "siteOverride": { … },              // optional: patch the VALIDATED SiteModel
   "plan": { …MissionPlan… },
+  "probeTask": { …Task… },            // REQUIRED: the task this STATE is planned for
+  "probeRequestId": "probe-V10",      // REQUIRED: the requestId that plan carries
   "task": { "task": …, "anomaly": … },// optional: the input the plan came from
   "telemetry": { …VerificationContext patch… },
   "expected": {
@@ -123,6 +174,16 @@ every other key outright. It is the same JSON shape the planner CLI accepts as
 `siteOverride` patches the model *after* validation. `site.ts` would refuse
 V17's geofence outright; patching past the loader proves the verifier re-checks
 the geometry itself rather than trusting whoever loaded the file.
+
+`probeTask` and `probeRequestId` are the inputs the DETERMINISTIC PLANNER needs
+to be run against this case's runtime state — every case carries them, so the
+TypeScript planner and the `rails/` oracle read literally the same task instead
+of each constructing a probe of its own. Together with `site`, `siteOverride`
+and `telemetry` (which is where `mode`, `fleet`, `vehicleId`, `now` and
+`dispatchAt` live), that is the complete input set both implementations need:
+task, state, site, mode, fleet. Adding a case means adding these two fields
+too; `rails/eval_planner.py` refuses a case without them rather than inventing
+a task, because an invented input is not a fixture.
 
 A case carrying a `task` block declares that its `plan` is the DETERMINISTIC
 PLANNER's own output for that task, cue, site and context.
@@ -148,8 +209,8 @@ passes or an explicit `infeasible` — never something to correct.
 |---|---|
 | Nominal, with every legal edge at once | V01 |
 | Malformed tool / malformed coordinate | V02, V18 |
-| Invalid site geometry | V17 |
-| Navigation source, RF, hostile airspace | V03, V19, V21, V22 |
+| Invalid site geometry — `site_valid` refuses outright | V17 |
+| Navigation source; RF needing an operator override; hostile airspace refused pre-flight; GPS loss correlated with interference | V03, V19, V21, V22 |
 | Wind, anomaly proximity | V04, V05 |
 | Altitude band — above ceiling, below floor, edges legal | V06, V13, V01 |
 | Speed cap, standoff floor | V07, V08 |
@@ -163,6 +224,14 @@ passes or an explicit `infeasible` — never something to correct.
 | Unattended — in-envelope pass, survey refused, night without thermal | V32, V33, V34 |
 | Unattended — the lure flag becomes a rejection | V35 |
 | Deterministic planner output, verified without correction | V36 |
+| Every case's runtime STATE through the deterministic planner and the oracle | V01–V36 |
+
+Thirteen of the thirty-three states cannot be planned at all, and the set is
+asserted exactly rather than counted: **V03, V04, V09, V15, V16, V17, V19, V21,
+V22, V24, V31, V34, V35**. Each is a state the verifier would also have refused,
+so refusing earlier costs nothing and explains more. The other twenty produce a
+plan the verifier passes with no correction. Both implementations must agree on
+that split, on the reason, and on which rules fired.
 
 V14 and V20 are the same mission one second either side of the live-endurance
 range boundary: 455 s of reported endurance is refused, 456 s flies. They are
@@ -197,6 +266,17 @@ against `../site/site.stub.json` instead of `site.fixture.json`: the switchyard
 NFZ that forces a via-point on both the outbound and the return leg lives in the
 stub site, and re-drawing it here would have meant a second copy of the geometry
 the planner is being tested against.
+
+Phase 4 added `probeTask` / `probeRequestId` to every case and nothing else: no
+verdict, no failing-check list, no reason and no correction moved. The values
+are exactly the probe `ground/planner/test/deterministic.test.ts` already built
+in code, lifted into the data so the oracle and the port cannot diverge on
+their input. V19–V22 were reviewed against the Phase 4 brief's four behaviours
+and already covered them — RF needing an operator override (V19), a hostile
+drone refused pre-flight (V21), an unusable site model (V17), and GPS loss
+correlated with interference (V22) — so no case was added and no new verifier
+check was needed. The in-flight hold half of the hostile-drone rule is the
+envelope monitor's, not the verifier's; see the note under the check table.
 
 Adding `attended` and `deconfliction` to `CHECK_ORDER` changed exactly three
 existing cases — `V02`, `V17`, `V18` — and only their `failingChecks` lists.

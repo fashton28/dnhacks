@@ -220,6 +220,17 @@
       "generated_from": "fixture-V36"
     }
   },
+  "probeTask": {
+    "taskId": "probe-V36",
+    "anomalyId": "stub-east-fence-south",
+    "lookFor": "vehicle",
+    "question": "What is at the flagged change?",
+    "urgency": "immediate",
+    "priority": 0.8,
+    "rationale": "fixture-state probe",
+    "source": "scripted"
+  },
+  "probeRequestId": "probe-V36",
   "telemetry": {
     "anomaly": {
       "id": "stub-east-fence-south",
