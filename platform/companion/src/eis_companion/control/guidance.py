@@ -24,10 +24,28 @@ All outputs are clamped to Limits and low-pass smoothed. numpy + stdlib only.
 """
 from __future__ import annotations
 
+import math
 from typing import Optional, Tuple
 
 from ..types import Limits, TrackingState, VelocitySetpoint
 from .pid import PID
+
+
+def _usable_distance(est_distance: Optional[float]) -> bool:
+    """True only for a distance we may act on.
+
+    ``None`` means "no measurement"; so does NaN/Infinity. Treating them
+    differently is the whole of FM-07: every standoff guard below is a
+    comparison, and a comparison against NaN is False, so a non-finite
+    distance would slip past all three re-assertions and be clamped to
+    ``+max_speed`` -- a commanded full-speed approach through the standoff.
+    """
+    if est_distance is None:
+        return False
+    try:
+        return math.isfinite(float(est_distance))
+    except (TypeError, ValueError):
+        return False
 
 
 # Sign convention for image axes (normalised, top-left origin):
@@ -166,7 +184,7 @@ class Guidance:
         # After all PID math + clamps, guarantee we never command approach
         # inside / at / unknown-of the standoff. This is intentionally
         # redundant with _compute_vx so no future edit can silently break it.
-        if est_distance is None or est_distance <= limits.standoff:
+        if not _usable_distance(est_distance) or est_distance <= limits.standoff:
             if vx > 0.0:
                 vx = 0.0
 
@@ -177,7 +195,7 @@ class Guidance:
 
         # Smoothing could in principle nudge vx positive from a positive prev;
         # re-assert the hard standoff one final time on the *emitted* value.
-        if est_distance is None or est_distance <= limits.standoff:
+        if not _usable_distance(est_distance) or est_distance <= limits.standoff:
             if out.vx > 0.0:
                 out.vx = 0.0
         out.vx = _clamp(out.vx, -limits.max_speed, limits.max_speed)
@@ -196,12 +214,14 @@ class Guidance:
         Returns vx in m/s (positive = approach). Never positive when distance
         is unknown or at/inside standoff.
         """
-        if est_distance is None:
-            # Unknown distance: never approach. Hold (zero forward), let yaw/vz
-            # keep the target centred. PID gets a zero error so it unwinds.
+        if not _usable_distance(est_distance):
+            # Unknown (None) OR unusable (NaN/inf) distance: never approach.
+            # Hold (zero forward), let yaw/vz keep the target centred. PID gets
+            # a zero error so it unwinds instead of latching a non-finite state.
             self._vx_pid.update(0.0, dt)
             return 0.0
 
+        est_distance = float(est_distance)
         error = est_distance - limits.standoff  # >0 too far, <0 too close
         vx = self._vx_pid.update(error, dt)
 
@@ -223,6 +243,14 @@ class Guidance:
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
+    """Clamp to [lo, hi]; a NON-FINITE input collapses to 0.0, never to ``hi``.
+
+    ``max(lo, min(hi, NaN))`` returns ``hi`` under CPython, so the naive clamp
+    is a NaN-to-full-throttle amplifier (FM-06). Zero is the only safe answer
+    for a value we cannot order.
+    """
+    if not math.isfinite(v):
+        return 0.0
     if lo > hi:
         lo, hi = hi, lo
     return max(lo, min(hi, v))

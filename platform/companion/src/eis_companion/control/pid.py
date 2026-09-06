@@ -6,6 +6,7 @@ hardware-free and dependency-free so it unit-tests in isolation.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Optional
 
@@ -56,8 +57,19 @@ class PID:
             self.kd = float(kd)
 
     def update(self, error: float, dt: float) -> float:
-        """Advance the controller one step and return the clamped output."""
-        error = float(error)
+        """Advance the controller one step and return the clamped output.
+
+        A NON-FINITE error is refused outright: it is not integrated, it does
+        not become ``_prev_error``, and the output is 0.0. One NaN admitted
+        here latches in ``_integral`` and ``_prev_error`` for the life of the
+        controller, and the output clamp would render it as ``out_max`` (FM-07).
+        """
+        try:
+            error = float(error)
+        except (TypeError, ValueError):
+            return 0.0
+        if not math.isfinite(error) or not math.isfinite(float(dt)):
+            return 0.0
 
         # Proportional
         p = self.kp * error
@@ -93,7 +105,14 @@ class PID:
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
-    """Clamp v to [lo, hi]; tolerant if lo/hi are swapped."""
+    """Clamp v to [lo, hi]; tolerant if lo/hi are swapped.
+
+    A non-finite value clamps to 0.0, not to ``hi`` -- ``min(hi, NaN)`` returns
+    ``hi`` under CPython, which would turn an unusable number into the maximum
+    commanded output.
+    """
+    if not math.isfinite(v):
+        return 0.0
     if lo > hi:
         lo, hi = hi, lo
     return max(lo, min(hi, v))

@@ -50,6 +50,23 @@ except Exception:  # pragma: no cover - exercised only on a broken install
 # ==========================================================================
 MAX_SPEED_CAP: float = 8.0       # m/s -- the hard ceiling for max_speed
 MIN_STANDOFF_FLOOR: float = 3.0  # m  -- standoff may never be set below this
+# Standoff is a BAND, not a floor. An unbounded standoff is not "extra safe":
+# guidance servos on ``est_distance - standoff``, so a huge value commands
+# sustained full-speed RETREAT that the three standoff re-assertions cannot
+# catch (they only ever forbid POSITIVE vx), and it leaks into the advertised
+# capabilities envelope (FM-11).
+MAX_STANDOFF_CEIL_M: float = 50.0
+
+# --------------------------------------------------------------------------
+# Control-socket bind policy (FM-40). Every real client is on the vehicle
+# itself or reaches it over a point-to-point link, so the default bind is
+# LOOPBACK. Opening the socket to the network is an explicit, single-purpose
+# opt-in (network.host in YAML, or EIS_BIND_ALL=true) and it FORCES the
+# signed-command requirement on: a socket any host on the venue LAN can reach
+# is not one that may take unauthenticated arm/takeoff/executePlan frames.
+# --------------------------------------------------------------------------
+DEFAULT_CONTROL_HOST: str = "127.0.0.1"
+LOOPBACK_HOSTS: Tuple[str, ...] = ("127.0.0.1", "::1", "localhost")
 MAX_SORTIE_CAP_S: float = 480.0
 MIN_DISPATCH_SOC_PCT: float = 80.0
 MAX_CELL_IMBALANCE_V: float = 0.10
@@ -195,7 +212,7 @@ class DetectorConfig:
 @dataclass
 class NetworkConfig:
     """Control + video network ports / hosts."""
-    host: str = "0.0.0.0"          # bind address for the control WS server
+    host: str = DEFAULT_CONTROL_HOST   # bind address for the control WS server
     control_port: int = 8765       # control + telemetry WebSocket
     video_port: int = 8554         # RTSP port (mediamtx/GStreamer)
     webrtc_port: int = 8889        # mediamtx WebRTC/WHEP port
@@ -552,6 +569,7 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
         max_altitude=float(_g(lim_d, "max_altitude", 30.0)),
         standoff=float(_g(lim_d, "standoff", 5.0)),
         min_standoff=float(_g(lim_d, "min_standoff", 3.0)),
+        max_standoff=float(_g(lim_d, "max_standoff", MAX_STANDOFF_CEIL_M)),
         deadzone=float(_g(lim_d, "deadzone", 0.09)),
         manual_watchdog_ms=int(_g(lim_d, "manual_watchdog_ms", 500)),
         ground_link_timeout_ms=int(_g(lim_d, "ground_link_timeout_ms", 2000)),
@@ -586,7 +604,7 @@ def _from_yaml(raw: Dict[str, Any]) -> AppConfig:
 
     net_d = _section(raw, "network")
     network = NetworkConfig(
-        host=str(_g(net_d, "host", "0.0.0.0")),
+        host=str(_g(net_d, "host", DEFAULT_CONTROL_HOST)),
         control_port=int(_g(net_d, "control_port", 8765)),
         video_port=int(_g(net_d, "video_port", 8554)),
         webrtc_port=int(_g(net_d, "webrtc_port", 8889)),
@@ -753,6 +771,14 @@ def _apply_env_overrides(cfg: AppConfig) -> None:
         cfg.sitl = b
 
     # network
+    s = _env("EIS_CONTROL_HOST")
+    if s is not None:
+        cfg.network.host = s
+    b = _env_bool("EIS_BIND_ALL")
+    if b is not None:
+        # The single, explicit opt-in that opens the control socket beyond
+        # loopback. _enforce_bind_policy then forces signed commands on.
+        cfg.network.host = "0.0.0.0" if b else DEFAULT_CONTROL_HOST
     p = _env_int("EIS_CONTROL_PORT")
     if p is not None:
         cfg.network.control_port = p
@@ -933,10 +959,14 @@ def _enforce_safety_floor(cfg: AppConfig) -> None:
     """
     L = cfg.limits
 
-    # standoff floor (never below the hard min, and the floor itself never below
-    # the system-wide MIN_STANDOFF_FLOOR)
-    L.min_standoff = max(MIN_STANDOFF_FLOOR, float(L.min_standoff))
-    L.standoff = max(L.min_standoff, float(L.standoff))
+    # standoff BAND (never below the hard min, and the floor itself never below
+    # the system-wide MIN_STANDOFF_FLOOR; never above the hard ceiling)
+    L.min_standoff = max(MIN_STANDOFF_FLOOR, _safe(L.min_standoff, MIN_STANDOFF_FLOOR))
+    L.max_standoff = max(
+        L.min_standoff,
+        min(MAX_STANDOFF_CEIL_M, _safe(L.max_standoff, MAX_STANDOFF_CEIL_M)),
+    )
+    L.standoff = max(L.min_standoff, min(L.max_standoff, _safe(L.standoff, L.min_standoff)))
 
     # speed band: clamp the configurable cap to the hard ceiling, keep min sane
     L.max_speed = max(0.1, min(float(L.max_speed), MAX_SPEED_CAP))
@@ -1006,6 +1036,26 @@ def _enforce_safety_floor(cfg: AppConfig) -> None:
     cfg.security.session_key_env = (
         str(cfg.security.session_key_env).strip() or "EIS_SESSION_KEY"
     )
+    _enforce_bind_policy(cfg)
+
+
+def is_loopback_host(host: str) -> bool:
+    """True when ``host`` binds the socket to this machine only."""
+    return str(host).strip() in LOOPBACK_HOSTS
+
+
+def _enforce_bind_policy(cfg: AppConfig) -> None:
+    """A non-loopback control socket REQUIRES signed commands (FM-40).
+
+    The two settings are one decision, so they are resolved together rather
+    than left for a deployer to get right twice. Widening the bind is allowed
+    -- some deployments genuinely need it -- but it can only be done together
+    with authentication, and it can never silently arm the SITL test hooks.
+    """
+    host = str(cfg.network.host).strip() or DEFAULT_CONTROL_HOST
+    cfg.network.host = host
+    if not is_loopback_host(host):
+        cfg.security.require_signed_commands = True
 
 
 def _safe(value: Any, fallback: float) -> float:
@@ -1114,7 +1164,11 @@ __all__ = [
     "GimbalConfig",
     "SecurityConfig",
     "load_config",
+    "is_loopback_host",
+    "DEFAULT_CONTROL_HOST",
+    "LOOPBACK_HOSTS",
     "MAX_SPEED_CAP",
+    "MAX_STANDOFF_CEIL_M",
     "MIN_STANDOFF_FLOOR",
     "PROFILE_SPEED_FALLBACK",
     "ENVELOPE_BREACH_MULTIPLE_CAP",

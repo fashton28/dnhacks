@@ -44,10 +44,24 @@ PILOT_SPEED_UP   150      # cm/s manual/pilot climb
 PILOT_ACCEL_Z    250      # cm/s/s vertical accel
 
 # --- Geofence (FC-side backstop for standoff + altitude caps) ---------------
+# THESE NUMBERS MUST CONTAIN THE SITE, NOT THE LAUNCH PAD.
+# The previous values (radius 60 m, alt 30 m) were the single-vehicle demo's
+# numbers and were never reconciled with the Komati site the demo actually
+# flies: a ~720 x 880 m perimeter with a 20-80 m altitude band. The first
+# outbound leg breached the 60 m circle and any leg above 30 m breached the
+# altitude fence, so ArduPilot RTL'd mid-demo under FIRMWARE authority --
+# indistinguishable, on stage, from a real safety event (FM-155).
+#
+# These are a BOOTSTRAP. The companion re-derives FENCE_* from its own Limits
+# and the loaded site perimeter and pushes them at connect
+# (Vehicle.apply_failsafe_params), then uploads the site polygon and switches
+# FENCE_TYPE to 5 (alt + polygon). The polygon is the real containment; the
+# circle below is the fallback that applies until that succeeds, and it must
+# not be tighter than the site.
 FENCE_ENABLE     1        # enable fence
-FENCE_TYPE       3        # 1=alt, 2=circle, 3=alt+circle
-FENCE_ALT_MAX    30       # m  -- matches Limits.max_altitude / DEFAULTS.maxAltitude
-FENCE_RADIUS     60       # m  -- matches DEFAULTS.geofenceRadius
+FENCE_TYPE       3        # 1=alt, 2=circle, 3=alt+circle (companion -> 5 = alt+polygon)
+FENCE_ALT_MAX    80       # m  -- the site alt_band max (site/site.stub.json)
+FENCE_RADIUS     1000     # m  -- contains the ~720 x 880 m Komati perimeter
 FENCE_MARGIN     2        # m  -- breach margin
 FENCE_ACTION     1        # 1 = RTL or LAND on breach (safe)
 
@@ -57,8 +71,13 @@ ARMING_CHECK     1        # 1 = all checks enabled (safe default)
 
 # --- Battery failsafe --------------------------------------------------------
 BATT_MONITOR     4        # analog voltage+current
-BATT_LOW_VOLT    14.0     # V  (4S low warning)
-BATT_CRT_VOLT    13.2     # V  (4S critical)
+# NOTE: these are 4S literals; SITL simulates a 12.6 V pack, which
+# companion/config/sitl.yaml reads as 3S. The companion DERIVES both
+# thresholds from its configured cell_count and overwrites them at connect
+# (mavlink.safety.failsafe_param_map), so the firmware and the companion
+# always describe the same pack instead of silently disagreeing (FM-156).
+BATT_LOW_VOLT    14.0     # V  (4S low warning; companion re-derives per pack)
+BATT_CRT_VOLT    13.2     # V  (4S critical; companion re-derives per pack)
 BATT_LOW_MAH     0
 BATT_CRT_MAH     0
 BATT_FS_LOW_ACT  2        # low battery -> RTL

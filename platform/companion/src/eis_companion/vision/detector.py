@@ -53,6 +53,18 @@ log = logging.getLogger(__name__)
 # COCO class 0 = person
 _PERSON_CLASS_ID = 0
 
+#: The ONLY object class this backend can produce. Published as a capability so
+#: nothing upstream can assume a vehicle/structure detection is merely absent
+#: when it is structurally impossible (FM-98).
+SUPPORTED_CLASSES: tuple[str, ...] = ("person",)
+
+#: Default confidence gate. It MUST stay at or below the lowest confidence any
+#: scripted staging stub emits (vision/staging.py STUB_MIN_CONFIDENCE), or a
+#: cue the offline demo shows is mathematically unreachable once the real
+#: backend is installed and no tuning transfers between the two (FM-121).
+#: tests/test_staging.py pins the relationship.
+DEFAULT_CONF_THRESHOLD: float = 0.30
+
 # ---------------------------------------------------------------------------
 # Lazy imports -- raise a helpful ImportError if ultralytics is missing
 # ---------------------------------------------------------------------------
@@ -82,6 +94,10 @@ def _require_ultralytics() -> Any:
 class PersonDetector:
     """YOLO-based single-class person detector.
 
+    Declares ``supported_classes`` so callers can tell "this backend found
+    nothing" apart from "this backend cannot express what you asked about"
+    (FM-98). A backend that declares nothing is treated as unrestricted.
+
     Parameters
     ----------
     engine_path:
@@ -91,7 +107,8 @@ class PersonDetector:
         Path to a ``.pt`` weights file.  Overrides ``EIS_MODEL_PATH`` env var.
         Defaults to ``yolo11n.pt`` (ultralytics auto-downloads on first use).
     conf_threshold:
-        Minimum detector confidence to include a detection.  Default 0.45.
+        Minimum detector confidence to include a detection.
+        Default ``DEFAULT_CONF_THRESHOLD``.
     device:
         PyTorch device string, e.g. ``'cuda:0'`` (default) or ``'cpu'``.
         ``'cuda:0'`` is required for TensorRT engines.
@@ -103,15 +120,29 @@ class PersonDetector:
         files because the precision is baked into the engine at export time.
     """
 
+    #: The object classes this backend can produce (see SUPPORTED_CLASSES).
+    supported_classes: tuple[str, ...] = SUPPORTED_CLASSES
+
     def __init__(
         self,
         engine_path: Optional[str] = None,
         model_path: Optional[str] = None,
-        conf_threshold: float = 0.45,
+        conf_threshold: float = DEFAULT_CONF_THRESHOLD,
         device: str = "cuda:0",
         imgsz: int = 640,
         half: bool = True,
+        *,
+        conf: Optional[float] = None,
     ) -> None:
+        # ``conf`` is an accepted ALIAS for conf_threshold. The orchestrator
+        # called PersonDetector(conf=...) against a parameter named
+        # conf_threshold, so every real-camera build raised TypeError and the
+        # blanket except reported it as "no hardware" -- perception was
+        # silently disabled for the whole flight (FM-101). The call site is
+        # fixed; the alias means the same mistake cannot be fatal again.
+        if conf is not None:
+            conf_threshold = conf
+
         # Resolve model path: constructor arg > env var > default
         resolved_engine = (
             engine_path
@@ -130,6 +161,10 @@ class PersonDetector:
         self._half = half
         self._model: Any = None
         self.last_inference_ms: float = 0.0   # updated every call to detect()
+        #: True when the LAST detect() call failed. An empty list from a failed
+        #: inference is NOT a valid empty frame, and the caller has to be able
+        #: to tell the two apart (FM-100).
+        self.last_inference_failed: bool = False
 
         # ultralytics raises ImportError here if not installed (propagates up)
         YOLO = _require_ultralytics()
@@ -170,8 +205,10 @@ class PersonDetector:
             confidence in [0, 1], and a timestamp (``time.time()``).
         """
         if frame is None or frame.size == 0:
+            self.last_inference_failed = True
             return []
 
+        self.last_inference_failed = False
         t0 = time.perf_counter()
         try:
             results = self._model.predict(
@@ -185,6 +222,10 @@ class PersonDetector:
             )
         except Exception as exc:
             log.error("PersonDetector.detect() inference failed: %s", exc)
+            # A failed inference is "no observation", not "a valid frame with
+            # nothing in it" -- the two support opposite incident verdicts
+            # (FAILURE_MODES observation-state invariant / FM-100).
+            self.last_inference_failed = True
             return []
         finally:
             self.last_inference_ms = (time.perf_counter() - t0) * 1000.0

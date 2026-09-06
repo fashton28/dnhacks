@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional, Set, Union
@@ -63,9 +64,69 @@ PresenceHook = Callable[[int], Union[None, Awaitable[None]]]
 #: attendance-mode changes, and escalations.
 _AUDITED_TYPES = frozenset({"healthEvent", "mode", "escalation"})
 
+#: Authorization hook: called for EVERY inbound frame BEFORE it counts as
+#: ground liveness and before it reaches any handler. Returns "" to accept, or
+#: a refusal reason. This is the seam the signed-command layer plugs into, so
+#: no wire message can reach the orchestrator unauthorized (FM-40).
+AuthorizeHook = Callable[[Dict[str, Any]], Union[str, Awaitable[str]]]
+
+#: Loopback addresses. Binding anywhere else exposes the control socket to the
+#: venue LAN, which is what makes signing mandatory rather than optional.
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+#: Largest inbound frame we will parse. The websockets default is 1 MiB; a
+#: mission plan is a few KiB. Bounding it explicitly means one client cannot
+#: make the companion buffer a megabyte per frame (FM-112).
+DEFAULT_MAX_FRAME_BYTES = 262_144
+
+#: How long one client may take to accept a broadcast before it is dropped as
+#: a stalled reader. The websockets ``max_queue`` bounds the INCOMING queue --
+#: the opposite direction from the backpressure the docs claimed (FM-112).
+DEFAULT_SEND_TIMEOUT_S = 2.0
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _reject_constant(token: str):
+    """``json.loads`` hook: refuse the bare NaN/Infinity literals.
+
+    Python's JSON parser accepts ``NaN``, ``Infinity`` and ``-Infinity`` by
+    default. Those tokens are not legal JSON, and a non-finite stick axis or
+    setpoint is a full-scale command once it meets a naive clamp (FM-05). The
+    frame is rejected at the door rather than sanitised in ten places.
+    """
+    raise ValueError(f"non-finite JSON literal {token!r} is not accepted")
+
+
+def _finite_json(value: Any) -> Any:
+    """Recursively replace non-finite floats with ``None`` for the wire.
+
+    ``json.dumps`` emits bare ``NaN``/``Infinity`` by default, which
+    ``JSON.parse`` in the renderer rejects -- the ground silently loses the
+    whole frame (FM-36). ``None`` is a value the contract's optional fields
+    already tolerate, and a missing number is honest about a value we do not
+    have.
+    """
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _finite_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite_json(v) for v in value]
+    return value
+
+
+def _dumps(message: Dict[str, Any]) -> str:
+    """Serialise one outbound frame, guaranteeing parseable JSON."""
+    try:
+        return json.dumps(message, separators=(",", ":"), allow_nan=False)
+    except (ValueError, TypeError):
+        return json.dumps(
+            _finite_json(message), separators=(",", ":"), allow_nan=False,
+            default=str,
+        )
 
 
 class ApiServer:
@@ -73,7 +134,11 @@ class ApiServer:
 
     def __init__(
         self,
-        host: str = "0.0.0.0",
+        # LOOPBACK BY DEFAULT (FM-40). This socket takes arm / takeoff /
+        # executePlan / emergencyStop; binding it wider is an explicit config
+        # decision that also forces signed commands on
+        # (config._enforce_bind_policy).
+        host: str = "127.0.0.1",
         port: int = 8765,
         *,
         command_handler: Optional[CommandHandler] = None,
@@ -89,6 +154,9 @@ class ApiServer:
         vehicle_id: str = "eis-1",
         audit_path: Optional[str] = None,
         max_queue: int = 32,
+        authorize_hook: Optional[AuthorizeHook] = None,
+        max_frame_bytes: int = DEFAULT_MAX_FRAME_BYTES,
+        send_timeout_s: float = DEFAULT_SEND_TIMEOUT_S,
     ) -> None:
         """
         Args:
@@ -120,6 +188,13 @@ class ApiServer:
         self._chain = _build_chain(self._audit_path)
         self._load_audit()
         self._max_queue = max_queue
+        self._authorize_hook = authorize_hook
+        self._max_frame_bytes = max(1024, int(max_frame_bytes))
+        self._send_timeout_s = max(0.05, float(send_timeout_s))
+        #: Broadcasts dropped because a client would not accept them. Surfaced
+        #: so a stalled renderer is observable rather than silent (FM-112).
+        self.dropped_clients: int = 0
+        self.dropped_frames: int = 0
 
         self._clients: Set[WebSocketServerProtocol] = set()
         self._server: Optional[Any] = None
@@ -153,6 +228,11 @@ class ApiServer:
         return _now_ms() - self._last_inbound_ms
 
     # ---- lifecycle --------------------------------------------------------
+    @property
+    def loopback_only(self) -> bool:
+        """True when the socket is bound to a loopback address only."""
+        return str(self.host).strip() in LOOPBACK_HOSTS
+
     async def start(self) -> None:
         """Start serving. Idempotent-ish: starts the websockets server once."""
         self._loop = asyncio.get_running_loop()
@@ -163,8 +243,18 @@ class ApiServer:
             ping_interval=20,
             ping_timeout=20,
             max_queue=self._max_queue,
+            # Bounds the INBOUND frame size. max_queue bounds the inbound
+            # QUEUE; neither bounds the outbound direction, which is handled
+            # by the per-send timeout in broadcast() (FM-112).
+            max_size=self._max_frame_bytes,
         )
-        log.info("control WS listening on ws://%s:%d", self.host, self.port)
+        if self.loopback_only:
+            log.info("control WS listening on ws://%s:%d (loopback)", self.host, self.port)
+        else:
+            log.warning(
+                "control WS listening on ws://%s:%d -- NOT loopback: every "
+                "inbound frame must be signed", self.host, self.port,
+            )
 
     async def stop(self) -> None:
         """Stop serving and close all client connections."""
@@ -221,7 +311,10 @@ class ApiServer:
 
     async def _on_message(self, ws: WebSocketServerProtocol, raw: Any) -> None:
         try:
-            msg = json.loads(raw)
+            # parse_constant refuses the bare NaN/Infinity literals Python's
+            # JSON parser otherwise accepts: a non-finite axis is a full-scale
+            # command once it meets a clamp (FM-05).
+            msg = json.loads(raw, parse_constant=_reject_constant)
         except (ValueError, TypeError):
             await self._send(ws, _status_text("warning", "ignored malformed JSON frame", self.vehicle_id))
             return
@@ -240,7 +333,17 @@ class ApiServer:
             )
             return
 
-        # Only a validated frame for this vehicle counts as ground liveness.
+        # AUTHORIZATION runs before liveness and before any handler. An
+        # unauthorized frame must not feed the ground-link deadman either:
+        # otherwise any host on the venue LAN could hold the watchdog open
+        # while the real operator's link is down (FM-40).
+        refusal = await self._authorize(msg)
+        if refusal:
+            await self._send(ws, _status_text("warning", refusal, self.vehicle_id))
+            return
+
+        # Only a validated, authorized frame for this vehicle counts as
+        # ground liveness.
         ts = _now_ms()
         self._last_inbound_ms = ts
         if self._heartbeat_hook is not None:
@@ -268,6 +371,25 @@ class ApiServer:
         else:
             # Unknown / ping / heartbeat frames: counted for liveness, ignored.
             log.debug("ignoring inbound frame type=%r", mtype)
+
+    async def _authorize(self, msg: Dict[str, Any]) -> str:
+        """Run the signed-command layer over one inbound frame.
+
+        Returns "" to accept, or the refusal reason. A hook that RAISES is a
+        refusal, not a pass: an authorizer we cannot run is not an authorizer
+        that said yes.
+        """
+        hook = self._authorize_hook
+        if hook is None:
+            return ""
+        try:
+            result = hook(msg)
+            if asyncio.iscoroutine(result):
+                result = await result
+        except Exception as exc:
+            log.exception("authorize hook raised")
+            return f"frame refused: authorization failed ({exc})"
+        return str(result or "")
 
     async def _dispatch_command(self, msg: Dict[str, Any]) -> None:
         """Route a command to the handler and broadcast its CommandAck."""
@@ -344,15 +466,26 @@ class ApiServer:
             self._persist_audit(message)
         if not self._clients:
             return
-        data = json.dumps(message, separators=(",", ":"))
+        data = _dumps(message)
         dead: Set[WebSocketServerProtocol] = set()
         # snapshot to avoid mutation during iteration
         for ws in list(self._clients):
             try:
-                await ws.send(data)
+                # A stalled reader must not backpressure the telemetry pump:
+                # the send is bounded and the client is evicted, not queued
+                # unboundedly inside the companion (FM-112).
+                await asyncio.wait_for(ws.send(data), timeout=self._send_timeout_s)
+            except asyncio.TimeoutError:
+                self.dropped_frames += 1
+                log.warning(
+                    "dropping stalled ground client: send blocked > %.1fs",
+                    self._send_timeout_s,
+                )
+                dead.add(ws)
             except Exception:
                 dead.add(ws)
         for ws in dead:
+            self.dropped_clients += 1
             self._clients.discard(ws)
             try:
                 await ws.close()
@@ -361,7 +494,9 @@ class ApiServer:
 
     async def _send(self, ws: WebSocketServerProtocol, message: Dict[str, Any]) -> None:
         try:
-            await ws.send(json.dumps(message, separators=(",", ":")))
+            await asyncio.wait_for(
+                ws.send(_dumps(message)), timeout=self._send_timeout_s
+            )
         except Exception:
             self._clients.discard(ws)
 

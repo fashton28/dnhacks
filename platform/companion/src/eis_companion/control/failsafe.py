@@ -17,6 +17,11 @@ class FailsafeSignals:
     battery_should_rtl: bool = False
     sortie_should_rtl: bool = False
     datalink_lost: bool = False
+    #: The FLIGHT-CONTROLLER link, not the ground link. Distinct rails, distinct
+    #: failures: with MAVLink dead the companion cannot command anything, so
+    #: the honest state is a hold that says the telemetry is last-known rather
+    #: than a silent stream of re-stamped cache (FM-08).
+    fc_link_lost: bool = False
     planner_heartbeat_lost: bool = False
     gps_healthy: bool = True
     rf_interference_recent: bool = False
@@ -69,6 +74,13 @@ def decide(signals: FailsafeSignals) -> FailsafeDecision:
     # geofence margin is a boundary with consequences outside the aircraft.
     if s.airborne and s.envelope_rtl:
         return FailsafeDecision("rtl", "envelope breach: containment", "companion")
+
+    # No FC link means no commanded motion is reaching the aircraft at all and
+    # every telemetry rail is last-known. Report it rather than flying on cache.
+    if s.fc_link_lost:
+        return FailsafeDecision(
+            "hold", "flight controller link lost; telemetry is stale", "companion"
+        )
 
     if not s.site_valid:
         return FailsafeDecision("refuse", "site model invalid", "companion")

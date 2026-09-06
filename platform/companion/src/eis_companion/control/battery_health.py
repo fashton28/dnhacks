@@ -30,12 +30,22 @@ class BatteryPolicy:
     charge_min_gain_pct: float = 0.5
     require_cell_telemetry: bool = False
     require_temperature_telemetry: bool = True
+    #: Maximum age of the pack telemetry before it stops counting as a
+    #: measurement. A frozen BATTERY_STATUS reads as a perfectly healthy pack
+    #: forever: the reasons list tests ABSENCE (voltage <= 0, NaN temperature,
+    #: too few cells) and a stale-but-populated frame passes all three, while
+    #: the "SoC never increases in flight" rule is satisfied vacuously by an
+    #: estimate that never moves (FM-19).
+    batt_max_age_s: float = 5.0
 
 
 @dataclass(frozen=True)
 class BatterySample:
     voltage_v: float
-    current_a: float
+    #: Pack current in amps, or ``None`` when the FC reports "not measured"
+    #: (MAVLink current_battery == -1). ``None`` is NOT 0 A: an unmeasured
+    #: current used to freeze the coulomb integrator at the last healthy SoC.
+    current_a: Optional[float]
     temp_c: float
     reported_soc_pct: Optional[float] = None
     cell_voltages_v: Sequence[float] = ()
@@ -46,6 +56,10 @@ class BatterySample:
     charge_requested: bool = False
     pack_fault: str = ""
     timestamp_s: float = 0.0
+    #: Seconds since this pack telemetry was actually received. ``inf`` means
+    #: "never" and anything above ``BatteryPolicy.batt_max_age_s`` is a dead
+    #: sensor, not a healthy pack (FM-19).
+    age_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -159,9 +173,25 @@ class BatteryHealth:
         dt = 0.0 if self._last_ts is None else max(0.0, ts - self._last_ts)
         self._last_ts = ts
 
+        # --- telemetry freshness (FM-19) ------------------------------------
+        # A stale frame is not a measurement. Age is measured at the MAVLink
+        # cache, so "the pack stopped talking" is distinguishable from "the
+        # pack said 0 A".
+        try:
+            age_s = float(sample.age_s)
+        except (TypeError, ValueError):
+            age_s = math.inf
+        stale = not math.isfinite(age_s) or age_s > max(0.0, p.batt_max_age_s)
+        current_known = (
+            sample.current_a is not None
+            and math.isfinite(float(sample.current_a))
+            and not stale
+        )
+        current = float(sample.current_a) if current_known else 0.0
+
         v_soc = voltage_soc_pct(
             sample.voltage_v,
-            sample.current_a,
+            current,
             cell_count=p.cell_count,
             internal_resistance_ohm=p.internal_resistance_ohm,
         )
@@ -173,7 +203,13 @@ class BatteryHealth:
 
         # Coulomb integration is authoritative between trusted anchors.
         capacity_as = max(1.0, p.capacity_mah / 1000.0 * 3600.0)
-        integrated = self._soc - sample.current_a * dt / capacity_as * 100.0
+        if current_known:
+            integrated = self._soc - current * dt / capacity_as * 100.0
+        else:
+            # No usable current: do NOT pretend the pack drew nothing. Leave
+            # the integrator where it is and let the staleness fault below
+            # carry the decision.
+            integrated = self._soc
         integrated = clamp(integrated, 0.0, 100.0)
 
         degraded = abs(integrated - v_soc) > p.soc_divergence_max_pct
@@ -185,11 +221,11 @@ class BatteryHealth:
                 candidates.append(v_soc)
             # A flight estimate never increases, including noisy telemetry.
             self._soc = min(self._soc, *candidates)
-        elif abs(sample.current_a) <= p.charge_plateau_current_a:
+        elif current_known and abs(current) <= p.charge_plateau_current_a:
             # Re-anchor to OCV only while disarmed under low load.
             anchor = v_soc if reported is None else min(reported, v_soc) if degraded else reported
             self._soc = clamp(anchor, 0.0, 100.0)
-        elif sample.external_power and sample.current_a < 0.0:
+        elif sample.external_power and current_known and current < 0.0:
             # During charging, allow monotonic integration/reported progress.
             self._soc = max(self._soc, integrated, reported or 0.0)
         else:
@@ -197,6 +233,15 @@ class BatteryHealth:
 
         delta = cell_delta_v(sample.cell_voltages_v)
         new_fault = sample.pack_fault.strip()
+        if stale:
+            # Latch a FAULT, not merely a readiness reason: readiness is a
+            # pre-arm gate that in-flight code does not consult, so a pack
+            # sensor that dies after takeoff would otherwise never reach the
+            # failsafe ladder (FM-19). battery_fault airborne -> rtl.
+            new_fault = new_fault or (
+                f"battery telemetry stale ({age_s:.1f} s > {p.batt_max_age_s:.1f} s)"
+                if math.isfinite(age_s) else "battery telemetry never received"
+            )
         if delta > p.cell_imbalance_max_v:
             new_fault = new_fault or f"cell imbalance {delta:.3f} V"
         if sample.temp_c > p.batt_temp_max_c:
@@ -204,11 +249,18 @@ class BatteryHealth:
         if new_fault:
             self._fault_latched = new_fault
 
-        charge_state, event = self._charge_state(sample, ts)
+        charge_state, event = self._charge_state(sample, ts, current, current_known)
         if self._fault_latched:
             charge_state = "fault"
 
         reasons = []
+        if stale:
+            reasons.append(
+                f"battery telemetry stale ({age_s:.1f} s)"
+                if math.isfinite(age_s) else "battery telemetry unavailable"
+            )
+        elif not current_known:
+            reasons.append("battery current unavailable")
         if sample.voltage_v <= 0.0 or not math.isfinite(sample.voltage_v):
             reasons.append("battery voltage unavailable")
         if p.require_temperature_telemetry and not math.isfinite(sample.temp_c):
@@ -242,15 +294,15 @@ class BatteryHealth:
             sample.airborne and self._fault_latched
         ))
         remaining = p.nominal_endurance_s * max(0.0, self._soc - p.reserve_pct) / 100.0
-        if sample.current_a > 0.1:
+        if current_known and current > 0.1:
             usable_ah = p.capacity_mah / 1000.0 * max(0.0, self._soc - p.reserve_pct) / 100.0
-            remaining = min(remaining, usable_ah / sample.current_a * 3600.0)
-        eta = self._eta_ready(sample, charge_state)
+            remaining = min(remaining, usable_ah / current * 3600.0)
+        eta = self._eta_ready(sample, charge_state, current, current_known)
         return BatterySnapshot(
             soc_pct=clamp(self._soc, 0.0, 100.0),
             voltage_soc_pct=v_soc,
             voltage_v=max(0.0, float(sample.voltage_v)),
-            current_a=float(sample.current_a),
+            current_a=float(current),
             cell_delta_v=delta,
             temp_c=float(sample.temp_c) if math.isfinite(sample.temp_c) else -1.0,
             remaining_s=remaining,
@@ -269,14 +321,25 @@ class BatteryHealth:
             event=event,
         )
 
-    def _charge_state(self, sample: BatterySample, ts: float) -> tuple[str, str]:
+    def _charge_state(
+        self,
+        sample: BatterySample,
+        ts: float,
+        current: float,
+        current_known: bool,
+    ) -> tuple[str, str]:
         p = self.policy
+        if not current_known:
+            # Charge state is a current-driven judgement; with no measured
+            # current there is nothing to judge.
+            self._reset_charge_windows()
+            return "unknown", ""
         if sample.airborne or sample.armed:
             self._reset_charge_windows()
             return "discharging", ""
         # A landed pack at a verified full SoC and plateau current is ready
         # even when the charger does not expose an external-power bit.
-        if self._soc >= p.charge_full_soc_pct and abs(sample.current_a) <= p.charge_plateau_current_a:
+        if self._soc >= p.charge_full_soc_pct and abs(current) <= p.charge_plateau_current_a:
             if self._full_window_ts is None:
                 self._full_window_ts = ts
             if ts - self._full_window_ts >= p.charge_confirm_s:
@@ -302,7 +365,7 @@ class BatteryHealth:
             self._charge_window_ts = ts
             self._charge_window_soc = self._soc
 
-        if self._soc >= p.charge_full_soc_pct and abs(sample.current_a) <= p.charge_plateau_current_a:
+        if self._soc >= p.charge_full_soc_pct and abs(current) <= p.charge_plateau_current_a:
             if self._full_window_ts is None:
                 self._full_window_ts = ts
             if ts - self._full_window_ts >= p.charge_confirm_s:
@@ -311,7 +374,7 @@ class BatteryHealth:
         else:
             self._full_window_ts = None
 
-        if sample.current_a <= -p.charge_current_min_a and age >= p.charge_confirm_s and gain > 0.0:
+        if current <= -p.charge_current_min_a and age >= p.charge_confirm_s and gain > 0.0:
             self._charge_stalled = False
             return "charging", ""
         return "unknown", ""
@@ -325,15 +388,21 @@ class BatteryHealth:
         start = self._sortie_start_ts if self._sortie_start_ts is not None else ts
         return max(0.0, ts - start)
 
-    def _eta_ready(self, sample: BatterySample, charge_state: str) -> float:
+    def _eta_ready(
+        self,
+        sample: BatterySample,
+        charge_state: str,
+        current: float,
+        current_known: bool,
+    ) -> float:
         if charge_state == "charged" and self._soc >= self.policy.dispatch_min_soc_pct:
             return 0.0
-        if not (sample.external_power and sample.current_a < 0.0):
+        if not (sample.external_power and current_known and current < 0.0):
             return -1.0
         capacity_ah = max(0.001, self.policy.capacity_mah / 1000.0)
         target = max(self.policy.dispatch_min_soc_pct, self.policy.charge_full_soc_pct)
         missing_ah = capacity_ah * max(0.0, target - self._soc) / 100.0
-        return missing_ah / max(0.01, -sample.current_a) * 3600.0
+        return missing_ah / max(0.01, -current) * 3600.0
 
     def _reset_charge_windows(self) -> None:
         self._charge_window_ts = None
