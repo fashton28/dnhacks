@@ -28,6 +28,22 @@ _Avoid_: satellite layer (pitch language; the demo imagery is a simulated overhe
 **Triage Agent**:
 The LLM that reads a Detection plus Site context and emits a MissionSpec. It states intent and judgment; it never computes waypoints.
 
+**Triage decision**:
+The Triage Agent's first output for a Detection, made before any plan is requested: dispatch, log only, or ignore, with the Zone it reasoned from and a rationale.
+A log-only or ignore decision ends the Detection in an Incident Report without a flight.
+_Avoid_: pre-triage (implementation name for the same step), screening
+
+**Inspection**:
+What the Triage Agent does while a Drone holds at an on-station waypoint: a bounded sequence of Agent Actions (aim the camera, switch vision mode, zoom, capture, small repositions) ending in a summary and a threat assessment.
+The approved FlightPlan is not changed by an Inspection; every reposition is checked by the Safety Validator and bounded to a small radius around the approved waypoint.
+
+**Agent Action**:
+One tool call the Triage Agent makes during an Inspection, with its arguments and result. Every Agent Action is published on the live feed and written to the audit log.
+_Avoid_: step, command (a command is what the Hub sends to a Drone)
+
+**Red-team case**:
+A named adversarial input run against the full pipeline to show a refusal with the rule that produced it: an illegal first plan, a Detection carrying injected instructions, a change outside the flight envelope, a plan beyond endurance.
+
 **MissionSpec**:
 The Triage Agent's intent for one Detection: objective, survey polygon, altitude ceiling, standoff distance, and rationale. Contains no waypoints.
 _Avoid_: mission plan, plan

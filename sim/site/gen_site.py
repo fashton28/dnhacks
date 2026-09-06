@@ -155,6 +155,43 @@ def facility(fleet: int) -> dict:
     }
 
 
+def site_context(fleet: int) -> dict:
+    """What the Triage Agent knows about the Site beyond geometry: Zones, what is normal in each, and maintenance windows."""
+    def ring(pts):
+        return [dict(zip(("lat", "lon"), (round(v, 7) for v in enu_to_latlon(x, y)))) for x, y in pts]
+    def square(h):
+        return [(-h, -h), (h, -h), (h, h), (-h, h)]
+    def circle(cx, cy, r, n=24):
+        return [(cx + r * math.cos(2 * math.pi * i / n), cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+    x0, x1, y0, y1 = SWITCHYARD
+    yard = [(-95.0, -105.0), (-30.0, -105.0), (-30.0, -35.0), (-95.0, -35.0)]  # around the maintenance shed, south-west of the turbine hall
+    zones = [
+        {"zone_id": "reactor_exclusion", "name": "Reactor exclusion zone", "zone_class": "exclusion_zone", "ring": ring(circle(*REACTOR, NO_FLY_R)),
+         "normally_present": "Nobody and nothing moves here. Any vehicle, person or object is an incident."},
+        {"zone_id": "protected_area", "name": "Protected area (inside the inner fence)", "zone_class": "protected_area", "ring": ring(square(INNER)),
+         "normally_present": "Plant staff on foot near the control building, security patrol vehicle on the internal road, parked staff cars in the lot by the control building. No unattended objects, no vehicles off the paved areas."},
+        {"zone_id": "service_yard", "name": "Service yard (maintenance shed)", "zone_class": "service_yard", "ring": ring(yard),
+         "normally_present": "Contractor pickups and vans, pallets, crates and spare parts staged around the maintenance shed during a declared maintenance window; empty and tidy outside of one."},
+        {"zone_id": "switchyard", "name": "Switchyard", "zone_class": "protected_area", "ring": ring([(x0 - 8, y0 - 8), (x1 + 8, y0 - 8), (x1 + 8, y1 + 20), (x0 - 8, y1 + 20)]),
+         "normally_present": "High-voltage equipment, nobody on foot except escorted technicians during a declared window."},
+        {"zone_id": "buffer", "name": "Buffer strip (between the fences)", "zone_class": "open_ground", "ring": ring(square(OUTER)),
+         "normally_present": "Mown grass, the access road, light poles. Nothing parked, nothing stored, fences intact."},
+        {"zone_id": "perimeter_approach", "name": "Approach outside the outer fence", "zone_class": "open_ground", "ring": ring(square(GEOFENCE)),
+         "normally_present": "The access road and open field. Occasional delivery traffic on the road; a stopped vehicle against the fence is not normal."},
+    ]
+    return {
+        "site_id": "meridian-station", "name": SITE_NAME,
+        "anchor": {"lat": ORIGIN_LAT, "lon": ORIGIN_LON},
+        "perimeter": ring(square(OUTER)),
+        "zones": zones,
+        "maintenance_windows": [
+            {"zone_id": "service_yard", "description": "Contractor maintenance on the auxiliary cooling pumps; two marked utility vehicles and staged parts expected in the service yard",
+             "starts_at": "2026-09-05T08:00:00-05:00", "ends_at": "2026-09-06T18:00:00-05:00"},
+        ],
+        "notes": "Fictional Site for the ARGUS simulation. Security posture: any unannounced vehicle at the outer fence, any object left inside the protected area, or any fence opening is reportable. Declared maintenance activity in the service yard is not.",
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--fleet", type=int, default=int(os.environ.get("FLEET", "3")))
@@ -163,6 +200,7 @@ def main() -> None:
     (OUT / "site.json").write_text(json.dumps(scene(fleet), indent=1) + "\n")
     (OUT / "site.geojson").write_text(json.dumps(geojson(fleet), indent=1) + "\n")
     (OUT / "facility_meridian.json").write_text(json.dumps(facility(fleet), indent=1) + "\n")
+    (OUT / "site_context.json").write_text(json.dumps(site_context(fleet), indent=1) + "\n")
     if CONSOLE_PUBLIC.exists():
         shutil.copy(OUT / "site.json", CONSOLE_PUBLIC / "site.json")
         shutil.copy(OUT / "site.geojson", CONSOLE_PUBLIC / "site.geojson")

@@ -21,13 +21,23 @@ export function ArgusVideo({ hubBase, lastFrameTs, onGimbal }: { hubBase: string
   const firstDrone = React.useRef<string | null>(null);
   if (firstDrone.current === null && selected) firstDrone.current = selected;
   const liveUrl = firstDrone.current ? `${hubHttpBase()}/console/?embed=drone&drone=${encodeURIComponent(firstDrone.current)}` : '';
+  // The Console echoes every selection it applies; keep asking until the camera confirms it follows the dashboard's selection.
+  const [cameraSelected, setCameraSelected] = React.useState<string | null>(null);
   React.useEffect(() => {
-    if (!selected) return;
+    const onMessage = (e: MessageEvent) => {
+      const m = e.data as { type?: string; drone_id?: unknown } | null;
+      if (m && m.type === 'argus-selected' && e.source === frameRef.current?.contentWindow) setCameraSelected(String(m.drone_id));
+    };
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
+  React.useEffect(() => {
+    if (!selected || cameraSelected === selected) return;
     const post = () => frameRef.current?.contentWindow?.postMessage({ type: 'argus-select', drone_id: selected }, '*');
     post();
-    const t = setTimeout(post, 1500);  // again once the frame has surely loaded
-    return () => clearTimeout(t);
-  }, [selected]);
+    const t = setInterval(post, 500);
+    return () => clearInterval(t);
+  }, [selected, cameraSelected]);
   void hubBase;
   const gimbal = gimbalPending ?? drone?.gimbal_pitch_deg ?? 45;
   const cam = useArgus((s) => (s.selected ? s.camera[s.selected] : undefined)) ?? { mode: 'rgb', fov_deg: 70 };

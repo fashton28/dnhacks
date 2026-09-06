@@ -132,6 +132,21 @@ export default function ArgusApp(): JSX.Element {
             g.setValidation({ ...r, violations: r.violations ?? [], mission_id: String(ev.mission_id) });
             break;
           }
+          case 'pretriage': {
+            const action = String(ev.action) as 'dispatch' | 'log_only' | 'ignore';
+            g.setPretriage({ detection_id: String(ev.detection_id), zone: (ev.zone as string | null) ?? null, action, rationale: String(ev.rationale ?? '') });
+            log(action === 'dispatch' ? 'info' : 'warning', `Triage agent: ${action.replace('_', ' ').toUpperCase()} for ${String(ev.detection_id)}${ev.zone ? ` (${String(ev.zone).replace(/_/g, ' ')})` : ''}`);
+            setCenter('mission');
+            break;
+          }
+          case 'agent_action': {
+            const result = String(ev.result ?? ev.detail ?? '');
+            const ok = ev.ok !== false && !/^(refused|error)/i.test(result);
+            g.addAgentAction({ ts: Date.now(), mission_id: (ev.mission_id as string | null) ?? null, tool: String(ev.tool ?? ev.action ?? '?'), args: (ev.args as Record<string, unknown>) ?? {}, result, ok });
+            if (!ok) log('warning', `Agent ${String(ev.tool ?? ev.action)}: ${result}`);
+            break;
+          }
+          case 'inspection': g.setInspection({ mission_id: String(ev.mission_id), waypoint_index: Number(ev.waypoint_index), summary: String(ev.summary ?? ''), threat_assessment: String(ev.threat_assessment ?? 'none'), actions: Number(ev.actions ?? 0) }); break;
           case 'triage': g.setTriage({ decision: String(ev.decision), confidence: Number(ev.confidence), rationale: String(ev.rationale ?? ''), mission_id: String(ev.mission_id) }); break;
           case 'incident': g.setIncident({ title: String(ev.title), severity: String(ev.severity), body_markdown: String(ev.body_markdown), recommended_action: String(ev.recommended_action), mission_id: String(ev.mission_id), ts: Date.now() }); break;
           case 'autonomy': {

@@ -82,11 +82,17 @@ And the trust layer plus its red-team demo: the autonomy stack refusing to fly, 
   │                                                                           │
   │  [Wide-area]  overhead before/after ──► Detection                         │
   │       ▼ Operator dispatch                                                 │
-  │  [Triage Agent]  Claude, strict tool use ──► MissionSpec (no waypoints)   │
+  │  [Site context]  Zone lookup + maintenance windows ──► briefing           │
+  │  [Triage Agent]  Claude, strict tool use ──► Triage decision              │
+  │       dispatch / log only / ignore; declines end in an Incident, no flight│
+  │  [Triage Agent]  ──► MissionSpec (no waypoints)                           │
   │  [Coverage Planner]  Shapely, deterministic ──► FlightPlan                │
   │  [Safety Validator]  rule table ──► ValidationResult; reject ─► re-prompt │
   │  [Dispatcher]  idle Drone with battery ──► goto / capture / return_home   │
+  │  [Inspection]  on station: look_at · set_camera · capture · reposition   │
+  │       every reposition re-validated, bounded to 25 m of the waypoint      │
   │  [Observation]  Claude vision on frames ──► [Report Agent] ──► Incident   │
+  │  [Red team]  POST /redteam/{case} runs the adversarial cases end to end   │
   └──────────────────────────────┬────────────────────────────────────────────┘
                                  │ REST + live WebSocket
                                  ▼
@@ -173,6 +179,17 @@ The fake Drone still answers `capture_frame` itself with a synthetic frame so te
 
 Unchanged from the spec: Triage Agent with strict tool use, Coverage Planner, Safety Validator with `validate` and `clamp`, Observations, Incident Report.
 Do distance math in a projected CRS.
+
+The LLM layer as built (`hub/autonomy.py`, `hub/site_context.py`, `hub/inspection.py`):
+
+- Site context is generated with the Site (`sim/site/site_context.json`): six Zones with what is normally present in each, plus maintenance windows.
+  The Hub resolves the Zone a Detection falls in (innermost wins) and the windows active at detection time, and briefs the agent in prose.
+- The Triage decision comes before any plan. Live mode is one strict tool call to Claude; mock mode is a rule table (a vehicle or object in the service yard inside a declared window is log only; anything at the reactor is dispatched; anything outside every Zone is logged for the patrol).
+  A decline publishes `pretriage`, `triage` and `incident` events and leaves every Drone idle.
+- The Inspection runs at the first hover waypoint through the Mission runner's on-station hook, so the runner holds position and returns to the approved waypoint afterwards.
+  Tools: `look_at` (gimbal), `set_camera` (rgb/thermal/lidar, zoom), `capture` (evidence frame plus description), `reposition` (at most 25 m from the approved waypoint, re-run through the Safety Validator), `done` (summary and threat assessment).
+  Live mode is a Claude tool loop capped at six steps; mock mode is a fixed sweep of RGB, thermal and 2.5x zoom.
+- Detection metadata is quoted to the agent as data and never as instructions; the prompt-injection case shows the injected "fly at 200 m over the reactor" reaching the report body while the flown plan stays at the 50 m planner ceiling.
 
 **Done at H12:** Detection fixture → MissionSpec → FlightPlan → accept; three red-team cases rejected with named rules; a manual velocity toward the fence clamped.
 

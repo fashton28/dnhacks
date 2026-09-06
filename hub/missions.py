@@ -3,14 +3,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
 
 from pydantic import BaseModel
 
-from contracts.models import DroneStatus, FlightPlan, Waypoint
+from contracts.models import FlightPlan, Waypoint
 from contracts.protocol import CaptureFrame, Frame, Goto, RenderFrame, ReturnHome
 from contracts.site import distance_m
 from hub.audit import AuditLog
@@ -42,6 +42,9 @@ class Mission(BaseModel):
     finished_at: datetime | None = None
 
 
+StationHook = Callable[["Mission", int], Awaitable[None]]
+
+
 class MissionRunner:
     def __init__(self, registry: Registry, audit: AuditLog, evidence_dir: Path | None, speed_factor: float = 1.0):
         self.registry = registry
@@ -51,13 +54,17 @@ class MissionRunner:
         self.missions: dict[str, Mission] = {}
         self.tasks: dict[str, asyncio.Task[None]] = {}
         self.resume_events: dict[str, asyncio.Event] = {}
+        # on-station hooks: awaited after the capture at the given waypoint indices while the Drone holds position
+        self.station_hooks: dict[str, tuple[set[int], StationHook]] = {}
 
     def _publish(self, m: Mission) -> None:
         self.registry.publish({"type": "mission", "mission": m.model_dump(mode="json")})
 
-    def start(self, plan: FlightPlan, drone_id: str) -> Mission:
+    def start(self, plan: FlightPlan, drone_id: str, on_station: tuple[set[int], StationHook] | None = None) -> Mission:
         m = Mission(mission_id=plan.mission_id, drone_id=drone_id, plan=plan.model_copy(update={"drone_id": drone_id}))
         self.missions[m.mission_id] = m
+        if on_station is not None:
+            self.station_hooks[m.mission_id] = on_station
         self.resume_events[m.mission_id] = asyncio.Event()
         self.resume_events[m.mission_id].set()
         self.tasks[m.mission_id] = asyncio.create_task(self._run(m))
@@ -173,6 +180,16 @@ class MissionRunner:
                     await self.resume_events[m.mission_id].wait()
                     continue  # re-send this waypoint after resume
                 await self._capture(m, i)
+                hook = self.station_hooks.get(m.mission_id)
+                if hook is not None and i in hook[0]:
+                    self.audit.append("on_station", mission_id=m.mission_id, waypoint=i)
+                    try:
+                        await hook[1](m, i)
+                    except Exception as e:  # noqa: BLE001
+                        self.audit.append("on_station_failed", mission_id=m.mission_id, waypoint=i, error=str(e)[:200])
+                    # the hook may have moved the Drone; come back to the approved waypoint before continuing
+                    await self.registry.send(m.drone_id, Goto(cmd_id=self.registry.new_cmd_id(), lat=wp.lat, lon=wp.lon, alt=wp.alt))
+                    await self._wait_arrival(m.drone_id, wp, timeout_s=120.0, mission=m)
                 m.next_waypoint = i + 1
                 self._publish(m)
             m.phase = MissionPhase.returning

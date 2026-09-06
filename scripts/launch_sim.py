@@ -34,6 +34,7 @@ def main() -> None:
     ap.add_argument("--speedup", type=float, default=1.0)
     ap.add_argument("--wipe", action="store_true", help="wipe SITL eeprom so params start from defaults")
     ap.add_argument("--instance-base", type=int, default=0, help="first SITL instance number (ports 5760 + 10*instance)")
+    ap.add_argument("--renderer", action="store_true", help="also start a headless Renderer (Chromium) so evidence frames never depend on a browser tab")
     args = ap.parse_args()
 
     sys.path.insert(0, str(ROOT))
@@ -88,6 +89,9 @@ def main() -> None:
         port = 5760 + 10 * (args.instance_base + i - 1)
         procs.append(subprocess.Popen([sys.executable, "-m", "sim.bridge", "--id", drone_id, "--mavlink", f"tcp:127.0.0.1:{port}", "--hub", hub_ws], cwd=ROOT))
     print(f"[launch] {args.fleet} bridges started -> {hub_ws}", flush=True)
+    if args.renderer:
+        procs.append(subprocess.Popen([sys.executable, str(ROOT / "scripts" / "headless_renderer.py"), "--hub", f"http://127.0.0.1:{args.hub_port}"], cwd=ROOT))
+        print("[launch] headless Renderer started", flush=True)
 
     while True:
         time.sleep(1)

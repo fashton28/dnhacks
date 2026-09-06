@@ -143,6 +143,8 @@ function renderDroneView(s: DroneState): void {
 function frameMessage(s: DroneState, cmdId: string | null) {
   renderDroneView(s);
   const jpeg = droneCanvas.toDataURL("image/jpeg", 0.72).split(",")[1];
+  // the Drone view canvas is also the live camera on screen: put the selected Drone back if we just drew another one
+  if (selected && selected !== s.drone_id && drones.has(selected)) renderDroneView(drones.get(selected)!);
   return { type: "frame", drone_id: s.drone_id, jpeg_b64: jpeg, width: droneCanvas.width, height: droneCanvas.height, lat: s.lat, lon: s.lon, alt: s.alt,
            heading_deg: s.heading_deg, gimbal_pitch_deg: s.gimbal_pitch_deg, ts: new Date().toISOString(), cmd_id: cmdId };
 }
@@ -231,6 +233,9 @@ liveFeed((ev) => {
     case "detection": onDetection(ev.detection ?? ev); break;
     case "mission_spec": missionSpec = { objective: ev.spec.objective, rationale: ev.spec.rationale, max_altitude_m: ev.spec.max_altitude_m, standoff_m: ev.spec.standoff_m }; log(`Triage Agent proposed a plan (attempt ${ev.spec.attempt ?? 1}): ${ev.spec.rationale}`); refreshMission(); switchTab("mission"); break;
     case "validation": { const r = ev.result ?? ev; validation = { verdict: r.verdict, violations: r.violations ?? [] }; log(r.verdict === "accept" ? `Safety Validator: ACCEPT${r.checks_passed ? ` (${r.checks_passed} checks)` : ""}` : `Safety Validator: REJECT ${(r.violations ?? []).map((v: any) => v.rule).join(", ")}`, r.verdict === "accept" ? "good" : "warn"); refreshMission(); break; }
+    case "pretriage": log(`Triage agent: ${String(ev.action).replace("_", " ").toUpperCase()} for ${ev.detection_id}${ev.zone ? ` in ${String(ev.zone).replace(/_/g, " ")}` : ""}. ${ev.rationale ?? ""}`, ev.action === "dispatch" ? "good" : "warn"); break;
+    case "agent_action": { const r = String(ev.result ?? ev.detail ?? ""); const bad = ev.ok === false || /^(refused|error)/i.test(r); log(`agent ${ev.tool ?? ev.action}${ev.args ? " " + JSON.stringify(ev.args) : ""}${r ? ": " + r.slice(0, 120) : ""}`, bad ? "warn" : "info"); break; }
+    case "inspection": log(`Inspection at waypoint ${Number(ev.waypoint_index) + 1}: ${String(ev.threat_assessment).toUpperCase()}. ${ev.summary ?? ""}`, ev.threat_assessment === "none" ? "good" : "warn"); break;
     case "triage": log(`Triage: ${String(ev.decision).toUpperCase()} (confidence ${ev.confidence}) ${ev.rationale ?? ""}`, ev.decision === "escalate" ? "warn" : "good"); break;
     case "incident": log(`INCIDENT REPORT [${ev.severity}] ${ev.title}: ${ev.recommended_action}`, ev.severity === "high" || ev.severity === "critical" ? "bad" : "warn"); break;
     case "dispatch_outcome": log(`Dispatch outcome for ${ev.detection_id}: ${ev.flown ? "flown by " + ev.drone_id : "NOT FLOWN"} after ${ev.attempts} attempt(s), triage ${ev.triage?.decision}`, ev.flown ? "good" : "warn"); dispatching = false; refreshDispatchButton(); break;
@@ -247,7 +252,8 @@ function onDrone(s: DroneState): void {
   overview.updateDrone(s);
   if (prev && prev.status !== s.status) log(`${s.drone_id}: ${prev.status.replace("_", " ")} → ${s.status.replace("_", " ")}${s.mode ? ` (${s.mode})` : ""}`, s.status === "offline" ? "bad" : "info");
   if (s.message?.startsWith("REFUSED") && lastRefused.get(s.drone_id) !== s.message) { lastRefused.set(s.drone_id, s.message); log(`${s.drone_id}: onboard fence ${s.message}`, "bad"); }
-  if (droneParam) { if (s.drone_id === droneParam && selected !== droneParam) select(s.drone_id, { quiet: true }); }
+  // ?drone=<id> names the initial selection only; once it (or any later select) has taken effect, telemetry never overrides the Operator's choice
+  if (pendingDroneParam) { if (s.drone_id === pendingDroneParam) select(s.drone_id, { quiet: true }); }
   else if (selected === null && s.status !== "offline" && (storedSelection === null || storedSelection === s.drone_id)) select(s.drone_id, { quiet: true });
   if (selected === null && !selectFallback) selectFallback = window.setTimeout(() => { if (selected === null && drones.size) select(sortedDrones()[0].drone_id, { quiet: true }); }, 2500);
   if (performance.now() - lastFleetRefresh > 200 || (prev && prev.status !== s.status)) { lastFleetRefresh = performance.now(); refreshFleet(); }
@@ -279,17 +285,23 @@ const sortedDrones = () => [...drones.values()].sort((a, b) => a.drone_id.locale
 function select(id: string, opts: { quiet?: boolean } = {}): void {
   const changed = selected !== id;
   selected = id;
+  pendingDroneParam = null;
   try { localStorage.setItem(SEL_KEY, id); } catch { /* private mode */ }
   $("drone-view-id").textContent = id;
   $("focus-id").textContent = id;
   overview.setSelected(id);
+  if (changed) {
+    reflectVision(cameraSettings.get(id)?.mode ?? "rgb");  // vision segment and frame tint follow the new Drone's camera settings
+    const s = drones.get(id);
+    if (s) { syncGimbal(s); renderDroneView(s); }  // no stale frame from the previous Drone while the next telemetry arrives
+    if (isEmbed && window.parent !== window) window.parent.postMessage({ type: "argus-selected", drone_id: id }, "*");  // the dashboard confirms its camera follows
+  }
   if (changed && !opts.quiet) {
     justSelected = id;
     const panel = $("drone-panel");
     panel.classList.remove("flash"); void panel.offsetWidth; panel.classList.add("flash");
     window.clearTimeout(flashTimer);
     flashTimer = window.setTimeout(() => { justSelected = null; panel.classList.remove("flash"); refreshFleet(); }, 650);
-    if (drones.has(id)) renderDroneView(drones.get(id)!);  // no stale frame while the next telemetry arrives
     if (focusFollow) focusOn(id, 0.8);
   }
   refreshFleet();
@@ -302,7 +314,7 @@ function selectIndex(i: number): void {
 }
 (window as any).__argusSelect = (id: string) => select(id);
 window.addEventListener("message", (e) => { const m = e.data; if (m && m.type === "argus-select" && typeof m.drone_id === "string") select(m.drone_id, { quiet: true }); });
-const droneParam = params.get("drone");
+let pendingDroneParam: string | null = params.get("drone");
 (window as any).__argus = { world, worldCam, controls, renderer, drones, missions };
 
 const refreshFleet = () => renderFleet($("fleet"), sortedDrones(), selected, select, justSelected);

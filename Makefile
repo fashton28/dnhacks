@@ -31,10 +31,10 @@ fake-fleet:
 
 # ArduCopter SITL x FLEET + Bridges, connecting to a Hub you started with `make hub`.
 sim: site
-	ARDUPILOT=$(ARDUPILOT) $(UV) run python scripts/launch_sim.py --fleet $(FLEET) --speedup $(SPEED)
+	ARDUPILOT=$(ARDUPILOT) $(UV) run python scripts/launch_sim.py --fleet $(FLEET) --speedup $(SPEED) --renderer
 
 sim-all: site
-	ARDUPILOT=$(ARDUPILOT) ARGUS_SPEED_FACTOR=$(SPEED) $(UV) run python scripts/launch_sim.py --fleet $(FLEET) --speedup $(SPEED) --with-hub
+	ARDUPILOT=$(ARDUPILOT) ARGUS_SPEED_FACTOR=$(SPEED) $(UV) run python scripts/launch_sim.py --fleet $(FLEET) --speedup $(SPEED) --with-hub --renderer
 
 console:
 	cd console && pnpm dev

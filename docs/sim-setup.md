@@ -85,6 +85,10 @@ Both are served by the Hub and driven by the same live feed.
 Hub endpoints added for the dashboard: `GET /drones/{id}/mjpeg` (multipart JPEG stream of the Drone view), `GET /overheads` (captured overhead images), `GET /autonomy`, `POST /detections/{id}/dispatch`, and `GET/POST /drones/{id}/camera` (vision mode rgb/thermal/lidar and field of view 20 to 110 degrees; the Renderer draws that Drone accordingly and the live feed publishes `camera` events).
 Camera gimbal pitch is a Drone command: `POST /drones/{id}/command {type: look_at, pitch_deg}` from -30 (up) to 90 (straight down).
 
+LLM layer endpoints: `GET /site/context` (the Zones and maintenance windows the Triage Agent reads), `POST /detections/{id}/dispatch` (Triage decision first, then plan, verify, fly, inspect, report), and `POST /redteam/{case}` with `bad_plan`, `prompt_injection`, `outside_geofence` or `over_endurance`.
+The live feed carries `pretriage`, `agent_action` and `inspection` events for the dashboard's Triage Agent panel and the Console log.
+Without `ANTHROPIC_API_KEY` everything runs in mock mode with deterministic rules; export the key before `make hub` to switch the Triage decision, planner, Inspection and vision to Claude.
+
 ## How the simulation is wired
 
 - `sim/site/gen_site.py` is the one source of Site numbers.
