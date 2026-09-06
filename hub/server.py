@@ -103,6 +103,12 @@ class DetectBody(BaseModel):
     min_area_m2: float = 4.0
 
 
+class VisionDetectBody(DetectBody):
+    """Same inputs as the numpy detector, plus a confidence floor the model can be held to."""
+
+    min_confidence: float = 0.0
+
+
 class CameraBody(BaseModel):
     mode: str | None = None
     fov_deg: float | None = None
@@ -580,6 +586,39 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             app.state.audit.append("detection_received", detection_id=d.id, change_type=d.change_type.value, confidence=d.confidence, source="overhead-change-detection")
             reg().publish({"type": "detection", **d.model_dump(mode="json")})
         app.state.audit.append("widearea_detect", before=body.before_ref, after=body.after_ref, detections=len(found))
+        return found
+
+    @app.post("/widearea/vision-detect", response_model=list[Detection])
+    async def widearea_vision_detect(body: VisionDetectBody) -> list[Detection]:
+        """Wide-area change detection by vision model.
+
+        The peer of /widearea/detect: same inputs, same Detection contract, a different
+        way of deciding what changed. Requires GEMINI_API_KEY.
+        """
+        from widearea.detect import footprint_from_meta
+        from widearea.vision import VisionError, detect as vision_detect
+
+        ev = settings.evidence_dir
+        if ev is None:
+            raise HTTPException(409, "evidence storage disabled")
+        before, after = ev / body.before_ref, ev / body.after_ref
+        if not before.exists() or not after.exists():
+            raise HTTPException(404, "before/after overhead image not found; capture them first")
+        try:
+            found = await asyncio.to_thread(
+                vision_detect, before, after, footprint_from_meta(after.with_suffix(".json")),
+                before_ref=body.before_ref, after_ref=body.after_ref,
+                min_area_m2=body.min_area_m2, min_confidence=body.min_confidence,
+            )
+        except VisionError as e:
+            app.state.audit.append("widearea_vision_failed", before=body.before_ref, after=body.after_ref, error=str(e)[:200])
+            raise HTTPException(502, f"vision detection failed: {e}") from e
+        for d in found:
+            dets().add(d)
+            app.state.audit.append("detection_received", detection_id=d.id, change_type=d.change_type.value,
+                                   confidence=d.confidence, source="widearea.vision")
+            reg().publish({"type": "detection", **d.model_dump(mode="json")})
+        app.state.audit.append("widearea_vision_detect", before=body.before_ref, after=body.after_ref, detections=len(found))
         return found
 
     # ---- Incident Reports ------------------------------------------------------------
