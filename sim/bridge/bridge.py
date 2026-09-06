@@ -41,7 +41,7 @@ class Bridge:
         self.battery = 100.0
         self.armed = False
         self.mode = ""
-        self.gimbal = 45.0
+        self.gimbal = 8.0  # resting camera angle: slightly below the horizon, like a real gimbal on the pad
         self.status = DroneStatus.idle
         self.intent: str = "idle"  # idle | mission | manual | rth
         self.pending_goto: tuple[float, float, float] | None = None

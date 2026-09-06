@@ -82,7 +82,7 @@
           "title": "Mission Id"
         },
         "gimbal_pitch_deg": {
-          "default": 45.0,
+          "default": 8.0,
           "description": "camera pitch: -30 looks up, 0 level, 90 straight down; drawn by the Renderer",
           "maximum": 90,
           "minimum": -30,

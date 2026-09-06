@@ -527,7 +527,7 @@ export class SiteScene {
       (strobe.material as THREE.MeshStandardMaterial).emissiveIntensity = flying ? (Math.sin(t * 6) > 0.85 ? 6 : 0.2) : 0;
       const pitch = g.userData.gimbalPitch as THREE.Group;
       const track = (g.userData as any).track as PoseTrack | undefined;
-      pitch.rotation.x = -(track?.gimbal ?? s?.gimbal_pitch_deg ?? 45) * Math.PI / 180;
+      pitch.rotation.x = -(track?.gimbal ?? s?.gimbal_pitch_deg ?? 8) * Math.PI / 180;
     }
   }
 
