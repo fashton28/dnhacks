@@ -355,6 +355,7 @@ class AgentFlight(Inspector):
             res.error = "Safety Validator refused the envelope after repairs: " + ", ".join(v["rule"] for v in (res.envelope_validation or {}).get("violations", []))
             return res
         self.env = env
+        self.scope_center = (env.center_lat, env.center_lon)  # sightings farther than 60 m from here never decide this verdict
         chosen, _ = self._run(_select(self.app, mission_id, detection_id, center))
         if chosen is None:
             res.error = "no idle Drone available"

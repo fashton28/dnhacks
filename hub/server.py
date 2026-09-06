@@ -525,9 +525,28 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
     async def get_scene() -> SceneState:
         return reg().scene
 
+    OPERATIONAL = {"fire": ("TE-T2-W1", "temperature", 58, "C", 105, "transformer T2", "back within limits"),
+                   "steam": ("ZS-RV-3", "valve", "closed", "", "closed", "relief valve RV-3", "valve reseated")}
+
+    async def clear_operational_props(scene: SceneState) -> None:
+        """Remove fire and steam props and tell the plant feed their sensors read normal again (info, no Detection)."""
+        gone = [p for p in scene.props if p.kind in OPERATIONAL]
+        if not gone:
+            return
+        scene.props = [p for p in scene.props if p.kind not in OPERATIONAL]
+        for p in gone:
+            sensor_id, kind, value, unit, threshold, asset, note = OPERATIONAL[p.kind]
+            sig = plant_signal_at(f"clear-{datetime.now(UTC).strftime('%H%M%S')}", p.x, p.y, sensor_id=sensor_id, kind=kind, value=value, unit=unit,
+                                  threshold=threshold, asset=asset, severity="info", note=note)
+            app.state.plant.append(sig)
+            app.state.audit.append("plant_signal_cleared", sensor_id=sensor_id, asset=asset)
+            reg().publish({"type": "plant_signal", **sig.model_dump(mode="json")})
+
     @app.post("/scenarios/run", response_model=SceneState)
     async def run_scenario(sc: Scenario) -> SceneState:
         scene = reg().scene
+        if sc.kind in ("transformer_fire", "steam_release"):
+            await clear_operational_props(scene)
         p = sc.params
         signal: PlantSignal | None = None  # the plant's own instrumentation reacting to the Scenario, ingested after the scene is placed
         if sc.kind == "intruder_vehicle":
@@ -567,6 +586,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
 
     @app.post("/scenarios/reset", response_model=SceneState)
     async def reset_scene() -> SceneState:
+        await clear_operational_props(reg().scene)
         reg().scene = SceneState()
         app.state.audit.append("scene_reset")
         await reg().broadcast_scene()
@@ -626,6 +646,8 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
                                value=signal.value, threshold=signal.threshold, asset=signal.asset.name)
         reg().publish({"type": "plant_signal", **signal.model_dump(mode="json")})
         det = signal_to_detection(signal)
+        if signal.severity.value == "info":
+            return det  # a reading back within limits is news for the plant card, not a Detection
         await post_detection(det)
         return det
 

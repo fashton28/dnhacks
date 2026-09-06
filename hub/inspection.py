@@ -133,7 +133,11 @@ class Inspector:
         obs.update({"waypoint_index": index, "frame_ref": f"evidence/{mission_id}/inspect{index}-{self._shot}.jpg" if path else None, "looking_for": looking_for, **wp})
         obs["sightings"] = self._perceive(frame, drone_id, mission_id, obs.get("frame_ref"), cam)
         # a measured peak beats a stub estimate: the report cites the sensor, not the caption
-        hot = [x.get("temp_max_c") for x in obs["sightings"] if x.get("temp_max_c") is not None]
+        center = getattr(self, "scope_center", None)
+        near = [x for x in obs["sightings"] if center is None or (x.get("lat") is not None and distance_m(x["lat"], x["lon"], center[0], center[1]) <= 60.0)]
+        for x in obs["sightings"]:
+            x["in_scope"] = x in near  # a fire 120 m away is still reported, but it does not decide this Detection's verdict
+        hot = [x.get("temp_max_c") for x in near if x.get("temp_max_c") is not None]
         if hot:
             obs["thermal_max_c"] = round(max(hot), 1)
         return obs

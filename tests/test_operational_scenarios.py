@@ -75,6 +75,9 @@ async def test_scenarios_place_their_props(hub: HubHandle):
         snap = (await c.get("/scenarios")).json() if (await c.get("/scenarios")).status_code == 200 else None
     st = hub.app.state.registry.scene
     kinds = {p.kind: p for p in st.props}
-    assert "fire" in kinds and "steam" in kinds
+    # each operational Scenario is a clean story: starting the steam release cleared the fire and its sensor read normal again
+    assert "steam" in kinds and "fire" not in kinds, kinds
     assert kinds["steam"].z > 5, "the vent sits on the auxiliary building roof"
+    signals = hub.app.state.plant.list()
+    assert [x.severity.value for x in signals if x.sensor_id == "TE-T2-W1"][-1] == "info", "the transformer sensor returned to normal"
     assert snap is None or isinstance(snap, (list, dict))
