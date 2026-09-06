@@ -132,6 +132,10 @@ class Inspector:
             obs = self.describe(path, wp, reg.scene, index)
         obs.update({"waypoint_index": index, "frame_ref": f"evidence/{mission_id}/inspect{index}-{self._shot}.jpg" if path else None, "looking_for": looking_for, **wp})
         obs["sightings"] = self._perceive(frame, drone_id, mission_id, obs.get("frame_ref"), cam)
+        # a measured peak beats a stub estimate: the report cites the sensor, not the caption
+        hot = [x.get("temp_max_c") for x in obs["sightings"] if x.get("temp_max_c") is not None]
+        if hot:
+            obs["thermal_max_c"] = round(max(hot), 1)
         return obs
 
     def _perceive(self, frame, drone_id: str, mission_id: str, frame_ref: str | None, cam: dict[str, Any]) -> list[dict[str, Any]]:
