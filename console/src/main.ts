@@ -215,7 +215,7 @@ const link = new RendererLink(rendererId, isHeadless ? "headless" : "browser", (
     if (cmd.drone_id === selected) reflectVision(cmd.mode);
     reply({ type: "ack", cmd_id: cmd.cmd_id, ok: true });
   } else if (cmd.type === "scene") {
-    scene = cmd.state; world.setScene(scene); overview.setScene(scene);
+    scene = cmd.state; world.setScene(scene); overview.setScene(scene); focusNewProps(scene);
     reply({ type: "ack", cmd_id: cmd.cmd_id, ok: true });
   } else if (cmd.type === "reset") {
     scene = { props: [], open_fences: [], scenario_ids: [] }; world.setScene(scene); overview.setScene(scene);
@@ -231,9 +231,10 @@ liveFeed((ev) => {
     case "snapshot":
       for (const s of ev.drones) onDrone(s);
       for (const m of ev.missions ?? []) onMission(m);
+      if (ev.scene) for (const p of (ev.scene as SceneState).props) seenProps.add(p.id);
       break;
     case "drone_state": onDrone(ev.state); break;
-    case "scene": scene = ev.state; world.setScene(scene); overview.setScene(scene); break;
+    case "scene": scene = ev.state; world.setScene(scene); overview.setScene(scene); focusNewProps(scene); break;
     case "camera": cameraSettings.set(ev.drone_id, { mode: ev.mode, fov_deg: ev.fov_deg }); if (ev.drone_id === selected) reflectVision(ev.mode); break;
     case "mission": onMission(ev.mission); break;
     case "clamp": log(`Safety Validator clamped ${ev.drone_id}: ${ev.rule}`, "warn"); showClamp(ev.rule); break;
@@ -460,6 +461,20 @@ let focusFollow = false;  // after Focus, keep the target on the Drone until the
 const easeInOut = (x: number) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2);
 function tweenCamera(toPos: THREE.Vector3, toTgt: THREE.Vector3, dur = 0.8): void {
   camTween = { t0: performance.now(), dur: dur * 1000, fromPos: worldCam.position.clone(), toPos: toPos.clone(), fromTgt: controls.target.clone(), toTgt: toTgt.clone() };
+}
+/** When a Scenario places something new, the World view flies to it (unless the Operator is following a Drone).
+ *  The first look at a fire or a steam column is the demo's opening shot; nobody should have to hunt for it. */
+const seenProps = new Set<string>();
+function focusNewProps(state: SceneState): void {
+  const fresh = state.props.filter((p) => !seenProps.has(p.id));
+  state.props.forEach((p) => seenProps.add(p.id));
+  if (!fresh.length || focusFollow || isEmbedDrone || isHeadless) return;
+  const p = fresh[fresh.length - 1];
+  const tgt = enuToThree(p.x, p.y, (p.z ?? 0) + 4);
+  const dir = new THREE.Vector3(-0.55, 0.5, 0.65).normalize();  // from the south-west, looking down at ~30 degrees
+  const pos = tgt.clone().add(dir.multiplyScalar(70));
+  tweenCamera(pos, tgt, 1.4);
+  log(`World view: looking at ${p.kind === "fire" ? "the fire" : p.kind === "steam" ? "the steam release" : `the ${p.kind}`} (${p.id})`);
 }
 /** Chase distance for Focus: ?dist=<metres> (default 45). Close values (4 to 8) give a cinematic follow of the airframe. */
 const focusDistance = Math.max(2, Math.min(300, Number(params.get("dist")) || 45));
