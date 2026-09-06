@@ -246,6 +246,7 @@ class SightingLabel(StrEnum):
 
 class Sighting(Strict):
     """One measured thing in one camera frame: a hot blob in the radiometric thermal map, or a plume column.
+    in_scope: bool = Field(default=True, description="within 60 m of the Detection under investigation; only these decide its verdict")
 
     Produced by the Hub's perception pass (hub/perception.py) from the Renderer's per-pixel temperature map, not by a vision model.
     bbox is in frame pixels [x0, y0, x1, y1] with the origin top-left; lat, lon and range_m come from casting the box's foot pixel

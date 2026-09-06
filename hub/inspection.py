@@ -161,8 +161,12 @@ class Inspector:
         meta = {"drone_id": drone_id, "mission_id": mission_id, "ts": frame.ts, "width": frame.width, "height": frame.height, "lat": frame.lat, "lon": frame.lon,
                 "alt": frame.alt, "heading_deg": frame.heading_deg, "gimbal_pitch_deg": frame.gimbal_pitch_deg, "fov_deg": cam.get("fov_deg", 70.0),
                 "camera_mode": cam.get("mode", "thermal"), "frame_ref": frame_ref}
+        temp_png = base64.b64decode(frame.temp_png_b64)
+        if frame_ref and self.app.state.settings.evidence_dir is not None:
+            # keep the radiometric map next to the frame so an empty result can be checked offline
+            (self.app.state.settings.evidence_dir / Path(frame_ref).relative_to("evidence")).with_suffix(".temp.png").write_bytes(temp_png)
         try:
-            found = perception.find_hot_spots(base64.b64decode(frame.temp_png_b64), meta)
+            found = perception.find_hot_spots(temp_png, meta)
         except Exception as e:  # noqa: BLE001
             self.app.state.audit.append("perception_failed", mission_id=mission_id, drone_id=drone_id, error=repr(e)[:200])
             return []
