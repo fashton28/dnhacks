@@ -29,12 +29,16 @@ import type {
   CommandAck,
   ConnectionConfig,
   ConnectionState,
+  EnvelopeMessage,
+  EscalationMessage,
   IncidentReportMessage,
   ManualInput,
   MissionPlan,
   MissionPlanMessage,
   Mode,
+  ModeMessage,
   PlanTool,
+  TaskMessage,
   StatusText,
   Telemetry,
   TrackingStatus,
@@ -42,7 +46,7 @@ import type {
   Verification,
   VerificationMessage,
 } from '@/contract';
-import { DEFAULTS, MODES } from '@/contract';
+import { DEFAULTS, GIMBAL_PITCH_MAX_DEG, GIMBAL_PITCH_MIN_DEG, MODES } from '@/contract';
 import type { MissionDataSource } from './types';
 import { hubHttpBase, hubWsBase } from './hubConfig';
 
@@ -90,6 +94,17 @@ export interface FleetEntry {
   batteryPct: number;
   altM: number;
   mode: string;
+  /**
+   * The drone's reported position. `HubDroneState` carries lat/lon on every
+   * frame; the row used to drop them and the contract mapper then filled the
+   * hole with `{lat: 0, lon: 0}` — a real coordinate in the Gulf of Guinea
+   * that deconfliction and separation logic consumed as fact (FM-179).
+   * Absent (rather than zero) when the Hub has not reported one.
+   */
+  lat?: number;
+  lon?: number;
+  /** Hub mission this drone is flying, when any — the sortie's identity. */
+  missionId?: string | null;
 }
 
 type Listeners<T> = Set<(v: T) => void>;
@@ -136,6 +151,13 @@ export class HubDataProvider implements MissionDataSource {
   private lReport: Listeners<IncidentReportMessage> = new Set();
   private lFleet: Listeners<FleetEntry[]> = new Set();
   private lRaw: Listeners<Record<string, unknown>> = new Set();
+  /* Phase 1 channels the ARGUS Hub does not report yet: subscriptions are
+   * accepted and never emitted to (the same silent pattern as lTrack), so the
+   * dashboard behaves identically in Hub mode until the Hub gains them. */
+  private lTask: Listeners<TaskMessage> = new Set();
+  private lEnvelope: Listeners<EnvelopeMessage> = new Set();
+  private lMode: Listeners<ModeMessage> = new Set();
+  private lEscalation: Listeners<EscalationMessage> = new Set();
 
   /* ---- DataSource ------------------------------------------------------------ */
   async connect(config: ConnectionConfig): Promise<void> {
@@ -164,21 +186,44 @@ export class HubDataProvider implements MissionDataSource {
   onMissionPlan = sub(this.lPlan);
   onVerification = sub(this.lVerify);
   onIncidentReport = sub(this.lReport);
+  onTask = sub(this.lTask);
+  onEnvelope = sub(this.lEnvelope);
+  onMode = sub(this.lMode);
+  onEscalation = sub(this.lEscalation);
 
   /* ---- Fleet extension (beyond the frozen contract) ------------------------- */
   /** Hub-native fleet rows (ARGUS panels). */
   onFleetRows = sub(this.lFleet);
-  /** Contract-shaped fleet stream, derived from the Hub rows so contract consumers keep working. */
+  /**
+   * Contract-shaped fleet stream, derived from the Hub rows so contract
+   * consumers keep working.
+   *
+   * `FleetVehicle.position` is a REQUIRED field that deconfliction and
+   * separation logic reads as the peer's true location, so a vehicle whose
+   * position the Hub has not reported is OMITTED from the contract fleet
+   * rather than published at `{lat: 0, lon: 0}` (FM-179). A vehicle missing
+   * from the list is visibly missing; a vehicle at a fabricated coordinate is
+   * a peer the separation check believes in. The Hub-native `onFleetRows`
+   * stream still carries every row, so the vehicle selector is unaffected.
+   */
   onFleet(cb: (m: FleetMessage) => void): ContractUnsubscribe {
     const inner = (rows: FleetEntry[]): void => cb({
       type: 'fleet', ts: Date.now(), vehicleId: this.getVehicle(),
-      vehicles: rows.map((r) => ({
-        vehicleId: r.vehicleId,
-        battery: { soc_pct: r.batteryPct } as FleetMessage['vehicles'][number]['battery'],
-        controlSource: r.status === 'manual_control' ? 'manual' : r.status === 'on_mission' ? 'planner' : 'auto',
-        failsafe: { state: 'none' as FailsafeState, reason: '' },
-        readiness: { ready: r.status !== 'offline', reasons: r.status === 'offline' ? ['offline'] : [], eta_ready_s: 0 },
-      })),
+      vehicles: rows
+        .filter((r) => Number.isFinite(r.lat) && Number.isFinite(r.lon))
+        .map((r) => ({
+          vehicleId: r.vehicleId,
+          battery: { soc_pct: r.batteryPct } as FleetMessage['vehicles'][number]['battery'],
+          controlSource: r.status === 'manual_control' ? 'manual' : r.status === 'on_mission' ? 'planner' : 'auto',
+          failsafe: { state: 'none' as FailsafeState, reason: '' },
+          readiness: { ready: r.status !== 'offline', reasons: r.status === 'offline' ? ['offline'] : [], eta_ready_s: 0 },
+          position: { lat: r.lat as number, lon: r.lon as number, relAlt: r.altM },
+          // The Hub reports which mission a drone is flying but not when that
+          // mission must be home by, and `must_rtl_by` is a hard deadline the
+          // deconfliction time-overlap test reads. An unknown deadline is
+          // reported as no sortie clock, never as a guessed one.
+          sortie: null,
+        })),
     });
     this.lFleet.add(inner); return () => this.lFleet.delete(inner);
   }
@@ -267,6 +312,15 @@ export class HubDataProvider implements MissionDataSource {
           if (!m) return ack(false, `no paused Mission on ${id}`);
           const r = await this.post(`/missions/${m.mission_id}/resume`, {});
           return ack(r.ok, r.ok ? `Mission ${m.mission_id} resumed` : r.text);
+        }
+        case 'setGimbal': {
+          // The Hub's `look_at` uses the same convention as the contract
+          // (-30 up, 0 level, 90 down), so pitchDeg passes through unmapped.
+          const pitch = cmd.params?.pitchDeg;
+          if (pitch == null) return ack(false, 'setGimbal requires params.pitchDeg');
+          const clamped = Math.max(GIMBAL_PITCH_MIN_DEG, Math.min(GIMBAL_PITCH_MAX_DEG, pitch));
+          const [ok, msg] = await this.droneCommand(id, { type: 'look_at', pitch_deg: clamped });
+          return ack(ok, clamped === pitch ? msg : `Clamped to ${clamped}°. ${msg}`.trim());
         }
         case 'arm':
           return ack(true, 'ARGUS arms the autopilot itself when a Mission or Manual Control starts');
@@ -436,7 +490,13 @@ export class HubDataProvider implements MissionDataSource {
   private publishFleet(): void {
     const rows: FleetEntry[] = [...this.states.values()]
       .sort((a, b) => a.drone_id.localeCompare(b.drone_id))
-      .map((s) => ({ vehicleId: s.drone_id, status: s.status, batteryPct: s.battery_pct, altM: s.alt, mode: s.mode }));
+      .map((s) => ({
+        vehicleId: s.drone_id, status: s.status, batteryPct: s.battery_pct, altM: s.alt, mode: s.mode,
+        // Carried, not dropped: this is the same lat/lon the Hub puts in every
+        // `HubDroneState`, and it is what the contract fleet mapper needs.
+        ...(Number.isFinite(s.lat) && Number.isFinite(s.lon) ? { lat: s.lat, lon: s.lon } : {}),
+        missionId: s.mission_id,
+      }));
     emit(this.lFleet, rows);
   }
 
@@ -541,6 +601,12 @@ export class HubDataProvider implements MissionDataSource {
       sortie: null,
       home: { lat: home.lat, lon: home.lon, distance },
       link: { rssi: 0, latencyMs: Math.max(0, Date.now() - (Date.parse(s.ts) || Date.now())) },
+      // The Hub's gimbal_pitch_deg uses the same convention as the contract
+      // (-30 up, 0 level, 90 down), so it passes through unmapped. A state
+      // without it stays absent rather than reporting a fictional 0.
+      gimbal: typeof s.gimbal_pitch_deg === 'number'
+        ? { pitchDeg: s.gimbal_pitch_deg }
+        : undefined,
     };
   }
 

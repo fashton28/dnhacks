@@ -23,6 +23,17 @@
       }
     ]
   },
+  "probeTask": {
+    "taskId": "probe-V02",
+    "anomalyId": "fixture-north-anomaly",
+    "lookFor": "vehicle",
+    "question": "What is at the flagged change?",
+    "urgency": "immediate",
+    "priority": 0.8,
+    "rationale": "fixture-state probe",
+    "source": "scripted"
+  },
+  "probeRequestId": "probe-V02",
   "telemetry": {},
   "expected": {
     "verdict": "rejected",
@@ -43,7 +54,9 @@
       "terminal",
       "loiter",
       "range",
-      "sortie"
+      "sortie",
+      "attended",
+      "deconfliction"
     ],
     "reasonContains": {
       "schema": [

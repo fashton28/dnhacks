@@ -3,21 +3,35 @@
  *
  * Ordered checks: schema, site_valid, nav_source, readiness, wind,
  * rf_environment, airspace, anomaly_proximity, altitude, speed, standoff,
- * geofence, nfz_transit, nfz_orbit, terminal, loiter, range, sortie.
+ * geofence, nfz_transit, nfz_orbit, terminal, loiter, range, sortie,
+ * attended, deconfliction.
  * Corrected plans are fully re-walked and rechecked before release.
+ *
+ * Every metre of geometry below comes from `geometry.ts` — the same library
+ * the deterministic planner draws with, so the planner cannot disagree with
+ * its own verifier about what clears a buffered NFZ.
  */
 
 import {
-  Anomaly, BatteryState, CapabilityProfile, MissionPlan, MissionProfile, NavSource, PlanTool,
-  PROFILE_SPEED_MPS, RfEventMessage, SensorHealth, Verification, VerificationCheck,
+  Anomaly, AttendanceMode, BatteryState, CapabilityProfile, FleetVehicle, MissionPlan,
+  MissionProfile, NavSource, PlanTool, PROFILE_SPEED_MPS, RfEventMessage, SensorHealth,
+  Verification, VerificationCheck,
 } from './contract';
 import {
-  LatLon, SiteModel, distancePointToPolygonMeters, distanceSegmentToPolygonMeters,
-  haversineMeters, movePointAcrossBoundary, movePointAwayFromPolygon, movePointInsidePolygon,
-  pointInOrOnPolygon, pointInPolygon, segmentStaysInsidePolygon,
-} from './site';
+  CorridorGeometry, LatLon, Walk, WalkLeg as Leg, corridorGeometryFromWalk,
+  distancePointToPolygonMeters, distancePointToSegmentMeters, distanceSegmentToPolygonMeters,
+  haversineMeters, lateralSeparationM, movePointAcrossBoundary, movePointAwayFromPolygon,
+  movePointInsidePolygon, pointInOrOnPolygon, pointInPolygon, profileForTool,
+  rangeAvailableSeconds, round6, segmentStaysInsidePolygon, verticalSeparationM, viaCandidates,
+  windAdjustedSeconds as windAdjust, policyFor as profileLimits, walkPlan as walkMission,
+  INDEFINITE_HOLD_S as HOLD_S,
+} from './geometry';
+import { SiteModel } from './site';
 import { validateMissionPlan } from './validate';
-import { PROFILE_POLICY, VERIFIER_POLICY } from './policy';
+import {
+  DECONFLICTION_POLICY, OBSERVATION_POLICY, PROFILE_POLICY, RF_POLICY, UNATTENDED_ENVELOPE,
+  VERIFIER_POLICY, canonicalProfile,
+} from './policy';
 
 export const HARD_MIN_STANDOFF_M = VERIFIER_POLICY.hardMinStandoffM;
 export const HARD_MAX_SPEED_MPS = VERIFIER_POLICY.hardMaxSpeedMps;
@@ -28,21 +42,29 @@ export const DRAIN_PCT_PER_S = 100 / NOMINAL_ENDURANCE_S;
 export const WIND_TIME_FACTOR_PER_MPS = VERIFIER_POLICY.windTimeFactorPerMps;
 export const MAX_WIND_MPS = VERIFIER_POLICY.maxWindMps;
 export const ANOMALY_PROXIMITY_M = VERIFIER_POLICY.anomalyProximityM;
+/** How far an observation-class target (an orbit centre) may sit from the cue. */
+export const ORBIT_CENTRE_TOLERANCE_M = OBSERVATION_POLICY.orbitCentreToleranceM;
+/** Seconds an RF event is part of the CURRENT airspace picture (FM-51). */
+export const RF_EVENT_WINDOW_S = RF_POLICY.eventWindowS;
 export const DEFAULT_MAX_SORTIE_S = VERIFIER_POLICY.maxSortieS;
 export const DEFAULT_DISPATCH_MIN_SOC_PCT = VERIFIER_POLICY.dispatchMinSocPct;
 export const DEFAULT_CELL_IMBALANCE_MAX_V = VERIFIER_POLICY.cellImbalanceMaxV;
 export const DEFAULT_BATT_TEMP_MAX_C = VERIFIER_POLICY.battTempMaxC;
 export const CORRECTION_MARGIN_M = 5;
-export const INDEFINITE_HOLD_S = 30;
 export const MAX_HOLD_S = 60;
 export const MAX_ORBIT_LAPS = 3;
-export const CONSERVATIVE_VERTICAL_SPEED_MPS = 2;
-export const RTL_LANDING_ALLOWANCE_S = 15;
+/** Flight seconds charged to a hold with no declared duration (geometry.ts). */
+const INDEFINITE_HOLD_S = HOLD_S;
+/** Nominal inter-vehicle separation, metres (ADR D21). */
+export const MIN_SEPARATION_M = DECONFLICTION_POLICY.minSeparationM;
+/** Vertical stagger applied when two corridors cross, metres (ADR D21). */
+export const ALTITUDE_STAGGER_M = DECONFLICTION_POLICY.altitudeStaggerM;
 
 export const CHECK_ORDER = [
   'schema', 'site_valid', 'nav_source', 'readiness', 'wind', 'rf_environment',
   'airspace', 'anomaly_proximity', 'altitude', 'speed', 'standoff', 'geofence',
   'nfz_transit', 'nfz_orbit', 'terminal', 'loiter', 'range', 'sortie',
+  'attended', 'deconfliction',
 ] as const;
 
 export interface TelemetrySnapshot {
@@ -59,6 +81,16 @@ export interface VerificationContext {
   currentAltitudeM?: number;
   readiness?: { ready: boolean; reasons: string[] };
   windMps?: number;
+  /**
+   * Where `windMps` came from. `measured` is a wind report from the vehicle or
+   * the site; `assumed` is the ground station's documented stand-in when no
+   * report has arrived yet (FM-72). An assumed wind is good enough to fly
+   * ATTENDED on — a human is watching the aircraft and the sky — and is never
+   * good enough to dispatch UNATTENDED, where the wind limit is the only thing
+   * standing between an unwatched aircraft and a gust. Absent means `measured`,
+   * so every existing caller that supplies a real wind keeps its behaviour.
+   */
+  windSource?: 'measured' | 'assumed';
   anomaly?: Anomaly;
   rfEvents?: RfEventMessage[];
   sdrState?: 'warming' | 'nominal' | 'degraded' | 'no_device' | 'saturated';
@@ -70,22 +102,43 @@ export interface VerificationContext {
   cellImbalanceMaxV?: number;
   battTempMaxC?: number;
   profileCapabilities?: CapabilityProfile[];
+
+  /* ---- attendance (ADR D23 / docs/CONOPS.md §2) ---- */
+  /** Attendance mode this dispatch would fly in. Absent means `attended`. */
+  mode?: AttendanceMode;
+  /**
+   * Set by triage's lure rule (docs/THREAT_MODEL.md § A6.2): a repeated,
+   * pattern-forming cue that a human should look at before anything flies.
+   * Advisory when attended; a REJECTION when unattended.
+   */
+  requiresOperator?: boolean;
+  requiresOperatorReason?: string;
+  /** Unattended sorties already flown in the trailing hour (cap: 2). */
+  unattendedSortiesLastHour?: number;
+  /** True while an escalation is still undelivered (docs/CONOPS.md §3). */
+  escalationUndelivered?: boolean;
+
+  /* ---- fleet deconfliction (ADR D21 / D26) ---- */
+  /** This plan's vehicle; peers are every other entry in `fleet`. */
+  vehicleId?: string;
+  /** Hub-relayed fleet message contents: the ONLY source of peer state. */
+  fleet?: FleetVehicle[];
+  /**
+   * `FleetMessage.ts` — the epoch ms the peer state above was published at.
+   * `FleetVehicle` carries no timestamp of its own, so this is the only handle
+   * on peer-data age, and age is what doubles the required separation (D21).
+   * Absent means "as fresh as `now`", which is the OPTIMISTIC reading: a caller
+   * that cannot say how old its fleet view is gets the nominal 40 m, so the
+   * hub must pass this through for the stale rule to bite.
+   */
+  fleetTs?: number;
+  /** Epoch ms this plan would be dispatched at (defaults to `now`). */
+  dispatchAt?: number;
+  /** Epoch ms "now" for time-overlap maths (defaults to Date.now()). */
+  now?: number;
 }
 
-interface Target {
-  toolIndex: number;
-  kind: 'goto_gps' | 'goto_relative' | 'orbit_point';
-  pos: LatLon;
-  altM: number;
-  radiusM?: number;
-}
-interface Leg {
-  toolIndex: number; from: LatLon; to: LatLon; fromAltM: number; toAltM: number;
-  minAltM: number; maxAltM: number;
-  lengthM: number; speedMps: number;
-}
-interface Walk { targets: Target[]; legs: Leg[]; totalPathM: number; totalFlightS: number; }
-interface CorrectionResult { plan: MissionPlan; edits: Map<string, string[]>; }
+interface CorrectionResult { plan: MissionPlan; edits: Map<string, string[]>; holdUntil?: number; }
 
 function finite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -93,40 +146,12 @@ function finite(value: unknown): value is number {
 function fmt(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(1);
 }
-function round6(value: number): number { return Math.round(value * 1e6) / 1e6; }
 function ok(name: string, reason: string): VerificationCheck { return { name, ok: true, reason }; }
 function fail(name: string, reason: string): VerificationCheck { return { name, ok: false, reason }; }
 
-function profileForTool(tool: PlanTool, plan: MissionPlan): MissionProfile {
-  if (tool.tool === 'goto_gps' && tool.profile) return tool.profile;
-  if (tool.tool === 'follow' || tool.tool === 'orbit') return tool.profile;
-  return plan.profile;
-}
-
+/** Profile limits for this plan, tightened by companion-reported capabilities. */
 function policyFor(profile: MissionProfile, context: VerificationContext) {
-  const base = PROFILE_POLICY[profile];
-  const effective = context.profileCapabilities?.find((entry) => entry.profile === profile);
-  return effective ? {
-    maxSpeedMps: Math.min(base.maxSpeedMps, effective.max_speed_mps),
-    maxAltitudeM: Math.min(base.maxAltitudeM, effective.max_altitude_m),
-    standoffM: Math.max(base.standoffM, effective.min_standoff_m),
-    maxSortieS: base.maxSortieS,
-  } : base;
-}
-
-function translateMeters(origin: LatLon, eastM: number, northM: number): LatLon {
-  return {
-    lat: origin.lat + northM / 111_320,
-    lon: origin.lon + eastM / (111_320 * Math.cos(origin.lat * Math.PI / 180)),
-  };
-}
-
-function orbitEntry(center: LatLon, current: LatLon, radiusM: number): LatLon {
-  const distance = haversineMeters(center, current);
-  if (distance < 0.01) return translateMeters(center, 0, radiusM);
-  const scale = radiusM / distance;
-  return { lat: center.lat + (current.lat - center.lat) * scale,
-    lon: center.lon + (current.lon - center.lon) * scale };
+  return profileLimits(profile, context.profileCapabilities);
 }
 
 function contextOf(input?: TelemetrySnapshot | VerificationContext): VerificationContext {
@@ -153,67 +178,43 @@ function startAltitude(context: VerificationContext): number | null {
   return finite(value) ? value : null;
 }
 
+/**
+ * RF events that are part of the CURRENT airspace picture (FM-51).
+ *
+ * An RF report describes a moment. Without a window one hostile-drone report at
+ * the top of a session refuses every mission for the rest of it, which is both
+ * wrong and — because the operator cannot clear it — unrecoverable in place.
+ * The window is `RF_POLICY.eventWindowS`, the same 60 s
+ * `rf_adapter.CORRELATION_WINDOW_MS` uses to call an RF hit and a GPS loss the
+ * same event.
+ *
+ * A caller that supplies no `now` gets every event treated as current: not
+ * knowing what time it is must never LOOSEN airspace, only tighten it. Events
+ * dated in the future (clock skew between the SDR host and the ground station)
+ * are current for the same reason.
+ */
+export function currentRfEvents(context: VerificationContext): RfEventMessage[] {
+  const events = context.rfEvents ?? [];
+  if (context.now === undefined) return events;
+  const oldest = context.now - RF_POLICY.eventWindowS * 1000;
+  return events.filter((event) => !finite(event.ts) || event.ts >= oldest);
+}
+
+/** The plan walk, anchored at the vehicle's reported position and altitude. */
 function walkPlan(plan: MissionPlan, site: SiteModel, context: VerificationContext): Walk {
-  const targets: Target[] = [];
-  const legs: Leg[] = [];
-  let totalPathM = 0;
-  let totalFlightS = 0;
-  const home = { lat: site.home.lat, lon: site.home.lon };
-  let current = startPosition(context, site);
-  let currentAlt = startAltitude(context);
-  const addLeg = (toolIndex: number, to: LatLon, altitudeM: number, speedMps: number) => {
-    const lengthM = haversineMeters(current, to);
-    const fromAltM = currentAlt ?? site.altBandM.min;
-    const maxAltM = Math.max(fromAltM, altitudeM);
-    const minAltM = Math.min(fromAltM, altitudeM);
-    legs.push({ toolIndex, from: current, to, fromAltM, toAltM: altitudeM, minAltM, maxAltM, lengthM, speedMps });
-    totalPathM += lengthM;
-    totalFlightS += speedMps > 0 ? lengthM / speedMps : Infinity;
-    totalFlightS += Math.abs(altitudeM - fromAltM) / CONSERVATIVE_VERTICAL_SPEED_MPS;
-    current = to;
-    currentAlt = altitudeM;
-  };
-  plan.tools.forEach((tool, index) => {
-    const profile = profileForTool(tool, plan);
-    const speed = Math.min(PROFILE_SPEED_MPS[profile], policyFor(profile, context).maxSpeedMps);
-    switch (tool.tool) {
-      case 'goto_gps': {
-        const to = { lat: tool.lat, lon: tool.lon };
-        addLeg(index, to, tool.alt, tool.speed_mps ?? speed);
-        targets.push({ toolIndex: index, kind: 'goto_gps', pos: to, altM: tool.alt });
-        break;
-      }
-      case 'goto_relative': {
-        const to = translateMeters(current, tool.dx, tool.dy);
-        const altitude = (currentAlt ?? site.altBandM.min) + tool.dz;
-        addLeg(index, to, altitude, speed);
-        targets.push({ toolIndex: index, kind: 'goto_relative', pos: to, altM: altitude });
-        break;
-      }
-      case 'orbit_point': {
-        const altitude = currentAlt ?? site.altBandM.min;
-        const center = { lat: tool.lat, lon: tool.lon };
-        const entry = orbitEntry(center, current, tool.radius);
-        addLeg(index, entry, altitude, speed);
-        const orbitLength = 2 * Math.PI * tool.radius * (tool.laps ?? 1);
-        totalPathM += orbitLength;
-        totalFlightS += speed > 0 ? orbitLength / speed : Infinity;
-        targets.push({ toolIndex: index, kind: 'orbit_point', pos: center, altM: altitude, radiusM: tool.radius });
-        break;
-      }
-      case 'hold': totalFlightS += tool.durationS ?? INDEFINITE_HOLD_S; break;
-      case 'follow': totalFlightS += INDEFINITE_HOLD_S; break;
-      case 'orbit': totalFlightS += 2 * Math.PI * policyFor(profile, context).standoffM / speed; break;
-      case 'rtl': {
-        const altitude = currentAlt ?? site.altBandM.min;
-        addLeg(index, home, altitude, speed);
-        totalFlightS += altitude / CONSERVATIVE_VERTICAL_SPEED_MPS + RTL_LANDING_ALLOWANCE_S;
-        currentAlt = null;
-        break;
-      }
-    }
+  return walkMission(plan, site, {
+    start: startPosition(context, site),
+    startAltM: startAltitude(context),
+    capabilities: context.profileCapabilities,
   });
-  return { targets, legs, totalPathM, totalFlightS };
+}
+
+/**
+ * The `site_valid` predicate, exported so the deterministic planner refuses an
+ * unusable site model instead of drawing geometry on it.
+ */
+export function siteValidity(site: SiteModel): VerificationCheck {
+  return checkSite(site);
 }
 
 function checkSite(site: SiteModel): VerificationCheck {
@@ -290,37 +291,45 @@ function checkReadiness(walk: Walk, site: SiteModel, context: VerificationContex
 function checkWind(context: VerificationContext): VerificationCheck {
   const wind = context.windMps;
   if (!finite(wind) || wind < 0) return fail('wind', 'wind speed must be a finite non-negative number');
-  return wind <= MAX_WIND_MPS ? ok('wind', `wind ${fmt(wind)} m/s is within ${MAX_WIND_MPS} m/s`) :
-    fail('wind', `wind ${fmt(wind)} m/s exceeds ${MAX_WIND_MPS} m/s; hold then RTL`);
+  const provenance = context.windSource === 'assumed'
+    ? ' (assumed: no wind report has been received)' : '';
+  return wind <= MAX_WIND_MPS
+    ? ok('wind', `wind ${fmt(wind)} m/s is within ${MAX_WIND_MPS} m/s${provenance}`)
+    : fail('wind', `wind ${fmt(wind)} m/s exceeds ${MAX_WIND_MPS} m/s; hold then RTL${provenance}`);
 }
 
+/**
+ * `rf_environment` — is the RF picture good enough to fly on?
+ *
+ * Three outcomes, and "clear" is the narrowest of them (FM-50). Asserting "no
+ * blocking RF interference" requires a receiver that could have SEEN the
+ * interference: a saturated front end, a degraded one, or one still warming up
+ * is blind, and a blind receiver reports UNKNOWN. Unknown is not a refusal —
+ * a missing SDR never grounded the aircraft and an impaired one must not
+ * either — but it must never read as an all-clear the hardware cannot support.
+ */
 function checkRfEnvironment(context: VerificationContext): VerificationCheck {
   if (!Array.isArray(context.rfEvents) || context.sdrState === undefined) {
     return fail('rf_environment', 'RF events and SDR health state are required before execution');
   }
-  const interference = (context.rfEvents ?? []).filter((event) => event.kind === 'gnss_interference');
+  const interference = currentRfEvents(context).filter((event) => event.kind === 'gnss_interference');
   if (interference.length && !context.rfOverride) {
     return fail('rf_environment', 'GNSS interference detected; operator override required');
   }
-  if (context.sdrState === 'no_device') return ok('rf_environment', 'SDR unavailable; RF environment unknown (no override required)');
-  return ok('rf_environment', interference.length ? 'operator accepted RF override' : 'no blocking RF interference');
-}
-
-function distancePointToSegmentMeters(point: LatLon, a: LatLon, b: LatLon): number {
-  const latScale = 111_320;
-  const lonScale = latScale * Math.cos(a.lat * Math.PI / 180);
-  const bx = (b.lon - a.lon) * lonScale;
-  const by = (b.lat - a.lat) * latScale;
-  const px = (point.lon - a.lon) * lonScale;
-  const py = (point.lat - a.lat) * latScale;
-  const denom = bx * bx + by * by;
-  const t = denom === 0 ? 0 : Math.max(0, Math.min(1, (px * bx + py * by) / denom));
-  return Math.hypot(px - t * bx, py - t * by);
+  if (interference.length) return ok('rf_environment', 'operator accepted RF override');
+  if (context.sdrState === 'no_device') {
+    return ok('rf_environment', 'SDR unavailable; RF environment unknown (no override required)');
+  }
+  if ((RF_POLICY.impairedSdrStates as readonly string[]).includes(context.sdrState)) {
+    return ok('rf_environment',
+      `SDR front end is ${context.sdrState}; RF environment unknown — no interference can be ruled out`);
+  }
+  return ok('rf_environment', 'no blocking RF interference');
 }
 
 function checkAirspace(walk: Walk, site: SiteModel, context: VerificationContext): VerificationCheck {
   const conflicts: string[] = [];
-  (context.rfEvents ?? []).filter((event) => event.kind === 'hostile_drone').forEach((event) => {
+  currentRfEvents(context).filter((event) => event.kind === 'hostile_drone').forEach((event) => {
     if (!finite(event.lat) || !finite(event.lon)) {
       conflicts.push('hostile drone has no trusted position');
       return;
@@ -334,12 +343,47 @@ function checkAirspace(walk: Walk, site: SiteModel, context: VerificationContext
   return conflicts.length ? fail('airspace', conflicts.join('; ')) : ok('airspace', 'no hostile-drone conflict');
 }
 
+/**
+ * `anomaly_proximity` — does this mission actually look at the cue it answers?
+ *
+ * Two bounds, because the two questions are different (FM-73):
+ *
+ *  1. SOME target must be within `ANOMALY_PROXIMITY_M` of the cue: the mission
+ *     goes to the right part of the site at all.
+ *  2. Every OBSERVATION-class target — an orbit centre is the observation
+ *     point — must be within `ORBIT_CENTRE_TOLERANCE_M` of the cue. The outer
+ *     bound is far too loose here: an orbit centre 150 m from the cue, with a
+ *     25 m radius, produces a mission that flies, orbits an empty field, sees
+ *     nothing relevant, and hands the operator a report that names the cue's
+ *     location. That plan passed every check before this bound existed.
+ *
+ * The measured distances are in the reason so the operator reads metres, not
+ * a verdict, on the plan they are about to approve.
+ */
 function checkAnomalyProximity(walk: Walk, context: VerificationContext): VerificationCheck {
   if (!context.anomaly) return fail('anomaly_proximity', 'anomaly location is required before execution');
+  const anomaly = context.anomaly;
   const nearest = walk.targets.length ? Math.min(...walk.targets.map((target) =>
-    haversineMeters(target.pos, context.anomaly as Anomaly))) : Infinity;
-  return nearest <= ANOMALY_PROXIMITY_M ? ok('anomaly_proximity', `nearest mission target is ${fmt(nearest)} m from the anomaly`) :
-    fail('anomaly_proximity', `no mission target is within ${ANOMALY_PROXIMITY_M} m of the anomaly`);
+    haversineMeters(target.pos, anomaly))) : Infinity;
+  if (nearest > ANOMALY_PROXIMITY_M) {
+    return fail('anomaly_proximity',
+      `no mission target is within ${ANOMALY_PROXIMITY_M} m of the anomaly (nearest ${fmt(nearest)} m)`);
+  }
+  const strays = walk.targets
+    .filter((target) => target.kind === 'orbit_point')
+    .map((target) => ({ index: target.toolIndex, distance: haversineMeters(target.pos, anomaly) }))
+    .filter((entry) => entry.distance > ORBIT_CENTRE_TOLERANCE_M);
+  if (strays.length) {
+    return fail('anomaly_proximity', strays.map((entry) =>
+      `tool ${entry.index} orbit centre is ${fmt(entry.distance)} m from the anomaly; ` +
+      `an observation point must be within ${ORBIT_CENTRE_TOLERANCE_M} m of the cue it answers`).join('; '));
+  }
+  const centres = walk.targets.filter((target) => target.kind === 'orbit_point');
+  const observation = centres.length
+    ? `; nearest observation centre ${fmt(Math.min(...centres.map((target) =>
+      haversineMeters(target.pos, anomaly))))} m` : '';
+  return ok('anomaly_proximity',
+    `nearest mission target is ${fmt(nearest)} m from the anomaly${observation}`);
 }
 
 function checkAltitude(walk: Walk, plan: MissionPlan, site: SiteModel, context: VerificationContext): VerificationCheck {
@@ -431,15 +475,12 @@ function liveSoc(context: VerificationContext): number {
   return finite(value) ? value : Number.NaN;
 }
 function windAdjustedSeconds(walk: Walk, context: VerificationContext): number {
-  return walk.totalFlightS * (1 + WIND_TIME_FACTOR_PER_MPS * (context.windMps ?? 0));
+  return windAdjust(walk.totalFlightS, context.windMps ?? 0);
 }
 function checkRange(walk: Walk, context: VerificationContext): VerificationCheck {
   const soc = liveSoc(context);
   if (!finite(soc) || soc < 0 || soc > 100) return fail('range', 'live battery SoC must be finite and in [0, 100]');
-  const modelAvailable = NOMINAL_ENDURANCE_S * Math.max(0, (soc - RESERVE_PCT) / 100);
-  const remaining = batteryOf(context)?.remaining_s;
-  const liveAvailable = finite(remaining) ? remaining * Math.max(0, (soc - RESERVE_PCT) / Math.max(soc, 1)) : Infinity;
-  const available = Math.min(modelAvailable, liveAvailable);
+  const available = rangeAvailableSeconds(soc, batteryOf(context)?.remaining_s);
   const required = windAdjustedSeconds(walk, context);
   const reason = `wind-adjusted ${fmt(required)} s required vs ${fmt(available)} s available at ${fmt(soc)}% SoC with ${RESERVE_PCT}% reserve`;
   return required <= available ? ok('range', reason) : fail('range', `insufficient live-SoC range: ${reason}`);
@@ -454,6 +495,180 @@ function checkSortie(walk: Walk, plan: MissionPlan, context: VerificationContext
     fail('sortie', `sortie ${fmt(required)} s exceeds ${fmt(cap)} s cap; split into two sorties`);
 }
 
+/* ---------------------------------------------------------------------------
+ * attended — the UNATTENDED_ENVELOPE gate (ADR D23, docs/CONOPS.md §2).
+ *
+ * Attended flight is a no-op pass: the envelope exists because nobody is
+ * watching. Unattended, anything outside it is REJECTED (never corrected —
+ * quietly shrinking a task into the envelope would hide the refusal a human
+ * is supposed to see), and the refusal escalates.
+ * ------------------------------------------------------------------------- */
+
+function unattendedFailures(walk: Walk, plan: MissionPlan, site: SiteModel,
+  context: VerificationContext): string[] {
+  const failures: string[] = [];
+  const envelope = UNATTENDED_ENVELOPE;
+  if (context.requiresOperator) {
+    failures.push(`task is flagged for operator review${
+      context.requiresOperatorReason ? `: ${context.requiresOperatorReason}` : ''}`);
+  }
+  if (canonicalProfile(plan.profile) !== 'inspect') {
+    failures.push(`profile ${plan.profile} is outside the unattended envelope (inspect only)`);
+  }
+  walk.targets.forEach((target) => {
+    if (!pointInOrOnPolygon(target.pos, site.perimeter)) {
+      failures.push(`tool ${target.toolIndex} target is outside the site perimeter`);
+    }
+    if (!finite(target.altM) || target.altM < envelope.altBandM.min || target.altM > envelope.altBandM.max) {
+      failures.push(`tool ${target.toolIndex} altitude ${fmt(target.altM)} m is outside the unattended band ` +
+        `[${envelope.altBandM.min}, ${envelope.altBandM.max}] m`);
+    }
+  });
+  plan.tools.forEach((tool, index) => {
+    if (tool.tool === 'orbit_point' && (tool.laps ?? 1) > envelope.maxLaps) {
+      failures.push(`tool ${index} orbit exceeds ${envelope.maxLaps} unattended lap`);
+    }
+    if (tool.tool === 'hold' && (tool.durationS ?? INDEFINITE_HOLD_S) > envelope.maxHoldS) {
+      failures.push(`tool ${index} hold exceeds the ${envelope.maxHoldS} s unattended limit`);
+    }
+  });
+  const wind = context.windMps;
+  if (!finite(wind) || wind > envelope.maxWindMps) {
+    failures.push(`wind ${finite(wind) ? fmt(wind) : 'unknown'} m/s exceeds the ${envelope.maxWindMps} m/s unattended limit`);
+  } else if (context.windSource === 'assumed') {
+    // Attended, an assumed wind is a human's problem to watch. Unattended, the
+    // wind limit is the whole control, and a stand-in number is not a
+    // measurement (FM-72).
+    failures.push('wind is assumed, not measured; unattended dispatch needs a real wind report');
+  }
+  if (navSourceOf(context) !== 'gps') failures.push('unattended dispatch requires a GPS navigation source');
+  if (currentRfEvents(context).some((event) => event.kind === 'gnss_interference')) {
+    failures.push('RF interference is present; GNSS integrity is unverifiable');
+  }
+  if (currentRfEvents(context).some((event) => event.kind === 'hostile_drone')) {
+    failures.push('a hostile drone is detected; airspace is yielded, never contested');
+  }
+  if (context.isNight && context.sensors?.thermal !== 'ok') {
+    failures.push('a night mission with no healthy thermal produces no observation worth flying for');
+  }
+  const sorties = context.unattendedSortiesLastHour ?? 0;
+  if (sorties >= envelope.maxSortiesPerHour) {
+    failures.push(`${sorties} unattended sorties in the trailing hour reaches the ${envelope.maxSortiesPerHour}/h cap`);
+  }
+  if (context.escalationUndelivered) {
+    failures.push('an escalation is still undelivered; unattended dispatch stays refused');
+  }
+  return failures;
+}
+
+function checkAttended(walk: Walk, plan: MissionPlan, site: SiteModel,
+  context: VerificationContext): VerificationCheck {
+  if ((context.mode ?? 'attended') === 'attended') {
+    return context.requiresOperator
+      ? ok('attended', `attended operation; operator review flagged${
+        context.requiresOperatorReason ? `: ${context.requiresOperatorReason}` : ''}`)
+      : ok('attended', 'attended operation; the unattended envelope does not apply');
+  }
+  const failures = unattendedFailures(walk, plan, site, context);
+  return failures.length
+    ? fail('attended', `needs_operator: ${failures.join('; ')}`)
+    : ok('attended', 'plan is inside UNATTENDED_ENVELOPE');
+}
+
+/* ---------------------------------------------------------------------------
+ * deconfliction — two vehicles, star topology (ADR D21 / D26).
+ *
+ * Peer state arrives ONLY through the hub-relayed fleet message, which is what
+ * makes the staleness rule enforceable: separation is a function of peer data
+ * age, and there is exactly one path by which peer data arrives.
+ * ------------------------------------------------------------------------- */
+
+/** One peer, reduced to the geometry and the window separation is measured in. */
+export interface PeerGeometry {
+  vehicleId: string;
+  geometry: CorridorGeometry;
+  /** Epoch ms the peer's sortie must end by; Infinity when it has no cap. */
+  endsAt: number;
+  /** Age of this peer's data, seconds (D21: >3 s doubles the separation). */
+  ageS: number;
+}
+
+/**
+ * Peers this plan must separate from, built ONLY from the hub-relayed fleet
+ * message (ADR D26). A vehicle on the pad with no committed corridor is not a
+ * separation problem; one that is airborne, or committed to the air, is.
+ */
+export function peerGeometry(context: VerificationContext): PeerGeometry[] {
+  const ageS = context.fleetTs === undefined ? 0
+    : Math.max(0, ((context.now ?? Date.now()) - context.fleetTs) / 1000);
+  return (context.fleet ?? [])
+    .filter((vehicle) => vehicle.vehicleId !== (context.vehicleId ?? ''))
+    .flatMap((vehicle: FleetVehicle) => {
+      const airborne = vehicle.sortie !== null || (vehicle.position?.relAlt ?? 0) > 1 ||
+        vehicle.plannedCorridor !== undefined;
+      if (!airborne) return [];
+      const corridor = vehicle.plannedCorridor;
+      const position = finite(vehicle.position?.lat) && finite(vehicle.position?.lon)
+        ? [{ lat: vehicle.position.lat, lon: vehicle.position.lon }] : [];
+      return [{
+        vehicleId: vehicle.vehicleId,
+        geometry: {
+          points: position,
+          legs: (corridor?.legs ?? []).map((leg) => ({ from: leg.from, to: leg.to })),
+          orbits: (corridor?.orbits ?? []).map((orbit) => ({ center: orbit.center, radiusM: orbit.radius_m })),
+          altBandM: corridor?.alt_band_m ?? (finite(vehicle.position?.relAlt)
+            ? { min: vehicle.position.relAlt, max: vehicle.position.relAlt } : null),
+        },
+        endsAt: vehicle.sortie ? vehicle.sortie.must_rtl_by : Infinity,
+        ageS,
+      }];
+    });
+}
+
+/** Lateral separation required from one peer, metres (doubled when stale). */
+export function requiredSeparationM(peer: PeerGeometry): number {
+  return peer.ageS > DECONFLICTION_POLICY.stalePeerS
+    ? DECONFLICTION_POLICY.staleSeparationM : DECONFLICTION_POLICY.minSeparationM;
+}
+
+function checkDeconfliction(walk: Walk, plan: MissionPlan, context: VerificationContext): VerificationCheck {
+  const peers = peerGeometry(context);
+  if (!peers.length) return ok('deconfliction', 'no peer vehicle is airborne or committed to the air');
+  const now = context.now ?? Date.now();
+  const dispatchAt = context.dispatchAt ?? now;
+  const endsAt = dispatchAt + windAdjustedSeconds(walk, context) * 1000;
+  const ours = corridorGeometryFromWalk(walk);
+  const conflicts: string[] = [];
+  const cleared: string[] = [];
+  for (const peer of peers) {
+    if (!(dispatchAt < peer.endsAt && now < endsAt)) {
+      cleared.push(`${peer.vehicleId} (no time overlap)`);
+      continue;
+    }
+    const sharedCentre = ours.orbits.some((orbit) => peer.geometry.orbits.some((peerOrbit) =>
+      haversineMeters(orbit.center, peerOrbit.center) <= DECONFLICTION_POLICY.sharedOrbitCentreM));
+    if (sharedCentre) {
+      conflicts.push(`${peer.vehicleId} already orbits this observation point; two vehicles never share an orbit centre`);
+      continue;
+    }
+    const required = requiredSeparationM(peer);
+    const lateral = lateralSeparationM(ours, peer.geometry);
+    if (lateral >= required) {
+      cleared.push(`${peer.vehicleId} at ${fmt(lateral)} m`);
+      continue;
+    }
+    const vertical = verticalSeparationM(ours.altBandM, peer.geometry.altBandM);
+    if (vertical >= DECONFLICTION_POLICY.altitudeStaggerM) {
+      cleared.push(`${peer.vehicleId} crossing at ${fmt(lateral)} m lateral with ${fmt(vertical)} m stagger`);
+      continue;
+    }
+    conflicts.push(`${peer.vehicleId} is ${fmt(lateral)} m away with ${fmt(vertical)} m altitude stagger; ` +
+      `${required} m lateral or ${DECONFLICTION_POLICY.altitudeStaggerM} m stagger required`);
+  }
+  return conflicts.length ? fail('deconfliction', conflicts.join('; '))
+    : ok('deconfliction', `separation holds against ${cleared.join(', ')}`);
+}
+
 function runChecks(plan: MissionPlan, site: SiteModel, context: VerificationContext,
   schema = ok('schema', 'MissionPlan schema is valid and finite'), siteCheck = checkSite(site)): VerificationCheck[] {
   const walk = walkPlan(plan, site, context);
@@ -462,7 +677,8 @@ function runChecks(plan: MissionPlan, site: SiteModel, context: VerificationCont
     checkAnomalyProximity(walk, context), checkAltitude(walk, plan, site, context), checkSpeed(walk, plan, context),
     checkStandoff(plan, context), checkGeofence(walk, site), checkNfzTransit(walk, site),
     checkNfzOrbit(walk, site), checkTerminal(plan), checkLoiter(plan), checkRange(walk, context),
-    checkSortie(walk, plan, context)];
+    checkSortie(walk, plan, context), checkAttended(walk, plan, site, context),
+    checkDeconfliction(walk, plan, context)];
 }
 
 function blockedChecks(schema: VerificationCheck, site: VerificationCheck): VerificationCheck[] {
@@ -563,15 +779,9 @@ function buildCorrectedPlan(plan: MissionPlan, site: SiteModel, context: Verific
     // Give corner routes enough radial room for both adjacent legs to remain
     // outside the buffered polygon after coordinate rounding.
     const viaClearance = site.nfzBufferM * 2 + CORRECTION_MARGIN_M;
-    const points = zone.polygon.map((vertex) => movePointAwayFromPolygon(vertex, zone.polygon, viaClearance))
-      .filter((point) => pointInOrOnPolygon(point, site.geofence))
-      .filter((point) => site.nfz.every((other) =>
-        distanceSegmentToPolygonMeters(leg.from, point, other.polygon) >= site.nfzBufferM - 0.05 &&
-        distanceSegmentToPolygonMeters(point, leg.to, other.polygon) >= site.nfzBufferM - 0.05))
-      .sort((a, b) => haversineMeters(leg.from, a) + haversineMeters(a, leg.to) -
-        haversineMeters(leg.from, b) - haversineMeters(b, leg.to));
+    const points = viaCandidates(leg.from, leg.to, zone, site, viaClearance);
     if (!points.length) break;
-    const via = points[0];
+    const via = points[0].point;
     const altitude = Math.min(site.altBandM.max, policyFor(plan.profile, context).maxAltitudeM,
       Math.max(site.altBandM.min, leg.maxAltM));
     tools = [...candidate.tools];
@@ -605,7 +815,86 @@ function buildCorrectedPlan(plan: MissionPlan, site: SiteModel, context: Verific
     });
     candidate = { ...candidate, tools };
   }
-  return { plan: candidate, edits };
+
+  /* Deconfliction, in the documented order: altitude stagger first, then a
+   * delayed dispatch, and otherwise nothing — the check stays failed and the
+   * verdict is `rejected`. Neither correction ever moves the route sideways:
+   * lateral geometry answers the anomaly, and it is not ours to renegotiate. */
+  let holdUntil: number | undefined;
+  if (failed.has('deconfliction') && !sharesOrbitCentre(candidate, site, context)) {
+    const staggered = staggerForSeparation(candidate, site, context);
+    if (staggered) {
+      candidate = staggered.plan;
+      note('deconfliction', `staggered mission altitude to ${fmt(staggered.altitudeM)} m for peer separation`);
+    } else {
+      const delay = delayedDispatchAt(candidate, site, context);
+      if (delay !== undefined) {
+        holdUntil = delay;
+        note('deconfliction', `delayed dispatch until ${new Date(delay).toISOString()} for peer separation`);
+      }
+    }
+  }
+  return { plan: candidate, edits, ...(holdUntil === undefined ? {} : { holdUntil }) };
+}
+
+/**
+ * Two vehicles orbiting one point is not a geometry problem to be corrected —
+ * it is a tasking mistake — so a shared orbit centre skips correction entirely
+ * and the verdict stays `rejected`.
+ */
+function sharesOrbitCentre(plan: MissionPlan, site: SiteModel, context: VerificationContext): boolean {
+  const ours = corridorGeometryFromWalk(walkPlan(plan, site, context));
+  return peerGeometry(context).some((peer) => ours.orbits.some((orbit) =>
+    peer.geometry.orbits.some((peerOrbit) =>
+      haversineMeters(orbit.center, peerOrbit.center) <= DECONFLICTION_POLICY.sharedOrbitCentreM)));
+}
+
+/** Peers this candidate would actually share airspace with. */
+export function conflictingPeers(plan: MissionPlan, site: SiteModel, context: VerificationContext): PeerGeometry[] {
+  const walk = walkPlan(plan, site, context);
+  const now = context.now ?? Date.now();
+  const dispatchAt = context.dispatchAt ?? now;
+  const endsAt = dispatchAt + windAdjustedSeconds(walk, context) * 1000;
+  const ours = corridorGeometryFromWalk(walk);
+  return peerGeometry(context).filter((peer) => dispatchAt < peer.endsAt && now < endsAt &&
+    lateralSeparationM(ours, peer.geometry) < requiredSeparationM(peer));
+}
+
+/**
+ * Raise (preferred) or lower the whole mission by at least the 10 m stagger
+ * from every conflicting peer, staying inside the site and profile bands.
+ * Returns null when no legal altitude clears every peer.
+ */
+function staggerForSeparation(plan: MissionPlan, site: SiteModel, context: VerificationContext):
+{ plan: MissionPlan; altitudeM: number } | null {
+  const peers = conflictingPeers(plan, site, context).filter((peer) => peer.geometry.altBandM);
+  if (!peers.length) return null;
+  const floor = site.altBandM.min;
+  const ceiling = Math.min(site.altBandM.max, policyFor(plan.profile, context).maxAltitudeM);
+  const bands = peers.map((peer) => peer.geometry.altBandM as { min: number; max: number });
+  const above = Math.max(...bands.map((band) => band.max)) + ALTITUDE_STAGGER_M;
+  const below = Math.min(...bands.map((band) => band.min)) - ALTITUDE_STAGGER_M;
+  // The band the staggered mission would OCCUPY includes the altitude it starts
+  // from: a vehicle that descends through the peer's band has not staggered.
+  const startAlt = startAltitude(context) ?? site.altBandM.min;
+  const clears = (altitude: number): boolean => altitude >= floor && altitude <= ceiling &&
+    peers.every((peer) => verticalSeparationM(
+      { min: Math.min(startAlt, altitude), max: Math.max(startAlt, altitude) },
+      peer.geometry.altBandM) >= ALTITUDE_STAGGER_M);
+  const altitude = clears(above) ? above : clears(below) ? below : null;
+  if (altitude === null) return null;
+  const tools = plan.tools.map((tool) => tool.tool === 'goto_gps'
+    ? { ...tool, alt: altitude, ...(tool.alt_m === undefined ? {} : { alt_m: altitude }) } : tool);
+  return { plan: { ...plan, tools }, altitudeM: altitude };
+}
+
+/** The epoch-ms dispatch time at which every conflicting peer has gone home. */
+function delayedDispatchAt(plan: MissionPlan, site: SiteModel, context: VerificationContext): number | undefined {
+  const peers = conflictingPeers(plan, site, context);
+  if (!peers.length) return undefined;
+  const latest = Math.max(...peers.map((peer) => peer.endsAt));
+  if (!finite(latest)) return undefined;
+  return latest + DECONFLICTION_POLICY.dispatchDelayMarginS * 1000;
 }
 
 export function verifyMission(inputPlan: MissionPlan, site: SiteModel,
@@ -632,9 +921,22 @@ export function verifyMission(inputPlan: MissionPlan, site: SiteModel,
     const details = correction.edits.get(check.name);
     return details?.length ? { ...check, edit: details.join('; ') } : check;
   });
-  const correctedChecks = runChecks(correction.plan, site, context);
+  // A delayed dispatch is a correction to WHEN, so the re-walk is judged at the
+  // held-until time — otherwise the peer it waits out is still in the way.
+  const correctedContext = correction.holdUntil === undefined
+    ? context : { ...context, dispatchAt: correction.holdUntil };
+  const correctedChecks = runChecks(correction.plan, site, correctedContext);
   if (correction.edits.size && correctedChecks.every((check) => check.ok)) {
-    return { requestId: plan.requestId, verdict: 'corrected', checks: checksWithEdits, correctedPlan: correction.plan };
+    return {
+      requestId: plan.requestId, verdict: 'corrected', checks: checksWithEdits,
+      correctedPlan: correction.plan,
+      ...(correction.holdUntil === undefined ? {} : { holdUntil: correction.holdUntil }),
+    };
   }
-  return { requestId: plan.requestId, verdict: 'rejected', checks: checksWithEdits };
+  // REJECTED: the repair attempt was abandoned, so nothing was applied. The
+  // edits above describe a plan that does not exist and would read to the
+  // operator as repairs made to the plan in front of them (FM-60) — an `edit`
+  // annotation belongs only to a verdict that actually released a corrected
+  // plan. The original checks, unannotated, are what the operator sees.
+  return { requestId: plan.requestId, verdict: 'rejected', checks: original };
 }

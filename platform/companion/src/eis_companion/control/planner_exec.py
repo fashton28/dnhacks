@@ -235,6 +235,21 @@ class PlannerExecutor:
                 return max(float(leg.radius), self._limits.min_standoff)
         return 0.0
 
+    @property
+    def current_observation_center(self) -> Optional[Tuple[float, float]]:
+        """(lat, lon) the active leg observes, or ``None`` when it observes none.
+
+        An orbit leg observes its centre; nothing else does. READ-ONLY: the
+        orchestrator uses it to point the gimbal by pure geometry, and reading
+        it changes no plan state (the gimbal is a sensor, never a control
+        input, so this can never feed back into guidance).
+        """
+        if self._active and self._index < len(self._legs):
+            leg = self._legs[self._index]
+            if isinstance(leg, _OrbitLeg):
+                return (float(leg.lat), float(leg.lon))
+        return None
+
     def progress(self) -> dict:
         """Plan progress for telemetry/status (camelCase, JSON-ready)."""
         tool = None

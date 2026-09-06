@@ -71,7 +71,13 @@ EIS_CONFIG=config/sitl.yaml python -m eis_companion.app
 `config/sitl.yaml` selects the **UDP** FC link and the synthetic `sim` camera
 source (`SimTargetSource` feeds the tracking/guidance loop), and advertises an
 empty video URL so the ground UI renders its mock canvas. The control WebSocket
-comes up on `ws://0.0.0.0:8765`.
+comes up on `ws://127.0.0.1:8765` — **loopback by default**. It takes `arm`,
+`takeoff`, `executePlan` and `emergencyStop`, and every real client runs on this
+machine, so opening it wider is an explicit decision: set `network.host` in the
+YAML (or `EIS_BIND_ALL=true`), which automatically turns
+`security.require_signed_commands` on. A socket the venue LAN can reach must
+authenticate every frame, and `testFault` is refused entirely unless the bind is
+loopback (FM-40).
 
 Point the ground control center's Settings at `host=sitl` (or `127.0.0.1`),
 control port `8765`, and you have the full loop: arm → takeoff → engage tracking

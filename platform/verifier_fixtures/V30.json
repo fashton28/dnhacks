@@ -1,0 +1,130 @@
+{
+  "id": "V30",
+  "scenario": "deconfliction_stagger",
+  "description": "The peer corridor crosses this mission laterally at the same altitude band. The correction is the documented one and in the documented order: altitude stagger first. The mission drops to 10 m below the peer band and stays inside the site and profile bands; the route is never moved sideways.",
+  "covers": [
+    "deconfliction correction",
+    "altitude stagger",
+    "crossing corridors"
+  ],
+  "site": "site.fixture.json",
+  "plan": {
+    "requestId": "fixture-V30",
+    "anomalyId": "fixture-north-anomaly",
+    "profile": "inspect",
+    "rationale": "verifier fixture",
+    "tools": [
+      {
+        "tool": "goto_gps",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "alt": 45
+      },
+      {
+        "tool": "orbit_point",
+        "lat": -26.0869457,
+        "lon": 29.4719,
+        "radius": 5,
+        "laps": 1
+      },
+      {
+        "tool": "rtl"
+      }
+    ]
+  },
+  "probeTask": {
+    "taskId": "probe-V30",
+    "anomalyId": "fixture-north-anomaly",
+    "lookFor": "vehicle",
+    "question": "What is at the flagged change?",
+    "urgency": "immediate",
+    "priority": 0.8,
+    "rationale": "fixture-state probe",
+    "source": "scripted"
+  },
+  "probeRequestId": "probe-V30",
+  "telemetry": {
+    "currentAltitudeM": 31,
+    "vehicleId": "eis-1",
+    "now": 1757116800000,
+    "dispatchAt": 1757116800000,
+    "fleet": [
+      {
+        "vehicleId": "eis-2",
+        "battery": {
+          "soc_pct": 92,
+          "voltage_v": 24.6,
+          "current_a": 12,
+          "cell_delta_v": 0.02,
+          "temp_c": 28,
+          "remaining_s": 1200,
+          "charge_state": "charged",
+          "fault": "",
+          "voltage": 24.6,
+          "current": 12,
+          "remaining": 92
+        },
+        "controlSource": "planner",
+        "failsafe": {
+          "state": "none",
+          "reason": ""
+        },
+        "readiness": {
+          "ready": true,
+          "reasons": [],
+          "eta_ready_s": 0
+        },
+        "position": {
+          "lat": -26.088,
+          "lon": 29.472,
+          "relAlt": 45
+        },
+        "plannedCorridor": {
+          "legs": [
+            {
+              "from": {
+                "lat": -26.088,
+                "lon": 29.47
+              },
+              "to": {
+                "lat": -26.088,
+                "lon": 29.474
+              },
+              "lateral_tol_m": 10
+            }
+          ],
+          "orbits": [],
+          "alt_band_m": {
+            "min": 44,
+            "max": 46
+          },
+          "generated_from": "fixture-V30-peer"
+        },
+        "sortie": {
+          "elapsed_s": 60,
+          "must_rtl_by": 1757117100000
+        }
+      }
+    ]
+  },
+  "expected": {
+    "verdict": "corrected",
+    "failingChecks": [
+      "deconfliction"
+    ],
+    "editedChecks": [
+      "deconfliction"
+    ],
+    "reasonContains": {
+      "deconfliction": [
+        "eis-2",
+        "40 m lateral or 10 m stagger required"
+      ]
+    },
+    "editContains": {
+      "deconfliction": [
+        "staggered mission altitude to 34 m"
+      ]
+    }
+  }
+}

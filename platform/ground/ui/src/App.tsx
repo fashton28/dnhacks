@@ -47,12 +47,15 @@ import {
   useMission,
   missionStore,
   effectivePlan,
+  envelopeOf,
 } from '@/store';
 import type { PlanProposal, ReportResolution } from '@/store';
-import { dataSource, isHubMode, consoleUrl } from '@/dataSource';
-import type { FleetEntry } from '@/dataSource';
+import { dataSource, isHubMode, consoleUrl, fleetCapable } from '@/dataSource';
+import type { DemoScenario, FleetRow } from '@/dataSource';
 import { getSiteModel } from '@/site';
 import type { SiteModel } from '@/site';
+import type { RailHealth } from '@/cues';
+import { windContext } from '@/lib/wind';
 
 import { Toast, Tabs, Badge, Button } from '@/components';
 import {
@@ -71,7 +74,9 @@ import {
   MissionStatusStrip,
   ObservationPanel,
   SimulationPanel,
+  TaskPlanPanel,
 } from '@/panels';
+import type { ReportTab } from '@/panels';
 import {
   ChecklistModal,
   TakeoffModal,
@@ -82,6 +87,7 @@ import {
   TrackingBanner,
   ManualBanner,
   PlannerBanner,
+  UnattendedModal,
 } from '@/views';
 import type { VerificationContext } from '@planner/verifier';
 import type { ObservationSummary } from '@planner/report';
@@ -93,18 +99,18 @@ import bakedAnomalies from '@satdata/anomalies.json';
    plant geometry is never hardcoded (docs/SITE_CONTRACT.md). */
 const FALLBACK_HOME = { lat: 37.7699, lon: -122.4666 };
 
+/**
+ * How long an RF report stays part of the CURRENT airspace picture, ms.
+ * Mirrors `RF_POLICY.eventWindowS` in ground/planner and the 60 s correlation
+ * window in `rf_adapter`. The panel list was bounded by COUNT alone, so one
+ * hostile-drone report early in a session stayed on screen — and in the
+ * verifier's context — for the rest of it (FM-51).
+ */
+const RF_EVENT_WINDOW_MS = 60_000;
+
 /* Center-column view: classic flight ops, the mission (security) workspace, or the ARGUS 3D World view. */
 type CenterView = 'flight' | 'mission' | 'world';
 
-/** Hub-only extensions of the frozen DataSource (fleet list + vehicle selection). */
-interface FleetCapable {
-  onFleetRows(cb: (rows: FleetEntry[]) => void): () => void;
-  setVehicle(id: string): void;
-  getVehicle(): string;
-}
-function fleetCapable(ds: unknown): ds is FleetCapable {
-  return !!ds && typeof (ds as FleetCapable).onFleetRows === 'function' && typeof (ds as FleetCapable).setVehicle === 'function';
-}
 const DEFAULT_SIMULATION_TOGGLES: SimulationToggles = {
   simulateGpsLoss: false, simulateRfInterference: false, simulateHostileDrone: false,
   simulateLinkLoss: false, simulateCameraFail: false, simulateCharging: false,
@@ -132,7 +138,12 @@ type ModalKind =
   | 'settings'
   | 'failsafe'
   | 'pid'
-  | 'logbrowser';
+  | 'logbrowser'
+  | 'unattended';
+
+/** Right-hand column of the mission workspace: observation vs cue provenance.
+ *  Tabs rather than panels — the five-panel discipline holds. */
+type SideView = 'observation' | 'cues';
 
 type ToastSeverity = 'info' | 'success' | 'warning' | 'error' | 'critical';
 interface ToastItem {
@@ -188,6 +199,8 @@ function GroundControl(): JSX.Element {
   const [health, setHealth] = useState<Partial<Record<HealthEventMessage['component'], HealthEventMessage>>>({});
   const [rfEvents, setRfEvents] = useState<RfEventMessage[]>([]);
   const [spectrum, setSpectrum] = useState<SpectrumMessage | null>(null);
+  /** Per-rail cue badges (FM-180); empty on a provider that hosts no rails. */
+  const [railHealth, setRailHealth] = useState<RailHealth[]>([]);
   const [capabilities, setCapabilities] = useState<CapabilitiesMessage | null>(null);
   const [livePlanning, setLivePlanning] = useState(false);
   const [simulationToggles, setSimulationToggles] = useState<SimulationToggles>(() => ({
@@ -202,14 +215,33 @@ function GroundControl(): JSX.Element {
   const [manualActive, setManualActive] = useState(false);
   const [controllerOn, setControllerOn] = useState(false);
   const [centerView, setCenterView] = useState<CenterView>('flight');
-  const [fleet, setFleet] = useState<FleetEntry[]>([]);
+  const [sideView, setSideView] = useState<SideView>('observation');
+  const [reportTab, setReportTab] = useState<ReportTab>('report');
+  const [fleet, setFleet] = useState<FleetRow[]>([]);
   const [vehicleId, setVehicleId] = useState<string>(DEFAULT_VEHICLE_ID);
+  const [gimbalPitch, setGimbalPitch] = useState(45);
+  const [operatorId, setOperatorId] = useState('');
+  /** Per-vehicle breadcrumb tracks, sampled from the fleet stream. */
+  const [trailsByVehicle, setTrailsByVehicle] =
+    useState<Record<string, { lat: number; lon: number }[]>>({});
 
   /* Mission (anomaly → plan → verification → report) state + audit trail. */
   const mission = useMission();
   const autoSwitchedRef = useRef(false);
-  const liveStartedRef = useRef(false);
   const reportingRef = useRef(new Set<string>());
+
+  /* The live-inspection gate. The ref is the re-entrancy guard (a ref is read
+     synchronously, so two fast clicks cannot both pass it); the state is what
+     the button renders from, so clearing the latch actually re-enables it.
+     Before FM-81 this was a ref alone, set BEFORE the planner call and cleared
+     only in `catch`, so a resolved-but-rejected proposal latched the button
+     off for the life of the process. */
+  const liveStartedRef = useRef(false);
+  const [inspectionPlanned, setInspectionPlanned] = useState(false);
+  const setInspectionLatch = useCallback((value: boolean) => {
+    liveStartedRef.current = value;
+    setInspectionPlanned(value);
+  }, []);
 
   /* Connection config is owned by SettingsStore. The host shown in the status
      bar mirrors it; SITL collapses the host label to 'sitl'. */
@@ -284,7 +316,8 @@ function GroundControl(): JSX.Element {
     const offAn = ds.onAnomaly(m => {
       missionStore.ingestAnomaly(m.anomaly, m.vehicleId);
       appendFrame(m);
-      pushToast({ severity: 'warning', title: 'Satellite anomaly detected', message: m.anomaly.id });
+      if (ds.railHealth) setRailHealth(ds.railHealth());
+      pushToast({ severity: 'warning', title: `${m.anomaly.source} cue detected`, message: m.anomaly.id });
       if (!autoSwitchedRef.current) {
         autoSwitchedRef.current = true;
         setCenterView('mission');
@@ -362,19 +395,57 @@ function GroundControl(): JSX.Element {
       setHealth(current => ({ ...current, [m.component]: m }));
       appendFrame(m);
       missionStore.addAudit('health', `${m.component}: ${m.state} — ${m.detail}`, m.vehicleId);
+      // A rail's health changed; re-read the bus's own per-rail view for the
+      // cue badges (a HealthComponent is coarser than a rail — FM-180).
+      if (ds.railHealth) setRailHealth(ds.railHealth());
     });
     const offRf = ds.onRfEvent(m => {
-      setRfEvents(current => [...current.slice(-19), m]);
+      // Bounded by AGE as well as count: an RF report describes a moment, and
+      // one that has aged out of the window is history, not airspace (FM-51).
+      setRfEvents(current => [...current, m]
+        .filter(e => m.ts - e.ts <= RF_EVENT_WINDOW_MS)
+        .slice(-20));
       appendFrame(m);
       missionStore.addAudit('rf', `${m.source}/${m.kind} ${m.band} (${(m.confidence * 100).toFixed(0)}%)`, m.vehicleId);
     });
     const offSp = ds.onSpectrum(m => { setSpectrum(m); appendFrame(m); });
-    const offFl = ds.onFleet(m => appendFrame(m));
+    const offFl = ds.onFleet(m => {
+      appendFrame(m);
+      missionStore.ingestFleet(m);
+      // Per-vehicle tracks: one sample per fleet frame, so a peer that only
+      // exists in the fleet stream still draws a track on the map.
+      setTrailsByVehicle(current => {
+        const next = { ...current };
+        for (const v of m.vehicles) {
+          if (v.position.relAlt <= 0.5) continue;
+          const points = next[v.vehicleId] ?? [];
+          const last = points[points.length - 1];
+          if (last && Math.abs(last.lat - v.position.lat) < 1e-6 && Math.abs(last.lon - v.position.lon) < 1e-6) continue;
+          next[v.vehicleId] = [...points.slice(-120), { lat: v.position.lat, lon: v.position.lon }];
+        }
+        return next;
+      });
+    });
+
+    /* Phase 3 rails: tasking, envelope monitor, attendance, escalations. */
+    const offTk = ds.onTask(m => { missionStore.ingestTask(m.task, m.vehicleId); appendFrame(m); });
+    const offEn = ds.onEnvelope(m => { missionStore.ingestEnvelope(m); appendFrame(m); });
+    const offMd = ds.onMode(m => { missionStore.ingestMode(m); appendFrame(m); });
+    const offEs = ds.onEscalation(m => {
+      missionStore.ingestEscalation(m);
+      appendFrame(m);
+      pushToast({
+        severity: 'critical',
+        title: m.deliveredAt ? 'Escalation raised' : 'Escalation UNDELIVERED',
+        message: `${m.missionId} · ${m.channel}`,
+      });
+    });
 
     return () => {
       cancelled = true;
       offC(); offT(); offK(); offTxt(); offAck(); offFleet();
       offAn(); offPl(); offVf(); offRp(); offOb(); offCa(); offRe(); offHe(); offRf(); offSp(); offFl();
+      offTk(); offEn(); offMd(); offEs();
       ds.disconnect();
     };
     // Reconnect when the user changes connection in Settings.
@@ -394,7 +465,9 @@ function GroundControl(): JSX.Element {
         setHealth(current => ({ ...current, [event.component]: event }));
         missionStore.addAudit('health', `${event.component}: ${event.state} — ${event.detail}`, event.vehicleId);
       } else {
-        setRfEvents(current => [...current.slice(-19), event]);
+        setRfEvents(current => [...current, event]
+          .filter(e => event.ts - e.ts <= RF_EVENT_WINDOW_MS)
+          .slice(-20));
         missionStore.addAudit('rf', `${event.source}/${event.kind} ${event.band} (${(event.confidence * 100).toFixed(0)}%)`, event.vehicleId);
         ds.forwardRfEvent?.(event);
       }
@@ -431,10 +504,13 @@ function GroundControl(): JSX.Element {
     [ds, vehicleId],
   );
 
-  /* ARGUS fleet: follow another Drone (telemetry, video and commands switch together). */
+  /* Fleet: follow another vehicle (telemetry, video and commands switch
+     together). Works for the ARGUS Hub and for the offline two-vehicle mock —
+     both expose the same FleetCapable surface. */
   const selectVehicle = useCallback((id: string) => {
     if (fleetCapable(ds)) ds.setVehicle(id);
     setVehicleId(id);
+    missionStore.setVehicle(id);
     setTrail([]);
     setHistory({ alt: [], bat: [] });
   }, [ds]);
@@ -468,19 +544,54 @@ function GroundControl(): JSX.Element {
   const onMaxSpeed = (v: number) => { setMaxSpeed(v); cmd('setMaxSpeed', { mps: v }); };
 
   /* ----- mission flow: approve / deny / abort / report disposition -------- */
+  /**
+   * Approve = send `executePlan` and WAIT for the vehicle's ack (FM-42).
+   *
+   * The companion refuses `executePlan` for six documented reasons. Firing and
+   * forgetting made every one of them invisible: the operator read "Mission
+   * approved", the audit trail recorded it as dispatched, the approve button
+   * latched off, and the map drew a mission that never launched. Nothing is
+   * recorded as flown until the vehicle says it accepted; a refusal is a
+   * failure toast, an audit row naming the reason, and an approve gate that
+   * re-opens so the operator can fix the cause and try again.
+   */
   const doApprovePlan = (proposal: PlanProposal) => {
     if (readiness?.ready !== true) {
       pushToast({ severity: 'error', title: 'Mission approval blocked', message: readiness?.reasons.join('; ') || 'Readiness is unavailable' });
       return;
     }
     const plan = effectivePlan(proposal);
+    const requestId = proposal.plan.requestId;
     setManualActive(false); // exactly one controlSource — planner takes over
-    missionStore.noteApproval(proposal.plan.requestId);
-    cmd('executePlan', { plan });
-    pushToast({ severity: 'success', title: 'Mission approved', message: plan.requestId });
+    missionStore.noteApprovalSent(requestId, vehicleId);
+    pushToast({ severity: 'info', title: 'Mission sent', message: `Awaiting the vehicle's ack for ${plan.requestId}` });
+    void ds.sendCommand({ type: 'command', vehicleId, command: 'executePlan', params: { plan } })
+      .then((ack: CommandAck) => {
+        if (ack.success) {
+          missionStore.noteApproval(requestId, vehicleId);
+          pushToast({ severity: 'success', title: 'Mission accepted', message: plan.requestId });
+          return;
+        }
+        missionStore.noteExecuteRefused(requestId, ack.message, vehicleId);
+        pushToast({
+          severity: 'error', title: 'Mission REFUSED by the vehicle',
+          message: ack.message || 'no reason given — nothing was dispatched',
+        });
+      })
+      .catch((error: unknown) => {
+        // No ack at all is not an acceptance: the same refusal path applies.
+        missionStore.noteExecuteRefused(requestId, (error as Error).message, vehicleId);
+        pushToast({
+          severity: 'error', title: 'Mission dispatch failed',
+          message: (error as Error).message,
+        });
+      });
   };
   const doDenyPlan = (proposal: PlanProposal) => {
     missionStore.noteDenial(proposal.plan.requestId);
+    // Denial frees the inspection gate: the operator asked for a plan, read it,
+    // and said no. Latching them out of asking for another was FM-81.
+    setInspectionLatch(false);
     pushToast({ severity: 'info', title: 'Plan denied', message: proposal.plan.requestId });
   };
   const doAbortPlan = () => {
@@ -494,6 +605,51 @@ function GroundControl(): JSX.Element {
       severity: r === 'escalated' ? 'critical' : 'info',
       title: r === 'escalated' ? 'Escalated to on-site security' : r === 'logged' ? 'Report logged for review' : 'Report dismissed',
     });
+  };
+
+  /* ----- Phase 3 rails: gimbal, attendance, tasking, re-plan -------------- */
+
+  /** Gimbal pitch. In Hub mode this maps onto the Hub's `look_at`; providers
+   *  without a commandable gimbal ack the refusal and the readout stays as it
+   *  was reported (never a fictional value). */
+  const onSetGimbal = useCallback((deg: number) => {
+    setGimbalPitch(deg);
+    cmd('setGimbal', { pitchDeg: deg });
+  }, [cmd]);
+
+  /** Unattended entry — a signed operator command, never a toggle. */
+  const doEnterUnattended = (id: string) => {
+    setOperatorId(id);
+    cmd('enterUnattended', { operatorId: id });
+    missionStore.addAudit('mode', `Operator ${id} requested UNATTENDED mode (signed confirmation)`, vehicleId);
+    pushToast({
+      severity: 'warning',
+      title: 'Unattended mode requested',
+      message: 'The vehicle accepts or refuses; the badge follows what it reports.',
+    });
+  };
+  const doExitUnattended = () => {
+    const id = operatorId || 'operator';
+    cmd('exitUnattended', { operatorId: id });
+    pushToast({ severity: 'info', title: 'Attended operation restored' });
+  };
+
+  /** Re-run triage with the operator's note. The note never becomes geometry. */
+  const doRunTriage = () => {
+    if (!ds.runTriage) return;
+    const note = missionStore.get().operatorNote;
+    missionStore.noteTriageRun(note, vehicleId);
+    ds.runTriage(note);
+  };
+
+  /** The operator dropped the cue somewhere else: the SOURCE re-plans through
+   *  the deterministic planner and the verifier. The UI never edits a plan. */
+  const doMoveAnomaly = useCallback((anomalyId: string, lat: number, lon: number) => {
+    ds.moveAnomaly?.(anomalyId, lat, lon);
+  }, [ds]);
+
+  const doScenario = (name: DemoScenario) => {
+    ds.runScenario?.(name);
   };
 
   /* ----- manual (game-controller) piloting -------------------------------- */
@@ -575,7 +731,6 @@ function GroundControl(): JSX.Element {
       });
       return;
     }
-    liveStartedRef.current = true;
     setLivePlanning(true);
     const anomaly = liveDemoAnomaly(mission.site);
     missionStore.ingestAnomaly(anomaly, tel.vehicleId);
@@ -591,8 +746,12 @@ function GroundControl(): JSX.Element {
       currentPosition: tel.position,
       currentAltitudeM: tel.position.relAlt,
       readiness: { ready: readiness.ready, reasons: readiness.reasons },
+      // Measured when the vehicle has reported one, otherwise the documented
+      // stand-in, tagged so the verifier can tell them apart (FM-72).
+      ...windContext(health.wind),
       anomaly,
       rfEvents,
+      now: Date.now(),
       ...(spectrum ? { sdrState: spectrum.state } : {}),
       ...(allSensors ? { sensors: allSensors } : {}),
       isNight: import.meta.env.VITE_EIS_DEMO_NIGHT === 'true',
@@ -608,18 +767,34 @@ function GroundControl(): JSX.Element {
         capabilities,
         context,
       });
+      // The deterministic planner can refuse a task outright, in which case
+      // there is no plan and no verdict to ingest — only a reason.
+      if (!result.plan || !result.verification) {
+        missionStore.addAudit('plan',
+          `Ground planner refused the task: ${result.infeasibleReason ?? result.escalationReason ?? 'no reason given'}`,
+          result.vehicleId);
+        pushToast({
+          severity: 'error', title: 'Planner refused the task',
+          message: result.infeasibleReason ?? result.escalationReason ?? 'no plan was produced',
+        });
+        return;
+      }
       missionStore.ingestPlan(result.plan, result.vehicleId);
       missionStore.ingestVerification(result.verification, result.vehicleId);
       missionStore.addAudit('plan', `Ground planner ${result.source}, ${result.attempts} attempt(s)${result.fallbackReason ? `; fallback: ${result.fallbackReason}` : ''}`, result.vehicleId);
       appendFrame({ type: 'missionPlan', ts: Date.now(), vehicleId: result.vehicleId, plan: result.plan });
       appendFrame({ type: 'verification', ts: Date.now(), vehicleId: result.vehicleId, verification: result.verification });
+      // Only a plan the operator can act on closes the inspection gate. A
+      // rejected verdict, a refused task and a thrown planner all leave it
+      // open, because in every one of those cases the next thing the operator
+      // needs is another attempt (FM-81).
+      setInspectionLatch(result.verification.verdict !== 'rejected');
       pushToast({
         severity: result.verification.verdict === 'rejected' ? 'error' : 'success',
         title: `Planner result: ${result.verification.verdict}`,
         message: result.escalationReason ?? result.plan.requestId,
       });
     } catch (error) {
-      liveStartedRef.current = false;
       pushToast({ severity: 'error', title: 'Planning failed', message: (error as Error).message });
     } finally {
       setLivePlanning(false);
@@ -640,6 +815,7 @@ function GroundControl(): JSX.Element {
   const routePlan = executedProposal
     ? effectivePlan(executedProposal)
     : selectedProposal ? effectivePlan(selectedProposal) : null;
+  const envelope = envelopeOf(mission);
 
   /* ----- power management (Linux only) ------------------------------------
    * Keep the display awake while the vehicle is armed or tracking/manual is
@@ -681,6 +857,13 @@ function GroundControl(): JSX.Element {
         fleet={fleet}
         selectedVehicle={vehicleId}
         onSelectVehicle={selectVehicle}
+        envelope={envelope}
+        attendance={mission.attendance}
+        escalationCount={mission.escalations.length}
+        undeliveredCount={mission.escalations.filter((e) => !e.deliveredAt).length}
+        onOpenOutbox={() => { setCenterView('mission'); setReportTab('outbox'); }}
+        onEnterUnattended={() => setModal('unattended')}
+        onExitUnattended={doExitUnattended}
       />
 
       {trackingActive && (
@@ -705,6 +888,8 @@ function GroundControl(): JSX.Element {
             onTakeoff={doTakeoff}
             onEngage={doEngage}
             checklistDone={checklistDone}
+            gimbalPitch={gimbalPitch}
+            onSetGimbal={onSetGimbal}
           />
           <ManualControl
             armed={!!tel?.armed}
@@ -715,7 +900,14 @@ function GroundControl(): JSX.Element {
             onInput={onStickInput}
             onControllerChange={setControllerOn}
           />
-          {ds.kind === 'mock' && activeConfig.sitl && <SimulationPanel value={simulationToggles} onChange={updateSimulation} />}
+          {ds.kind === 'mock' && activeConfig.sitl && (
+            <SimulationPanel
+              value={simulationToggles}
+              onChange={updateSimulation}
+              onScenario={ds.runScenario ? doScenario : undefined}
+              hint={ds.scenarioHint?.bind(ds)}
+            />
+          )}
         </div>
 
         {/* CENTER */}
@@ -741,11 +933,11 @@ function GroundControl(): JSX.Element {
             {ds.kind === 'live' && (
               <Button
                 variant="primary"
-                disabled={livePlanning || liveStartedRef.current || connState !== 'connected'}
+                disabled={livePlanning || inspectionPlanned || connState !== 'connected'}
                 onClick={() => void startLiveInspection()}
                 style={{ marginLeft: 'auto' }}
               >
-                {livePlanning ? 'Planning inspection…' : liveStartedRef.current ? 'Inspection planned' : 'Start scripted inspection'}
+                {livePlanning ? 'Planning inspection…' : inspectionPlanned ? 'Inspection planned' : 'Start scripted inspection'}
               </Button>
             )}
           </div>
@@ -798,7 +990,7 @@ function GroundControl(): JSX.Element {
                 onContinue={() => cmd('continueMission')}
                 onRtl={() => cmd('rtl')}
               />
-              <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 0.9fr 1fr', gap: 10, minHeight: 0 }}>
+              <div style={{ display: 'grid', gridTemplateColumns: '1.25fr 1fr 0.85fr', gap: 10, minHeight: 0 }}>
                 <MissionMap
                   site={mission.site}
                   tel={tel}
@@ -808,9 +1000,43 @@ function GroundControl(): JSX.Element {
                   executing={mission.executing}
                   observation={observation}
                   rfEvents={rfEvents}
+                  fleet={mission.fleet}
+                  envelopeByVehicle={mission.envelopeByVehicle}
+                  trailsByVehicle={trailsByVehicle}
+                  selectedVehicle={vehicleId}
+                  onSelectVehicle={selectVehicle}
+                  onMoveAnomaly={ds.moveAnomaly ? doMoveAnomaly : undefined}
                 />
-                <ObservationPanel observation={observation} sensorHealth={sensorHealth} />
-                <SatellitePanel anomalies={mission.anomalies} />
+                <TaskPlanPanel
+                  tasks={mission.tasks}
+                  operatorNote={mission.operatorNote}
+                  onOperatorNote={(note) => missionStore.setOperatorNote(note)}
+                  onRunTriage={doRunTriage}
+                  onReorder={(taskId, delta) => missionStore.reorderTask(taskId, delta)}
+                  triageAvailable={!!ds.runTriage}
+                  plan={routePlan}
+                  verification={selectedProposal?.verification ?? null}
+                  dragToReplan={!!ds.moveAnomaly}
+                />
+                {/* Observation and cue provenance share one slot: new rails are
+                    tabs, badges and pin colours — never another panel. */}
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 6, minHeight: 0 }}>
+                  <Tabs
+                    size="sm"
+                    value={sideView}
+                    onChange={(id) => setSideView(id as SideView)}
+                    items={[
+                      { id: 'observation', label: 'Observation' },
+                      { id: 'cues', label: `Cues${mission.anomalies.length ? ` (${mission.anomalies.length})` : ''}` },
+                    ]}
+                    style={{ flex: 'none', alignSelf: 'flex-start' }}
+                  />
+                  <div style={{ flex: 1, minHeight: 0 }}>
+                    {sideView === 'observation'
+                      ? <ObservationPanel observation={observation} sensorHealth={sensorHealth} />
+                      : <SatellitePanel anomalies={mission.anomalies} railHealth={railHealth} />}
+                  </div>
+                </div>
               </div>
               <div style={{ display: 'grid', gridTemplateColumns: '1.15fr 1fr 0.9fr', gap: 10, minHeight: 0 }}>
                 <VerifierPanel
@@ -827,6 +1053,10 @@ function GroundControl(): JSX.Element {
                   report={mission.report}
                   resolution={mission.reportResolution}
                   onResolve={doResolveReport}
+                  records={mission.records}
+                  escalations={mission.escalations}
+                  tab={reportTab}
+                  onTabChange={setReportTab}
                 />
                 <AuditLogPanel events={mission.audit} />
               </div>
@@ -867,6 +1097,12 @@ function GroundControl(): JSX.Element {
       <FailsafeModal open={modal === 'failsafe'} onClose={() => setModal(null)} />
       <PidModal open={modal === 'pid'} onClose={() => setModal(null)} />
       <LogBrowserModal open={modal === 'logbrowser'} onClose={() => setModal(null)} />
+      <UnattendedModal
+        open={modal === 'unattended'}
+        onClose={() => setModal(null)}
+        onConfirm={doEnterUnattended}
+        defaultOperatorId={operatorId}
+      />
     </div>
   );
 }

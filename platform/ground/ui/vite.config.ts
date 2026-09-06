@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig, type Plugin, type Connect } from 'vite';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath, URL } from 'node:url';
@@ -6,6 +7,14 @@ import * as path from 'node:path';
 import type { ServerResponse } from 'node:http';
 
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url));
+
+/**
+ * The ground station's dev port. `EIS_UI_PORT` moves BOTH the Vite server and
+ * the Electron shell's DEV_URL (which reads the same variable), so two stacks
+ * on one machine can coexist without either guessing where the other went.
+ * The port is STRICT: see `server.strictPort` below (FM-131).
+ */
+const DEV_PORT = Number(process.env.EIS_UI_PORT ?? 5173) || 5173;
 
 /**
  * Serves GET /site.json from the repo root during `vite dev` / `vite preview`,
@@ -41,12 +50,18 @@ export default defineConfig({
   base: './',
   plugins: [react(), siteFilePlugin()],
   resolve: {
+    dedupe: ['react', 'react-dom', 'react/jsx-runtime'],
+    preserveSymlinks: true,
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
       // Cross-package source imports (plain TS packages, zero Electron deps).
       '@planner': fileURLToPath(new URL('../planner/src', import.meta.url)),
       '@satellite': fileURLToPath(new URL('../satellite/src', import.meta.url)),
       '@satdata': fileURLToPath(new URL('../satellite/data', import.meta.url)),
+      // eis-cues: the browser-safe core only (its ./node entry is never
+      // imported here), plus the scripted fixtures the offline rails replay.
+      '@cues': fileURLToPath(new URL('../cues/src', import.meta.url)),
+      '@cuefixtures': fileURLToPath(new URL('../cues/fixtures', import.meta.url)),
       // eis-planner/site.ts imports Node builtins at module scope for its
       // Node-side loaders; the renderer only uses its pure exports. Point the
       // builtins at throwing stubs so dev/build stay warning-free.
@@ -55,13 +70,26 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
-    strictPort: false,
+    port: DEV_PORT,
+    /**
+     * STRICT (FM-131). With `strictPort: false` Vite silently moved to 5174
+     * when 5173 was taken — by a teammate's Console dev server, a sibling
+     * worktree, or a leftover Vite — `wait-on` was satisfied by whatever
+     * answered 5173, and the Electron shell rendered someone else's page in
+     * the ground-station window. Failing to start is recoverable in one
+     * command; rendering a foreign app in a flight-control window is not.
+     */
+    strictPort: true,
     fs: {
       // Allow importing eis-planner/eis-satellite sources + baked data + the
       // site stub from outside the UI package root.
       allow: [REPO_ROOT],
     },
+  },
+  test: {
+    environment: 'node',
+    include: ['test/**/*.test.ts'],
+    setupFiles: ['./test/setup.ts'],
   },
   build: {
     outDir: 'dist',

@@ -3,10 +3,12 @@ import { MockDataProvider } from './MockDataProvider';
 import { LiveDataProvider } from './LiveDataProvider';
 import { HubDataProvider } from './HubDataProvider';
 import { isHubMode } from './hubConfig';
-export type { MissionDataSource } from './types';
+export type { DemoScenario, FleetCapable, FleetRow, MissionDataSource } from './types';
+export { fleetCapable } from './types';
 export { HubDataProvider } from './HubDataProvider';
 export type { FleetEntry } from './HubDataProvider';
 export { isHubMode, consoleUrl, hubHttpBase } from './hubConfig';
+export { LATERAL_TOL_M, ORBIT_RADIAL_TOL_M, UNATTENDED_ENVELOPE } from './scriptedRails';
 
 /** Mock remains the zero-configuration offline default. ARGUS Hub when `?hub=`,
  * VITE_DATASOURCE=hub, or served under /gcs/. Release/demo builds select the

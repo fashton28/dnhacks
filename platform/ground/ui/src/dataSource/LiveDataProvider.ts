@@ -19,23 +19,30 @@ import type {
   Command,
   ConnectionConfig,
   ConnectionState,
+  EnvelopeMessage,
+  EscalationMessage,
   IncidentReportMessage,
   FleetMessage,
   HealthEventMessage,
   InboundMessage,
   ManualInput,
   MissionPlanMessage,
+  ModeMessage,
   ObservationMessage,
   ReadinessMessage,
   RfEventMessage,
   SpectrumMessage,
   StatusText,
+  TaskMessage,
   Telemetry,
   TrackingStatus,
   Unsubscribe,
   VerificationMessage,
 } from '@/contract';
 import { DEFAULT_VEHICLE_ID } from '@/contract';
+import { getRawSite, getSiteModel } from '@/site';
+import { createRendererCueBus } from '@/cues';
+import type { CueBus, RailHealth } from '@/cues';
 import type { MissionDataSource } from './types';
 
 const ACK_TIMEOUT_MS = 4000;
@@ -65,6 +72,10 @@ interface Callbacks {
   rf: Array<(m: RfEventMessage) => void>;
   spectrum: Array<(m: SpectrumMessage) => void>;
   fleet: Array<(m: FleetMessage) => void>;
+  task: Array<(m: TaskMessage) => void>;
+  envl: Array<(m: EnvelopeMessage) => void>;
+  mode: Array<(m: ModeMessage) => void>;
+  escl: Array<(m: EscalationMessage) => void>;
 }
 
 export class LiveDataProvider implements MissionDataSource {
@@ -86,6 +97,10 @@ export class LiveDataProvider implements MissionDataSource {
     rf: [],
     spectrum: [],
     fleet: [],
+    task: [],
+    envl: [],
+    mode: [],
+    escl: [],
   };
 
   private ws: WebSocket | null = null;
@@ -98,17 +113,57 @@ export class LiveDataProvider implements MissionDataSource {
   private intentionalClose = false;
   private latencyMs = 0;
 
+  /* ---- cue rails (eis-cues CueBus) --------------------------------------
+   * The cue rails are GROUND-side producers: the satellite tiles, the SDR, the
+   * fixed cameras and the fence loop are all watched from the ground station,
+   * not from the aircraft. They run on the same bus the mock uses (FM-180) and
+   * emit onto the same `anomaly` / `healthEvent` channels the companion does,
+   * so a cue reaches the map identically whichever end raised it.
+   *
+   * They are independent of the vehicle link on purpose: a cue rail that went
+   * quiet because a drone was on the ground would be a rail that cannot raise
+   * the alarm that launches it. */
+  private cueBus: CueBus | null = null;
+
   /* ---- DataSource: lifecycle ------------------------------------------- */
   connect(config: ConnectionConfig): Promise<void> {
     this.config = config;
     this.intentionalClose = false;
     this.reconnectAttempts = 0;
     this.open();
+    this.startCueRails();
     return Promise.resolve();
+  }
+
+  private startCueRails(): void {
+    if (this.cueBus) return;
+    // The site is loaded asynchronously; the rails that need it wait for it,
+    // and the rails that do not start immediately.
+    void getSiteModel()
+      .catch(() => null)
+      .then(() => {
+        if (this.cueBus || this.intentionalClose) return;
+        const bus = createRendererCueBus({
+          vehicleId: DEFAULT_VEHICLE_ID,
+          site: getRawSite(),
+        });
+        this.cueBus = bus;
+        bus.onAnomaly((m) => this.cbs.anom.forEach((f) => f(m)));
+        bus.onHealth((m) => this.cbs.health.forEach((f) => f(m)));
+        void bus.start();
+      });
+  }
+
+  /** Per-rail badges: what each cue rail is doing right now. */
+  railHealth(): RailHealth[] {
+    return this.cueBus?.health() ?? [];
   }
 
   disconnect(): void {
     this.intentionalClose = true;
+    void this.cueBus?.stop();
+    this.cueBus?.dispose();
+    this.cueBus = null;
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
@@ -236,7 +291,21 @@ export class LiveDataProvider implements MissionDataSource {
       case 'fleet':
         this.cbs.fleet.forEach((f) => f(msg));
         break;
+      case 'task':
+        this.cbs.task.forEach((f) => f(msg));
+        break;
+      case 'envelope':
+        this.cbs.envl.forEach((f) => f(msg));
+        break;
+      case 'mode':
+        this.cbs.mode.forEach((f) => f(msg));
+        break;
+      case 'escalation':
+        this.cbs.escl.forEach((f) => f(msg));
+        break;
       default:
+        // cctvEvent and the other audit-only frames have no UI channel yet;
+        // they are accepted and ignored rather than treated as protocol errors.
         break;
     }
   }
@@ -332,6 +401,22 @@ export class LiveDataProvider implements MissionDataSource {
   onFleet(cb: (m: FleetMessage) => void): Unsubscribe {
     this.cbs.fleet.push(cb);
     return () => this._off('fleet', cb);
+  }
+  onTask(cb: (m: TaskMessage) => void): Unsubscribe {
+    this.cbs.task.push(cb);
+    return () => this._off('task', cb);
+  }
+  onEnvelope(cb: (m: EnvelopeMessage) => void): Unsubscribe {
+    this.cbs.envl.push(cb);
+    return () => this._off('envl', cb);
+  }
+  onMode(cb: (m: ModeMessage) => void): Unsubscribe {
+    this.cbs.mode.push(cb);
+    return () => this._off('mode', cb);
+  }
+  onEscalation(cb: (m: EscalationMessage) => void): Unsubscribe {
+    this.cbs.escl.push(cb);
+    return () => this._off('escl', cb);
   }
 
   private _off<K extends keyof Callbacks>(k: K, cb: unknown): void {

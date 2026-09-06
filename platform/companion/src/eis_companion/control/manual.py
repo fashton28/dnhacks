@@ -31,6 +31,7 @@ numpy + stdlib only. Time is injected via ``now`` so the watchdog is testable.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -111,14 +112,30 @@ class ManualPilot:
         yaw: float = 0.0,
         pitch: float = 0.0,
         roll: float = 0.0,
-    ) -> None:
+    ) -> bool:
         """Store the latest stick frame (high-rate, fire-and-forget). Engages the
         pilot on first input and refreshes the watchdog clock. The orchestrator
-        only calls this while manual control is the active source."""
-        self._pending = _Axes(float(throttle), float(yaw), float(pitch), float(roll))
+        only calls this while manual control is the active source.
+
+        A frame carrying a NON-FINITE axis is REJECTED whole: it is not stored
+        and it does NOT refresh the watchdog, so a stream of NaN sticks ages out
+        into the zero-and-hold exactly like a dead link. Accepting it would put
+        the axis at full deflection (``_clamp01(nan) == 1.0``), which is FM-05.
+
+        Returns True when the frame was accepted.
+        """
+        axes = (throttle, yaw, pitch, roll)
+        try:
+            values = tuple(float(v) for v in axes)
+        except (TypeError, ValueError):
+            return False
+        if not all(math.isfinite(v) for v in values):
+            return False
+        self._pending = _Axes(*values)
         if not self._engaged:
             self.engage()
         self._last_input_t = self._clock()
+        return True
 
     def update(self, limits: Limits, dt: float, *, link_ok: bool = True) -> VelocitySetpoint:
         """Per-tick step: map the latest stored stick frame to a clamped BODY
@@ -224,14 +241,31 @@ class ManualPilot:
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
+    """Clamp to [lo, hi]; a NON-FINITE input collapses to 0.0, never to ``hi``.
+
+    ``min(hi, NaN)`` returns ``hi`` under CPython, so the naive clamp turns a
+    non-finite axis into the positive maximum (FM-06).
+    """
+    if not math.isfinite(v):
+        return 0.0
     if lo > hi:
         lo, hi = hi, lo
     return max(lo, min(hi, v))
 
 
 def _clamp01(v: float) -> float:
-    """Clamp a stick axis to [-1, 1]."""
-    return max(-1.0, min(1.0, float(v)))
+    """Clamp a stick axis to [-1, 1]. A non-finite axis reads as CENTRED (0.0).
+
+    Saturating a NaN to 1.0 -- which is what the naive ``max(-1, min(1, nan))``
+    does -- is full deflection: full climb, full forward, max yaw rate (FM-05).
+    """
+    try:
+        value = float(v)
+    except (TypeError, ValueError):
+        return 0.0
+    if not math.isfinite(value):
+        return 0.0
+    return max(-1.0, min(1.0, value))
 
 
 def _deadzone(v: float, dz: float) -> float:

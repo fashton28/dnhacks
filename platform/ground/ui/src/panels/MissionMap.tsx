@@ -2,17 +2,47 @@
    view. No tile servers, fully offline: a local equirectangular meters
    projection centred on the SITE HOME renders the perimeter geofence, NFZ
    polygons, staging markers, the satellite anomaly pin, the planned route
-   (legs + orbit circle), the vehicle with heading + breadcrumb trail.
+   (legs + orbit circle) INSIDE its corridor band, every fleet vehicle with its
+   own cleared corridor and track, and the followed vehicle's breadcrumb trail.
    Every coordinate comes from the loaded site model / wire messages —
-   nothing is hardcoded. */
+   nothing is hardcoded.
+
+   The map header carries the fleet strip: one chip per vehicle (readiness,
+   SoC, sortie timer, monitor state). Selecting a chip switches which vehicle
+   the whole dashboard follows.
+
+   The cue pin is draggable: dropping it somewhere else asks the data source to
+   RE-PLAN from the new location. The map never edits a plan — it reports where
+   the operator put the target and the planner + verifier do the rest. */
 import React from 'react';
 import { Panel, Badge } from '@/components';
-import type { Anomaly, MissionPlan, ObservationMessage, RfEventMessage, Telemetry } from '@/contract';
+import type {
+  Anomaly,
+  Corridor,
+  EnvelopeMessage,
+  EnvelopeState,
+  FleetVehicle,
+  MissionPlan,
+  ObservationMessage,
+  RfEventMessage,
+  Telemetry,
+} from '@/contract';
 import type { SiteModel } from '@/site';
+import { RAIL_PIN_COLOUR, pinColourFor } from '@/cues';
 
 const M_PER_DEG_LAT = 111320;
 
 interface XY { x: number; y: number }
+
+/** Pin/track colour per vehicle, by fleet order. New rails are pin colours and
+ *  badges — never another panel. */
+const VEHICLE_COLORS = ['#ffc24b', '#58d68d', '#c47dff', '#5aa0ff'];
+
+const ENVELOPE_TONE: Record<EnvelopeState, 'nominal' | 'caution' | 'danger'> = {
+  in_envelope: 'nominal',
+  warning: 'caution',
+  breach: 'danger',
+};
 
 export interface MissionMapProps {
   site: SiteModel | null;
@@ -24,10 +54,28 @@ export interface MissionMapProps {
   executing?: boolean;
   observation?: ObservationMessage | null;
   rfEvents?: RfEventMessage[];
+  /** Fleet rows: every vehicle's position and cleared corridor. */
+  fleet?: FleetVehicle[];
+  /** Latest envelope report per vehicle (the fleet chip's monitor state). */
+  envelopeByVehicle?: Record<string, EnvelopeMessage>;
+  /** Breadcrumb tracks per vehicle, sampled from the fleet stream. */
+  trailsByVehicle?: Record<string, { lat: number; lon: number }[]>;
+  selectedVehicle?: string;
+  onSelectVehicle?: (id: string) => void;
+  /** Present when the data source can re-plan from a relocated cue. */
+  onMoveAnomaly?: (anomalyId: string, lat: number, lon: number) => void;
 }
 
-export function MissionMap({ site, tel, trail, anomalies, plan, executing, observation = null, rfEvents = [] }: MissionMapProps): React.ReactElement {
-  const view = React.useMemo(() => (site ? computeView(site, anomalies, observation, rfEvents) : null), [site, anomalies, observation, rfEvents]);
+export function MissionMap({
+  site, tel, trail, anomalies, plan, executing,
+  observation = null, rfEvents = [],
+  fleet = [], envelopeByVehicle = {}, trailsByVehicle = {},
+  selectedVehicle, onSelectVehicle, onMoveAnomaly,
+}: MissionMapProps): React.ReactElement {
+  const view = React.useMemo(
+    () => (site ? computeView(site, anomalies, observation, rfEvents, fleet) : null),
+    [site, anomalies, observation, rfEvents, fleet],
+  );
 
   return (
     <Panel
@@ -35,7 +83,16 @@ export function MissionMap({ site, tel, trail, anomalies, plan, executing, obser
       variant="sunken"
       pad={false}
       status={executing ? <Badge tone="accent" mono>MISSION</Badge> : undefined}
-      actions={<Badge tone="outline" mono>SITE MODEL</Badge>}
+      actions={
+        fleet.length > 0
+          ? <FleetStrip
+              fleet={fleet}
+              envelopeByVehicle={envelopeByVehicle}
+              selectedVehicle={selectedVehicle}
+              onSelectVehicle={onSelectVehicle}
+            />
+          : <Badge tone="outline" mono>SITE MODEL</Badge>
+      }
       style={{ height: '100%' }}
       bodyStyle={{ position: 'relative' }}
     >
@@ -51,12 +108,85 @@ export function MissionMap({ site, tel, trail, anomalies, plan, executing, obser
             Loading site model…
           </div>
         ) : (
-          <MapSvg site={site} view={view} tel={tel} trail={trail} anomalies={anomalies} plan={plan} observation={observation} rfEvents={rfEvents} />
+          <MapSvg
+            site={site} view={view} tel={tel} trail={trail} anomalies={anomalies} plan={plan}
+            observation={observation} rfEvents={rfEvents} fleet={fleet}
+            trailsByVehicle={trailsByVehicle} selectedVehicle={selectedVehicle}
+            onMoveAnomaly={onMoveAnomaly}
+          />
         )}
-        {site && view && <Legend metersAcross={view.w} />}
+        {site && view && <Legend metersAcross={view.w} corridor={!!plan?.corridor} />}
       </div>
     </Panel>
   );
+}
+
+/* ---- fleet strip --------------------------------------------------------- */
+
+interface FleetStripProps {
+  fleet: FleetVehicle[];
+  envelopeByVehicle: Record<string, EnvelopeMessage>;
+  selectedVehicle?: string;
+  onSelectVehicle?: (id: string) => void;
+}
+
+function FleetStrip({ fleet, envelopeByVehicle, selectedVehicle, onSelectVehicle }: FleetStripProps): React.ReactElement {
+  // The sortie timer counts against a wall-clock deadline, so it needs its own
+  // 1 Hz tick rather than waiting for the next fleet frame.
+  const [, setTick] = React.useState(0);
+  React.useEffect(() => {
+    const id = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+      {fleet.map((v, i) => {
+        const on = v.vehicleId === selectedVehicle;
+        const color = VEHICLE_COLORS[i % VEHICLE_COLORS.length];
+        const envelope = envelopeByVehicle[v.vehicleId];
+        const leftS = v.sortie ? Math.max(0, Math.round((v.sortie.must_rtl_by - Date.now()) / 1000)) : null;
+        return (
+          <button
+            key={v.vehicleId}
+            type="button"
+            onClick={() => onSelectVehicle?.(v.vehicleId)}
+            title={v.readiness.ready ? 'Ready' : v.readiness.reasons.join('; ') || 'Not ready'}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 5,
+              height: 22, padding: '0 7px',
+              background: on ? 'var(--surface-input)' : 'transparent',
+              border: `1px solid ${on ? 'var(--border-strong)' : 'var(--border-subtle)'}`,
+              borderRadius: 'var(--radius-pill)',
+              color: 'var(--text-secondary)',
+              fontFamily: 'var(--font-mono)', fontSize: 10,
+              cursor: onSelectVehicle ? 'pointer' : 'default',
+              fontVariantNumeric: 'tabular-nums',
+            }}
+          >
+            <span style={{ width: 7, height: 7, borderRadius: '50%', background: color, flex: 'none' }} />
+            <span style={{ color: on ? 'var(--text-primary)' : 'var(--text-secondary)', fontWeight: 600 }}>
+              {v.vehicleId}
+            </span>
+            <span style={{ color: v.readiness.ready ? 'var(--nominal-fg)' : 'var(--danger-fg)' }}>
+              {v.readiness.ready ? 'RDY' : 'HOLD'}
+            </span>
+            <span>{v.battery.soc_pct.toFixed(0)}%</span>
+            <span style={{ color: leftS !== null && leftS <= 60 ? 'var(--danger-fg)' : 'var(--text-tertiary)' }}>
+              {leftS === null ? '--:--' : fmtClock(leftS)}
+            </span>
+            <Badge tone={envelope ? ENVELOPE_TONE[envelope.state] : 'outline'} mono>
+              {envelope ? envelope.state === 'in_envelope' ? 'ENV OK' : envelope.state.toUpperCase() : 'ENV ?'}
+            </Badge>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function fmtClock(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
 }
 
 /* ---- projection ---------------------------------------------------------- */
@@ -70,7 +200,13 @@ interface View {
   h: number;
 }
 
-function computeView(site: SiteModel, anomalies: Anomaly[], observation: ObservationMessage | null, rfEvents: RfEventMessage[]): View {
+function computeView(
+  site: SiteModel,
+  anomalies: Anomaly[],
+  observation: ObservationMessage | null,
+  rfEvents: RfEventMessage[],
+  fleet: FleetVehicle[],
+): View {
   const home = site.home;
   const cosLat = Math.cos((home.lat * Math.PI) / 180);
   const pts: XY[] = [];
@@ -86,6 +222,9 @@ function computeView(site: SiteModel, anomalies: Anomaly[], observation: Observa
   anomalies.forEach((a) => push(a.lat, a.lon));
   observation?.geometry.fence_gaps.forEach((p) => push(p.lat, p.lon));
   observation?.geometry.new_structures.forEach((p) => push(p.lat, p.lon));
+  fleet.forEach((v) => {
+    if (v.position.lat !== 0 || v.position.lon !== 0) push(v.position.lat, v.position.lon);
+  });
   rfEvents.forEach((event) => {
     if (event.lat !== undefined && event.lon !== undefined) push(event.lat, event.lon);
     if (event.pilot_lat !== undefined && event.pilot_lon !== undefined) push(event.pilot_lat, event.pilot_lon);
@@ -107,6 +246,13 @@ function project(view: View, lat: number, lon: number): XY {
   };
 }
 
+function unproject(view: View, x: number, y: number): { lat: number; lon: number } {
+  return {
+    lat: view.home.lat - y / M_PER_DEG_LAT,
+    lon: view.home.lon + x / (M_PER_DEG_LAT * view.cosLat),
+  };
+}
+
 /* ---- svg body ------------------------------------------------------------ */
 
 interface MapSvgProps {
@@ -118,10 +264,20 @@ interface MapSvgProps {
   plan: MissionPlan | null;
   observation: ObservationMessage | null;
   rfEvents: RfEventMessage[];
+  fleet: FleetVehicle[];
+  trailsByVehicle: Record<string, { lat: number; lon: number }[]>;
+  selectedVehicle?: string;
+  onMoveAnomaly?: (anomalyId: string, lat: number, lon: number) => void;
 }
 
-function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents }: MapSvgProps): React.ReactElement {
+function MapSvg({
+  site, view, tel, trail, anomalies, plan, observation, rfEvents,
+  fleet, trailsByVehicle, selectedVehicle, onMoveAnomaly,
+}: MapSvgProps): React.ReactElement {
   const fs = Math.max(6, view.w / 55); // svg-unit font size (meters)
+  const svgRef = React.useRef<SVGSVGElement | null>(null);
+  const [drag, setDrag] = React.useState<{ id: string; x: number; y: number } | null>(null);
+
   const pj = (lat: number, lon: number): XY => project(view, lat, lon);
   const ring = (poly: { lat: number; lon: number }[]): string =>
     poly.map((p) => { const q = pj(p.lat, p.lon); return `${q.x},${q.y}`; }).join(' ');
@@ -129,6 +285,27 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
   const homeXY = pj(site.home.lat, site.home.lon);
   const droneXY = tel ? pj(tel.position.lat, tel.position.lon) : null;
   const trailPts = trail.map((p) => { const q = pj(p.lat, p.lon); return `${q.x},${q.y}`; }).join(' ');
+
+  /* Client coordinates → map user units (metres east/south of home). */
+  const toUser = (clientX: number, clientY: number): XY | null => {
+    const svg = svgRef.current;
+    const ctm = svg?.getScreenCTM();
+    if (!svg || !ctm) return null;
+    const pt = new DOMPoint(clientX, clientY).matrixTransform(ctm.inverse());
+    return { x: pt.x, y: pt.y };
+  };
+
+  const onPointerMove = (e: React.PointerEvent<SVGSVGElement>): void => {
+    if (!drag) return;
+    const p = toUser(e.clientX, e.clientY);
+    if (p) setDrag({ ...drag, x: p.x, y: p.y });
+  };
+  const endDrag = (): void => {
+    if (!drag) return;
+    const { lat, lon } = unproject(view, drag.x, drag.y);
+    setDrag(null);
+    onMoveAnomaly?.(drag.id, lat, lon);
+  };
 
   // Planned route: home → each goto/orbit target in order (→ home when rtl).
   const route: XY[] = [];
@@ -146,11 +323,21 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
     }
   }
 
+  const corridorFor = (id: string): Corridor | undefined =>
+    fleet.find((v) => v.vehicleId === id)?.plannedCorridor;
+
   return (
     <svg
+      ref={svgRef}
       viewBox={`${view.minX} ${view.minY} ${view.w} ${view.h}`}
       preserveAspectRatio="xMidYMid meet"
-      style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', background: 'var(--bg-sunken)' }}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerLeave={endDrag}
+      style={{
+        position: 'absolute', inset: 0, width: '100%', height: '100%',
+        background: 'var(--bg-sunken)', touchAction: drag ? 'none' : 'auto',
+      }}
     >
       {/* 50 m grid */}
       <defs>
@@ -198,6 +385,26 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
         <polygon key={item.name} points={ring(item.polygon)} fill="rgba(170,118,255,0.10)" stroke="rgba(170,118,255,0.55)" strokeWidth={1} strokeDasharray="2 3" vectorEffect="non-scaling-stroke" />
       ))}
 
+      {/* Every fleet vehicle's cleared corridor, drawn as a BAND: the stroke
+          width IS the tolerance, so what you see is what the monitor checks. */}
+      {fleet.map((v, i) => {
+        const corridor = v.plannedCorridor;
+        if (!corridor) return null;
+        return (
+          <CorridorBand
+            key={`corridor-${v.vehicleId}`}
+            corridor={corridor}
+            project={pj}
+            color={VEHICLE_COLORS[i % VEHICLE_COLORS.length]}
+            dim={v.vehicleId !== selectedVehicle}
+          />
+        );
+      })}
+      {/* The selected plan's own corridor, when the fleet row does not carry it. */}
+      {plan?.corridor && !corridorFor(selectedVehicle ?? '') && (
+        <CorridorBand corridor={plan.corridor} project={pj} color="#5aa0ff" dim={false} />
+      )}
+
       {/* planned route */}
       {route.length > 1 && (
         <polyline
@@ -238,12 +445,27 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
         );
       })}
 
-      {/* anomaly pins */}
+      {/* anomaly pins — draggable when the source can re-plan from a new target */}
       {anomalies.map((a) => {
-        const q = pj(a.lat, a.lon);
-        const pin = a.source === 'sdr' ? '#ff6b66' : a.source === 'rf_drone' ? '#c47dff' : a.source === 'drone_survey' ? '#58d68d' : '#ffc24b';
+        const dragging = drag?.id === a.id;
+        const q = dragging ? { x: drag.x, y: drag.y } : pj(a.lat, a.lon);
+        // One colour table for every rail (FM-180): the map pin, the cue list
+        // and the rail badge cannot disagree about which rail raised a cue.
+        const pin = pinColourFor(a.source);
+        const movable = !!onMoveAnomaly;
         return (
-          <g key={a.id}>
+          <g
+            key={a.id}
+            style={{ cursor: movable ? (dragging ? 'grabbing' : 'grab') : 'default' }}
+            onPointerDown={(e) => {
+              if (!movable) return;
+              e.preventDefault();
+              const p = toUser(e.clientX, e.clientY);
+              setDrag({ id: a.id, x: p?.x ?? q.x, y: p?.y ?? q.y });
+            }}
+          >
+            {/* generous invisible hit area so the pin is easy to grab */}
+            {movable && <circle cx={q.x} cy={q.y} r={fs * 1.8} fill="transparent" />}
             <circle cx={q.x} cy={q.y} r={fs * 1.15} fill="none" stroke={pin} strokeWidth={1.2}
               vectorEffect="non-scaling-stroke" opacity={0.85}>
               <animate attributeName="r" values={`${fs * 0.7};${fs * 1.5};${fs * 0.7}`} dur="2.2s" repeatCount="indefinite" />
@@ -252,7 +474,7 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
             <circle cx={q.x} cy={q.y} r={fs * 0.4} fill={pin} stroke="#0b0d11" strokeWidth={0.6} />
             <text x={q.x + fs * 0.9} y={q.y - fs * 0.6} fontSize={fs * 0.8}
               fill={pin} fontFamily="var(--font-mono)">
-              {a.source ?? 'unknown'} · {a.id}
+              {a.source ?? 'unknown'} · {a.id}{dragging ? ' · drop to re-plan' : ''}
             </text>
           </g>
         );
@@ -280,7 +502,24 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
         </g>;
       })}
 
-      {/* breadcrumb trail */}
+      {/* per-vehicle tracks sampled from the fleet stream */}
+      {fleet.map((v, i) => {
+        const points = trailsByVehicle[v.vehicleId];
+        if (!points || points.length < 2) return null;
+        return (
+          <polyline
+            key={`track-${v.vehicleId}`}
+            points={points.map((p) => { const q = pj(p.lat, p.lon); return `${q.x},${q.y}`; }).join(' ')}
+            fill="none"
+            stroke={VEHICLE_COLORS[i % VEHICLE_COLORS.length]}
+            strokeOpacity={v.vehicleId === selectedVehicle ? 0.6 : 0.32}
+            strokeWidth={1.2}
+            vectorEffect="non-scaling-stroke"
+          />
+        );
+      })}
+
+      {/* breadcrumb trail of the followed vehicle (telemetry-rate) */}
       {trail.length > 1 && (
         <polyline
           points={trailPts}
@@ -296,7 +535,23 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
         H
       </text>
 
-      {/* vehicle */}
+      {/* every fleet vehicle except the one telemetry already draws */}
+      {fleet.map((v, i) => {
+        if (v.vehicleId === selectedVehicle) return null;
+        if (v.position.lat === 0 && v.position.lon === 0) return null;
+        const q = pj(v.position.lat, v.position.lon);
+        const color = VEHICLE_COLORS[i % VEHICLE_COLORS.length];
+        return (
+          <g key={`veh-${v.vehicleId}`}>
+            <circle cx={q.x} cy={q.y} r={fs * 0.5} fill={color} fillOpacity={0.75} stroke="#0b0d11" strokeWidth={0.6} />
+            <text x={q.x + fs * 0.8} y={q.y - fs * 0.5} fontSize={fs * 0.72} fill={color} fontFamily="var(--font-mono)">
+              {v.vehicleId}
+            </text>
+          </g>
+        );
+      })}
+
+      {/* followed vehicle */}
       {droneXY && (
         <g transform={`translate(${droneXY.x} ${droneXY.y}) rotate(${tel?.heading ?? 0})`}>
           <path
@@ -309,6 +564,46 @@ function MapSvg({ site, view, tel, trail, anomalies, plan, observation, rfEvents
   );
 }
 
+/** The flight tube itself: legs stroked at twice their lateral tolerance and
+ *  orbit rings stroked at twice their radial tolerance, in map metres. */
+function CorridorBand({
+  corridor, project: pj, color, dim,
+}: {
+  corridor: Corridor;
+  project: (lat: number, lon: number) => XY;
+  color: string;
+  dim: boolean;
+}): React.ReactElement {
+  const fill = dim ? 0.07 : 0.14;
+  return (
+    <g>
+      {corridor.legs.map((leg, i) => {
+        const a = pj(leg.from.lat, leg.from.lon);
+        const b = pj(leg.to.lat, leg.to.lon);
+        return (
+          <line
+            key={`leg-${i}`}
+            x1={a.x} y1={a.y} x2={b.x} y2={b.y}
+            stroke={color} strokeOpacity={fill}
+            strokeWidth={leg.lateral_tol_m * 2} strokeLinecap="round"
+          />
+        );
+      })}
+      {corridor.orbits.map((orbit, i) => {
+        const c = pj(orbit.center.lat, orbit.center.lon);
+        return (
+          <circle
+            key={`orbit-${i}`}
+            cx={c.x} cy={c.y} r={orbit.radius_m}
+            fill="none" stroke={color} strokeOpacity={fill}
+            strokeWidth={orbit.radial_tol_m * 2}
+          />
+        );
+      })}
+    </g>
+  );
+}
+
 function centroid(pts: XY[]): XY {
   const x = pts.reduce((s, p) => s + p.x, 0) / pts.length;
   const y = pts.reduce((s, p) => s + p.y, 0) / pts.length;
@@ -317,14 +612,19 @@ function centroid(pts: XY[]): XY {
 
 /* ---- overlay legend ------------------------------------------------------ */
 
-function Legend({ metersAcross }: { metersAcross: number }): React.ReactElement {
+function Legend({ metersAcross, corridor }: { metersAcross: number; corridor: boolean }): React.ReactElement {
   const rows: Array<[string, string, boolean]> = [
-    ['#ffc24b', 'Vehicle / anomaly', false],
+    ['#ffc24b', 'Vehicle / optical cue', false],
+    [RAIL_PIN_COLOUR.sar, 'SAR cue', false],
+    [RAIL_PIN_COLOUR.cctv, 'CCTV cue', false],
+    [RAIL_PIN_COLOUR.fence_sensor, 'Fence cue', false],
     ['rgba(47,129,247,0.8)', 'Perimeter fence', true],
     ['rgba(240,68,56,0.8)', 'No-fly zone', false],
     ['rgba(90,160,255,0.9)', 'Planned route', true],
+    ...(corridor ? [['rgba(90,160,255,0.45)', 'Corridor tolerance', false] as [string, string, boolean]] : []),
     ['rgba(196,204,214,0.9)', 'Staging point', false],
     ['rgba(170,118,255,0.8)', 'Clutter / LiDAR', true],
+    ['#58d68d', 'Peer vehicle', false],
     ['#ff3b30', 'Hostile RF / pilot', false],
   ];
   return (

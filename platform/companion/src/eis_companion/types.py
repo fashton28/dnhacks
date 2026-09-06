@@ -22,6 +22,7 @@ Frame conventions (match the MAVLink BODY-NED setpoint path, PRD 6.1):
 """
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -120,17 +121,40 @@ class Limits:
     max_altitude: float = 30.0        # m, geofence altitude cap
     standoff: float = 5.0             # m, configured target distance
     min_standoff: float = 3.0         # m, hard floor
+    max_standoff: float = 50.0        # m, hard CEILING (FM-11)
     deadzone: float = 0.09            # normalised stick deadzone
     manual_watchdog_ms: int = 500     # zero+hold if no stick frame within this
     ground_link_timeout_ms: int = 2000  # deadman on the ground link
 
     def clamp_standoff(self, meters: float) -> float:
-        """Clamp a requested standoff to [min_standoff, +inf), never below floor."""
-        return max(self.min_standoff, float(meters))
+        """Clamp a requested standoff to [min_standoff, max_standoff].
+
+        The band is CLOSED at BOTH ends. An unbounded standoff is not a
+        conservative setting: guidance computes ``est_distance - standoff``, so
+        a huge value drives sustained full-speed RETREAT that no clamp catches
+        (the three standoff re-assertions only ever forbid POSITIVE vx), and it
+        leaks into the advertised ``capabilities.max_standoff_m`` (FM-11).
+        A non-finite request degrades to the configured value, never to inf.
+        """
+        try:
+            value = float(meters)
+        except (TypeError, ValueError):
+            return self.standoff
+        if not math.isfinite(value):
+            return self.standoff
+        lo = float(self.min_standoff)
+        hi = max(lo, float(self.max_standoff))
+        return max(lo, min(hi, value))
 
     def clamp_speed(self, mps: float) -> float:
         """Clamp a requested max-speed to [min_speed, max_speed]."""
-        return max(self.min_speed, min(self.max_speed, float(mps)))
+        try:
+            value = float(mps)
+        except (TypeError, ValueError):
+            return self.max_speed
+        if not math.isfinite(value):
+            return self.max_speed
+        return max(self.min_speed, min(self.max_speed, value))
 
 
 # --------------------------------------------------------------------------
@@ -142,10 +166,17 @@ class TargetObservation:
 
     bbox is (x, y, w, h) NORMALISED 0..1 of the video frame (top-left origin).
     conf is the detector confidence 0..1. ts is the capture wall-clock (s).
+
+    ``cls`` is the detected object class. It defaults to ``"person"`` because
+    the person-following tracker is the only consumer that existed first, but
+    the staging rails also emit ``vehicle``/``structure`` boxes -- and those
+    must NOT ride the person-tracking wire as classless targets (FM-122). The
+    orchestrator routes by this field; it is internal, not a wire type.
     """
     bbox: tuple                       # (x, y, w, h) normalised 0..1
     conf: float
     ts: float = field(default_factory=now)
+    cls: str = "person"
 
     # --- convenience geometry (all normalised 0..1) -----------------------
     @property

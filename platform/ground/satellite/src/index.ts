@@ -16,11 +16,14 @@ export type {
   DetectResult,
 } from './types.js';
 
+export type { TileProjection } from './georef.js';
 export {
   latLonToPixel,
   pixelToLatLon,
   metersPerPixel,
   distanceMeters,
+  inBounds,
+  projectToTile,
   validateGeoRef,
 } from './georef.js';
 

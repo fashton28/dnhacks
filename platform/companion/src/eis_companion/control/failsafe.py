@@ -17,6 +17,11 @@ class FailsafeSignals:
     battery_should_rtl: bool = False
     sortie_should_rtl: bool = False
     datalink_lost: bool = False
+    #: The FLIGHT-CONTROLLER link, not the ground link. Distinct rails, distinct
+    #: failures: with MAVLink dead the companion cannot command anything, so
+    #: the honest state is a hold that says the telemetry is last-known rather
+    #: than a silent stream of re-stamped cache (FM-08).
+    fc_link_lost: bool = False
     planner_heartbeat_lost: bool = False
     gps_healthy: bool = True
     rf_interference_recent: bool = False
@@ -31,6 +36,16 @@ class FailsafeSignals:
     charge_stalled: bool = False
     soc_degraded: bool = False
     manual_engaged: bool = False
+    # Runtime envelope monitor (control/envelope.py). The monitor observes and
+    # constrains; it never guides, so its verdict arrives HERE as a request and
+    # never as a setpoint. The orchestrator raises exactly one of these per
+    # tick from the monitor's own coroutine; guidance can neither read nor
+    # write them. ``envelope_escalate`` accompanies a hold/rtl rather than
+    # replacing it -- an escalation is a message to humans and never changes
+    # the flight state (FAILURE_MODES, "Persistent breach").
+    envelope_hold: bool = False
+    envelope_rtl: bool = False
+    envelope_escalate: bool = False
 
 
 @dataclass(frozen=True)
@@ -55,6 +70,17 @@ def decide(signals: FailsafeSignals) -> FailsafeDecision:
         return FailsafeDecision("rtl", "sortie must-RTL time reached", "companion")
     if s.airborne and s.wind_persistent:
         return FailsafeDecision("rtl", "wind above limit persists", "companion")
+    # Containment beats everything the planner wanted: an NFZ buffer or a
+    # geofence margin is a boundary with consequences outside the aircraft.
+    if s.airborne and s.envelope_rtl:
+        return FailsafeDecision("rtl", "envelope breach: containment", "companion")
+
+    # No FC link means no commanded motion is reaching the aircraft at all and
+    # every telemetry rail is last-known. Report it rather than flying on cache.
+    if s.fc_link_lost:
+        return FailsafeDecision(
+            "hold", "flight controller link lost; telemetry is stale", "companion"
+        )
 
     if not s.site_valid:
         return FailsafeDecision("refuse", "site model invalid", "companion")
@@ -75,6 +101,8 @@ def decide(signals: FailsafeSignals) -> FailsafeDecision:
         return FailsafeDecision("escalate", "probable interference", "companion")
     if s.airborne and s.hostile_drone:
         return FailsafeDecision("hold", "hostile drone; operator continue or RTL required", "companion")
+    if s.airborne and s.envelope_hold:
+        return FailsafeDecision("hold", "envelope breach: hold", "companion")
     if s.datalink_lost:
         return FailsafeDecision("hold", "vehicle datalink lost", "companion")
     if s.planner_heartbeat_lost:
@@ -85,6 +113,11 @@ def decide(signals: FailsafeSignals) -> FailsafeDecision:
         return FailsafeDecision("hold", "wind above limit", "companion")
     if s.airborne and s.lidar_failed:
         return FailsafeDecision("hold", "LiDAR failed; climb to clear altitude", "companion")
+    # A standalone envelope escalation (the hold/rtl it accompanies was already
+    # returned above, so reaching here means the breach cleared but the
+    # escalation is still outstanding).
+    if s.envelope_escalate:
+        return FailsafeDecision("escalate", "envelope breach persisted", "companion")
     if s.camera_failed:
         return FailsafeDecision("escalate", "no observation: camera failed", "companion")
     if s.airborne and s.thermal_failed:

@@ -28,6 +28,7 @@ from contracts.models import (
     Waypoint,
 )
 from contracts.site import latlon_to_enu
+from hub.incidents import from_agent_outcome
 from hub.inspection import Inspector
 from hub.safety import validate
 from hub.site_context import SiteKnowledge
@@ -289,6 +290,17 @@ class Autonomy:
                 return TriageDecision(detection_id=d.id, action=TriageAction(b.input["action"]), rationale=b.input["rationale"])
         raise RuntimeError("no triage decision returned")
 
+    def _store_incident(self, detection_id: str, outcome: dict[str, Any]) -> None:
+        # The agent's report is a markdown blob on the event stream and a file on disk.
+        # Store it as a contract IncidentReport too, so it survives a page reload and
+        # carries the evidence frames its verdict rests on. Declined dispatches are keyed
+        # by the Detection since they never had a Mission.
+        report = from_agent_outcome(outcome)
+        self.app.state.incidents.add(report)
+        self.app.state.audit.append("incident_report", mission_id=report.mission_id, detection_id=detection_id,
+                                    verdict=report.verdict.value, evidence=len(report.evidence_refs))
+        self.app.state.registry.publish({"type": "incident_report", "detection_id": detection_id, "report": report.model_dump(mode="json")})
+
     async def dispatch(self, detection_id: str, *, red_team: str | None = None) -> dict[str, Any]:
         d = self.app.state.detections.get(detection_id)
         if d is None:
@@ -307,6 +319,7 @@ class Autonomy:
             self.events.emit("incident_report", None, title=triage["title"], severity=triage["severity"], body_markdown=triage["body_markdown"], recommended_action=triage["recommended_action"])
             outcome = {"anomaly_id": d.id, "mission_id": None, "flown": False, "attempts": 0, "plan": None, "verdict": None, "result": None, "triage": triage, "drone_id": None, "pretriage": decision.model_dump(mode="json")}
             self.outcomes[detection_id] = outcome
+            self._store_incident(detection_id, {**outcome, "mission_id": f"triage-{d.id}"})
             self.app.state.registry.publish({"type": "dispatch_outcome", "detection_id": detection_id, **{k: outcome[k] for k in ("mission_id", "flown", "attempts", "triage", "drone_id")}})
             return outcome
         anomaly = detection_to_anomaly(d, site_prose)
@@ -327,5 +340,6 @@ class Autonomy:
 
         outcome = await asyncio.to_thread(run)
         self.outcomes[detection_id] = outcome
+        self._store_incident(detection_id, outcome)
         self.app.state.registry.publish({"type": "dispatch_outcome", "detection_id": detection_id, **{k: outcome[k] for k in ("mission_id", "flown", "attempts", "triage", "drone_id")}})
         return outcome

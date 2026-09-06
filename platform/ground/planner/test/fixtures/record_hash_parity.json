@@ -1,0 +1,125 @@
+{
+  "_generated_by": "companion/src/eis_companion/security.py record_hash/chain_hash",
+  "genesisHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "cases": [
+    {
+      "name": "empty record",
+      "record": {},
+      "recordHash": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a",
+      "chainHashFromGenesis": "09ad20dc4e5df15657fbc2d7fc65ffc996b58412847f5d2b84390ac6b79f8396",
+      "chainHashFromPrev": "f75f3cb5ac48eeb7db241870685ce97683d55184e0d0795d2178129870dcbf18"
+    },
+    {
+      "name": "flat record with mixed scalars",
+      "record": {
+        "missionId": "plan-task-sat-change-1",
+        "vehicleId": "eis-1",
+        "startedAt": 1757116800000,
+        "mode": "attended",
+        "ok": true,
+        "endedAt": null
+      },
+      "recordHash": "34d09cda0af7ce72230abe9d3190ff3fadd6bdc5bb2a44b679657bdce7136ad3",
+      "chainHashFromGenesis": "ef36c75c7737e119005e59f8f3d73822b102dfea6b8a7cf03f707d14f53c043f",
+      "chainHashFromPrev": "6f4faed99aae6a8208f57663e4899a9740b966fdb787674bb9afb6a2d85d595b"
+    },
+    {
+      "name": "key order is irrelevant",
+      "record": {
+        "vehicleId": "eis-1",
+        "missionId": "plan-task-sat-change-1",
+        "mode": "attended",
+        "endedAt": null,
+        "ok": true,
+        "startedAt": 1757116800000
+      },
+      "recordHash": "34d09cda0af7ce72230abe9d3190ff3fadd6bdc5bb2a44b679657bdce7136ad3",
+      "chainHashFromGenesis": "ef36c75c7737e119005e59f8f3d73822b102dfea6b8a7cf03f707d14f53c043f",
+      "chainHashFromPrev": "6f4faed99aae6a8208f57663e4899a9740b966fdb787674bb9afb6a2d85d595b"
+    },
+    {
+      "name": "chain and identity fields are excluded",
+      "record": {
+        "missionId": "plan-1",
+        "recordHash": "deadbeef",
+        "hash": "cafe",
+        "prev": "0000000000000000000000000000000000000000000000000000000000000000",
+        "sig": "not-a-signature"
+      },
+      "recordHash": "77852c13a6415c2eb39e746034ec159919f34541382a64114314d64750ccc346",
+      "chainHashFromGenesis": "f6051d6d63a9704808d1821b4594301e78c26a094d72199afd38e53eafec25e8",
+      "chainHashFromPrev": "9c054e4be58d526d23b635dd1b91152f4ee2586990ff542643a6b5ad693f1014"
+    },
+    {
+      "name": "nested mission record with geometry",
+      "record": {
+        "missionId": "plan-task-sat-change-1",
+        "vehicleId": "eis-1",
+        "anomalyId": "sat-change-1",
+        "mode": "unattended",
+        "startedAt": 1757116800000,
+        "planTrace": [
+          {
+            "rule": "profile",
+            "effect": "lookFor=vehicle selects the inspect profile"
+          },
+          {
+            "rule": "laps",
+            "effect": "exactly 1 lap"
+          }
+        ],
+        "plan": {
+          "requestId": "plan-task-sat-change-1",
+          "anomalyId": "sat-change-1",
+          "profile": "inspect",
+          "rationale": "Deterministic inspect of vehicle at cue sat-change-1",
+          "tools": [
+            {
+              "tool": "goto_gps",
+              "lat": -26.090664,
+              "lon": 29.469245,
+              "alt": 37.5
+            },
+            {
+              "tool": "orbit_point",
+              "lat": -26.090664,
+              "lon": 29.469245,
+              "radius": 25,
+              "laps": 1
+            },
+            {
+              "tool": "rtl"
+            }
+          ]
+        },
+        "envelopeEvents": []
+      },
+      "recordHash": "376f3e0c7cb2a997bf3339e7ac66151f9994f3abbf016ccf66b148afb923500a",
+      "chainHashFromGenesis": "a9f37b88f04d100dff4ebc8b25595cb8d187f93c853bd1cd8f103ab0d56bb5a6",
+      "chainHashFromPrev": "605fc56de4528caeeba096be62dea12f1414e627f9a65f83ca1759beb13b4af0"
+    },
+    {
+      "name": "non-ascii text is emitted raw",
+      "record": {
+        "missionId": "plan-1",
+        "note": "grün — föotprint 12 m²"
+      },
+      "recordHash": "c7fc23a5ae7832a7ffeedd8eff6c04cdc5e5e8e9cc96b4132668bd9795c44aae",
+      "chainHashFromGenesis": "d48162aeaa3ca86d35499f4afdb6dd235c6e1c29f67ac3bb5d58104145ce7a00",
+      "chainHashFromPrev": "349eb4dcf03e1e366a907aefdaead7a177b1ee32562cc55ad134806524baaedd"
+    },
+    {
+      "name": "empty containers and zero",
+      "record": {
+        "a": [],
+        "b": {},
+        "c": 0,
+        "d": "",
+        "e": false
+      },
+      "recordHash": "75b3c23c550370add773b3c5a05c9fb276689f16c8481ccfbb86164bf9c86b44",
+      "chainHashFromGenesis": "87cf2c7cde28068f356cbf649338fdb8c2db6ce0327a71ee0949b1f293465381",
+      "chainHashFromPrev": "c31789ad0d2e149629bae63f962622845a252e6eab707db9f1a4c430928134ad"
+    }
+  ]
+}

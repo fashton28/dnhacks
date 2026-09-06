@@ -1,0 +1,23 @@
+{
+  "_comment": "Per-camera PIXEL calibration for the CCTV fallback. GAP: docs/SITE_CONTRACT.md carries no calibration fields on cameras[], so this is a cues-owned file — a wrong calibration must be fixable without editing site geometry. refBoxHeightPx is the bounding-box height, in pixels, of refClass standing at refRangeM in this camera's frame. These values are DERIVED FROM NOTHING MEASURED: no camera was calibrated in this run, so a pixel cue from them is a demonstration of the projection, not a survey-grade fix.",
+  "cameras": [
+    {
+      "cameraId": "cam-east-south",
+      "imageWidthPx": 1280,
+      "imageHeightPx": 720,
+      "refBoxHeightPx": 80,
+      "refRangeM": 100,
+      "refClass": "person",
+      "classHeightRatio": { "person": 1, "vehicle": 1.1, "truck": 2.2 }
+    },
+    {
+      "cameraId": "cam-east-north",
+      "imageWidthPx": 1280,
+      "imageHeightPx": 720,
+      "refBoxHeightPx": 80,
+      "refRangeM": 100,
+      "refClass": "person",
+      "classHeightRatio": { "person": 1, "vehicle": 1.1, "truck": 2.2 }
+    }
+  ]
+}

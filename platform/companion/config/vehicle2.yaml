@@ -1,0 +1,163 @@
+###############################################################################
+# Drone Safety Platform -- COMPANION config for the SECOND vehicle (eis-2).
+#
+#   EIS_CONFIG=config/vehicle2.yaml python -m eis_companion.app
+#
+# Two vehicles in a STAR around the ground hub (ADR D26): no mesh, no
+# vehicle-to-vehicle radio, no peer-to-peer negotiation. Everything that keeps
+# a vehicle safe is PER VEHICLE and independent -- its own watchdogs, its own
+# battery and sortie timers, its own validator, its own envelope monitor, its
+# own audit chain, its own session key. Losing the hub is not a fleet event:
+# each vehicle holds and then RTLs on its own timer.
+#
+# The ONLY cross-vehicle input is the hub-relayed `fleet` message. That is what
+# makes the staleness rule enforceable: separation is a function of peer data
+# age, and the age is measurable because there is exactly one path by which
+# peer data arrives (40 m nominal, 80 m past 3 s, hold past 10 s -- ADR D21).
+#
+# Everything below differs from sitl.yaml ONLY in identity, ports and the key
+# env var. Every safety value is identical, because a second airframe is not a
+# reason to fly a wider envelope.
+###############################################################################
+
+sitl: true
+vehicle_id: eis-2
+
+# --- Hard safety + tuning envelope (identical to vehicle 1) ----------------
+limits:
+  max_speed:            2.0
+  min_speed:            0.5
+  max_climb_rate:       1.5
+  max_yaw_rate:         45.0
+  max_altitude:         80.0
+  standoff:             5.0
+  min_standoff:         3.0
+  deadzone:             0.09
+  manual_watchdog_ms:   500
+  ground_link_timeout_ms: 2000
+
+guidance:
+  gains:
+    yaw:      { kp: 90.0, ki: 0.0, kd: 4.0 }
+    altitude: { kp: 2.0,  ki: 0.0, kd: 0.1 }
+    forward:  { kp: 0.6,  ki: 0.0, kd: 0.05 }
+
+camera:
+  source:   sim
+  width:    1280
+  height:   720
+  fps:      30
+  vfov_deg: 41.0
+
+detector:
+  model_path:      weights/yolo11n.pt
+  engine_path:     weights/yolo11n.engine
+  conf:            0.4
+  person_height_m: 1.7
+
+tracking:
+  lost_timeout:  1.0
+  max_age:       1.5
+  iou_threshold: 0.3
+  min_hits:      2
+
+# --- Network: its OWN control port (vehicle 1 keeps 8765) ------------------
+network:
+  # LOOPBACK BY DEFAULT (FM-40). The control WebSocket takes arm / takeoff /
+  # executePlan / emergencyStop, and every real client runs on this machine.
+  # Set this to 0.0.0.0 (or EIS_BIND_ALL=true) ONLY with a reason: doing so
+  # automatically forces security.require_signed_commands on, because a socket
+  # the venue LAN can reach must authenticate every frame.
+  host:               127.0.0.1
+  control_port:       8766   # +1: both companions run on one host in SITL
+  video_port:         8555
+  webrtc_port:        8890
+  video_bitrate_kbps: 2500
+  video_url:          ""
+
+# --- FC link: SITL instance 1 (ArduPilot's -I1 offsets every port by 10) ---
+fc:
+  connection: udp:127.0.0.1:14560   # instance 0 is 14550
+  baud:       921600
+  sysid:      2                     # distinct FC system id
+  gcs_sysid:  254                   # distinct companion GCS id
+
+safety:
+  geofence_radius_m:      60.0
+  low_battery_action:     rtl
+  critical_battery_action: land
+  min_battery_remaining:  20.0
+  rc_override_primacy:    true
+
+battery:
+  nominal_endurance_s:    1500
+  reserve_pct:            25
+  max_sortie_s:           480
+  dispatch_min_soc_pct:   80
+  cell_imbalance_max_v:   0.10
+  batt_temp_max_c:        60
+  capacity_mah:           5000
+  # 3S DELIBERATELY, and only here: ArduPilot SITL simulates a 12.6 V pack,
+  # which is 4.2 V/cell on 3S (full) but 3.15 V/cell on 4S (empty) -- reading
+  # it as 4S would refuse every arm. The real airframe in default.yaml is 4S.
+  # Every voltage-derived FC threshold (BATT_LOW_VOLT / BATT_CRT_VOLT) is
+  # DERIVED from this number and pushed at connect by
+  # Vehicle.apply_failsafe_params, so the firmware and the companion always
+  # describe the same pack -- sim/params/eis-sitl.parm's 4S literals are
+  # overwritten rather than silently disagreeing (FM-156 / FM-16).
+  cell_count:             3
+  demo_charge_scale_s:    30
+  estimated_return_s:     30
+
+planner:
+  profile_speed_mps: { follow: 2.0, inspect: 4.0, survey: 6.0, slow: 2.0, standard: 4.0, fast: 6.0 }
+  site_file: ""                   # the SAME site model as vehicle 1
+  arrival_radius_m: 2.0
+  staging_arrival_radius_m: 15.0
+  heartbeat_timeout_ms: 2000
+
+# --- Runtime envelope monitor (ADR D21/D22) --------------------------------
+# Identical thresholds to vehicle 1: separation is symmetric, so both vehicles
+# must agree on it or the pair can converge while each believes it is clear.
+# config.py floors every value -- these may only be TIGHTENED, never widened.
+envelope:
+  separation_m:        40.0    # nominal inter-vehicle gap
+  separation_stale_m:  80.0    # peer data older than peer_stale_s
+  peer_stale_s:        3.0     # past this the requirement widens
+  peer_hold_s:        10.0     # past this: hold, whatever the geometry
+  escalate_after_s:    5.0
+  geofence_margin_m:   5.0
+  nfz_buffer_m:       25.0
+  hysteresis_m:        2.0
+  recovery_s:          2.0
+
+# --- UNATTENDED_ENVELOPE (ADR D23) -----------------------------------------
+# The sortie-rate budget is counted per vehicle, so two vehicles do not share
+# (or double) one budget.
+unattended:
+  min_alt_m:            30.0
+  max_alt_m:            50.0
+  max_laps:             1.0
+  max_hold_s:          15.0
+  max_sorties_per_hour: 2
+  max_wind_mps:         6.0
+  profiles: [inspect]
+
+gimbal:
+  enabled:            true
+  pitch_min_deg:     -30.0
+  pitch_max_deg:      90.0
+  slew_rate_dps:      30.0
+  use_gimbal_manager: false
+
+# --- Command signing: this vehicle's OWN key ------------------------------
+# A key that signs for eis-1 must not sign for eis-2, so the two read
+# different environment variables. Key custody is the deploying
+# organisation's, not this system's (docs/THREAT_MODEL.md).
+security:
+  session_key_env:         EIS_SESSION_KEY_EIS_2
+  max_command_age_ms:      30000
+  require_signed_commands: false
+  # "" -> logs/companion-audit-eis-2.jsonl. Its OWN chain: two vehicles sharing
+  # one file would interleave two chains into one that verifies as neither.
+  audit_path:              ""

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { MISSION_SEQUENCE_TOOLS, validateMissionPlan, validateObservation } from '../src/validate';
-import { MISSION_PLAN_INPUT_SCHEMA } from '../src/llm';
+import { TASK_LIST_SCHEMA } from '../src/llm';
 
 const base = { requestId:'r', anomalyId:'a', profile:'standard', rationale:'test' };
 describe('wire validation hardening', () => {
@@ -24,9 +24,20 @@ describe('wire validation hardening', () => {
   ])('rejects $tool from a MissionPlan sequence while retaining its wire shape', (tool) => {
     expect(() => validateMissionPlan({ ...base, tools:[tool, {tool:'rtl'}] }))
       .toThrow(/not admitted.*resolved geometry.*planCommand/);
-    expect(MISSION_PLAN_INPUT_SCHEMA.safeParse({ ...base, tools:[tool, {tool:'rtl'}] }).success).toBe(false);
   });
   it('publishes only the geometrically verifiable sequence tool set', () => {
     expect(MISSION_SEQUENCE_TOOLS).toEqual(['goto_gps', 'orbit_point', 'hold', 'rtl']);
+  });
+  it('gives the model no schema in which a plan could be expressed', () => {
+    // The only schema-bound tasking surface: no tools, no geometry, no plan.
+    const shape = TASK_LIST_SCHEMA.safeParse({ tasks: [{
+      anomalyId: 'a-1', lookFor: 'vehicle', question: 'q', urgency: 'immediate',
+      priority: 0.5, rationale: 'r',
+    }] });
+    expect(shape.success).toBe(true);
+    expect(TASK_LIST_SCHEMA.safeParse({ tasks: [{
+      anomalyId: 'a-1', lookFor: 'vehicle', question: 'q', urgency: 'immediate',
+      priority: 0.5, rationale: 'r', tools: [{ tool: 'goto_gps', lat: 0, lon: 0, alt: 20 }],
+    }] }).success).toBe(false);
   });
 });

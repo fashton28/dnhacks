@@ -7,20 +7,33 @@
 #
 # What it does
 #   1. Verifies Node.js >= 20.
-#   2. npm install  in ground/ui          (shared React renderer)
-#   3. npm install  in ground/app/linux   (Electron shell, Linux electron binary)
-#   4. Builds the UI (tsc + vite build) into ground/ui/dist
-#   5. Prints next-step instructions.
+#   2. npm install  in ground/planner     (deterministic planner + verifier)
+#   3. npm install  in ground/ui          (shared React renderer)
+#   4. npm install  in ground/app/linux   (Electron shell, Linux electron binary)
+#   5. Builds ground/planner -> ground/planner/dist   (FM-83)
+#   6. Builds the UI (tsc + vite build) into ground/ui/dist
+#   7. Builds the Electron shell -> ground/app/linux/dist-electron  (FM-132)
+#   8. Asserts every built artefact exists, then prints next steps.
+#
+# BUILD ORDER MATTERS. The Electron main process `require`s
+# ground/planner/dist/index.js at runtime and package.json's `main` is
+# dist-electron/main.js; both are gitignored, so a fresh clone has NEITHER
+# until this script produces them. Before FM-83/FM-132 this script installed
+# and built only ground/ui, so a fresh clone gave "Cannot find module
+# dist-electron/main.js" at launch, or a "Planning failed" toast the moment the
+# inspection button was pressed.
 #
 # Usage (from anywhere):
 #   bash scripts/setup-ground-linux.sh
 #
 # Environment variables honoured:
-#   EIS_SKIP_BUILD=1   -- install deps but skip the UI build
+#   EIS_SKIP_BUILD=1   -- install deps but skip every build (artefact
+#                         assertions are skipped with it)
 # ============================================================================
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PLANNER_DIR="$REPO_ROOT/ground/planner"
 UI_DIR="$REPO_ROOT/ground/ui"
 APP_DIR="$REPO_ROOT/ground/app/linux"
 
@@ -37,28 +50,60 @@ ok "Node.js $(node --version)"
 command -v npm >/dev/null 2>&1 || fail "npm not found (ships with Node)."
 ok "npm $(npm --version)"
 
-# 2. UI deps ------------------------------------------------------------------
+# 2. Planner deps -------------------------------------------------------------
+# The Electron main process loads ground/planner/dist at runtime; without its
+# node_modules there is nothing to build it with (FM-83).
+[ -d "$PLANNER_DIR" ] || fail "ground/planner not found at $PLANNER_DIR"
+cyan "Installing ground/planner dependencies"
+( cd "$PLANNER_DIR" && npm install --prefer-offline )
+ok "ground/planner node_modules ready"
+
+# 3. UI deps ------------------------------------------------------------------
 [ -d "$UI_DIR" ] || fail "ground/ui not found at $UI_DIR"
 cyan "Installing ground/ui dependencies"
 ( cd "$UI_DIR" && npm install --prefer-offline )
 ok "ground/ui node_modules ready"
 
-# 3. App (linux) deps ---------------------------------------------------------
+# 4. App (linux) deps ---------------------------------------------------------
 [ -d "$APP_DIR" ] || fail "ground/app/linux not found at $APP_DIR"
 cyan "Installing ground/app/linux dependencies"
 ( cd "$APP_DIR" && npm install --prefer-offline )
 ok "ground/app/linux node_modules ready"
 
-# 4. Build the UI (unless skipped) -------------------------------------------
+# 5-7. Build everything the shell loads at runtime (unless skipped) -----------
+# Order: planner -> ui -> electron, the order they are loaded in, so a failure
+# points at the thing that failed.
 if [ "${EIS_SKIP_BUILD:-0}" = "1" ]; then
-  printf '    EIS_SKIP_BUILD=1: skipping UI build.\n'
+  printf '    EIS_SKIP_BUILD=1: skipping every build (planner, UI, Electron shell).\n'
+  printf '    The ground station will NOT start until these are built.\n'
 else
+  cyan "Building ground/planner (deterministic planner + verifier) -> dist/"
+  ( cd "$PLANNER_DIR" && npm run build )
+  ok "ground/planner built -> ground/planner/dist/"
+
   cyan "Building ground/ui (TypeScript typecheck + Vite build)"
   ( cd "$UI_DIR" && npm run build )
   ok "ground/ui built -> ground/ui/dist/"
+
+  cyan "Building the Electron shell -> ground/app/linux/dist-electron/"
+  ( cd "$APP_DIR" && npm run build:electron )
+  ok "Electron main/preload built -> dist-electron/"
+
+  # Artefact assertions. Every path here is loaded at RUNTIME; a build that
+  # "succeeded" without producing them fails at launch instead — which is what
+  # FM-83 and FM-132 both were.
+  cyan "Verifying built artefacts"
+  assert_artefact() {
+    [ -f "$1" ] || fail "MISSING $2: $1"
+    ok "$2 -> $1"
+  }
+  assert_artefact "$PLANNER_DIR/dist/index.js"      "planner bundle (phase3Host require)"
+  assert_artefact "$UI_DIR/dist/index.html"         "built UI (main.ts loadFile)"
+  assert_artefact "$APP_DIR/dist-electron/main.js"    "Electron main (package.json main)"
+  assert_artefact "$APP_DIR/dist-electron/preload.js" "Electron preload (webPreferences)"
 fi
 
-# 5. Next steps ---------------------------------------------------------------
+# 8. Next steps ---------------------------------------------------------------
 cat <<'EOF'
 
 ============================================================
@@ -79,4 +124,8 @@ cat <<'EOF'
 
   Gamepad access (Manual Control): the .deb/.rpm installs a udev rule
   automatically; for the AppImage, see ground/app/linux/build-resources/.
+
+  After editing ground/planner or the shell's TypeScript, RE-RUN this script
+  (or rebuild by hand) — the shell loads the BUILT artefacts, so an unbuilt
+  edit silently runs the previous build.
 EOF
