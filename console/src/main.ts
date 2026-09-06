@@ -235,6 +235,10 @@ liveFeed((ev) => {
     case "detection": onDetection(ev.detection ?? ev); break;
     case "mission_spec": missionSpec = { objective: ev.spec.objective, rationale: ev.spec.rationale, max_altitude_m: ev.spec.max_altitude_m, standoff_m: ev.spec.standoff_m }; log(`Triage Agent proposed a plan (attempt ${ev.spec.attempt ?? 1}): ${ev.spec.rationale}`); refreshMission(); switchTab("mission"); break;
     case "validation": { const r = ev.result ?? ev; validation = { verdict: r.verdict, violations: r.violations ?? [] }; log(r.verdict === "accept" ? `Safety Validator: ACCEPT${r.checks_passed ? ` (${r.checks_passed} checks)` : ""}` : `Safety Validator: REJECT ${(r.violations ?? []).map((v: any) => v.rule).join(", ")}`, r.verdict === "accept" ? "good" : "warn"); refreshMission(); break; }
+    case "envelope": log(`Envelope ${String(ev.verdict).toUpperCase()}: ${ev.radius_m} m around the Detection, ceiling ${ev.ceiling_m} m, ${ev.time_budget_s} s. ${ev.rationale ?? ""}`, ev.verdict === "accept" ? "good" : "warn"); break;
+    case "envelope_repaired": log(`Envelope shrunk after refusal (${(ev.rules ?? []).join(", ")}): ${ev.radius_m} m, ceiling ${ev.ceiling_m} m`, "warn"); break;
+    case "agent_note": log(`agent: ${ev.text}`); break;
+    case "hard_stop": log(`HARD STOP: ${ev.reason}. Returning home.`, "bad"); break;
     case "pretriage": log(`Triage agent: ${String(ev.action).replace("_", " ").toUpperCase()} for ${ev.detection_id}${ev.zone ? ` in ${String(ev.zone).replace(/_/g, " ")}` : ""}. ${ev.rationale ?? ""}`, ev.action === "dispatch" ? "good" : "warn"); break;
     case "agent_action": { const r = String(ev.result ?? ev.detail ?? ""); const bad = ev.ok === false || /^(refused|error)/i.test(r); log(`agent ${ev.tool ?? ev.action}${ev.args ? " " + JSON.stringify(ev.args) : ""}${r ? ": " + r.slice(0, 120) : ""}`, bad ? "warn" : "info"); break; }
     case "inspection": log(`Inspection at waypoint ${Number(ev.waypoint_index) + 1}: ${String(ev.threat_assessment).toUpperCase()}. ${ev.summary ?? ""}`, ev.threat_assessment === "none" ? "good" : "warn"); break;

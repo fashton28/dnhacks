@@ -113,10 +113,9 @@ class Inspector:
                     return await asyncio.wait_for(fut, 10.0)
                 frame = self._run(grab(), timeout=12)
             else:
-                frame = self._run(reg.ask_renderer(RenderFrame(cmd_id=reg.new_cmd_id(), drone_id=drone_id)), timeout=15)
+                frame = self._run(reg.ask_renderer(RenderFrame(cmd_id=reg.new_cmd_id(), drone_id=drone_id), timeout=30.0), timeout=35)
         except Exception as e:  # noqa: BLE001
             self.app.state.audit.append("inspect_capture_failed", mission_id=mission_id, drone_id=drone_id, error=repr(e)[:200])
-            self.emit("agent_action", mission_id, action="capture", ok=False, detail=str(e)[:120])
         path = None
         self._shot += 1
         if frame is not None and self.app.state.settings.evidence_dir is not None:
@@ -126,7 +125,11 @@ class Inspector:
         st = self._state(drone_id)
         cam = self.app.state.camera_settings.get(drone_id, {"mode": "rgb", "fov_deg": 70.0})
         wp = {"lat": st.lat, "lon": st.lon, "alt_m": st.alt, "gimbal_pitch_deg": st.gimbal_pitch_deg, "camera_mode": cam["mode"], "zoom": round(70.0 / cam["fov_deg"], 1)}
-        obs = self.describe(path, wp, reg.scene, index)
+        if path is None and self.live:
+            # never hand the live agent a scene-derived description as if it were a frame
+            obs = {"caption": "no frame: the camera did not return an image in time; call capture again", "detections": []}
+        else:
+            obs = self.describe(path, wp, reg.scene, index)
         obs.update({"waypoint_index": index, "frame_ref": f"evidence/{mission_id}/inspect{index}-{self._shot}.jpg" if path else None, "looking_for": looking_for, **wp})
         return obs
 

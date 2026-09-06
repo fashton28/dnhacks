@@ -21,6 +21,8 @@ export interface AgentPlanView { mission_id: string; attempt: number; plan: Agen
 export interface PretriageView { detection_id: string; zone: string | null; action: 'dispatch' | 'log_only' | 'ignore'; rationale: string }
 /** One tool call the agent made while on station (look_at, set_camera, capture, reposition, done). */
 export interface AgentActionView { ts: number; mission_id: string | null; tool: string; args: Record<string, unknown>; result: string; ok: boolean }
+/** The envelope the agent declared and the Safety Validator checked: the agent flies only inside it. */
+export interface EnvelopeView { mission_id: string; attempt: number; verdict: 'accept' | 'reject'; center: { lat: number; lon: number }; radius_m: number; ceiling_m: number; standoff_m: number; time_budget_s: number; objective: string; rationale: string; polygon: { lat: number; lon: number }[] }
 export interface InspectionView { mission_id: string; waypoint_index: number; summary: string; threat_assessment: string; actions: number }
 export interface SceneProp { id: string; kind: string; x: number; y: number; yaw_deg: number }
 export type CameraMode = 'rgb' | 'thermal' | 'lidar';
@@ -51,6 +53,10 @@ export interface ArgusState {
   pretriage: PretriageView | null;
   agentActions: AgentActionView[];
   inspection: InspectionView | null;
+  envelope: EnvelopeView | null;
+  /** Points the agent has actually flown to this Mission (from fly_to results), drawn as the route. */
+  flownRoute: { lat: number; lon: number; alt_m: number }[];
+  hardStop: string | null;
   overheads: OverheadView[];
   baselineRef: string | null;
   clamp: ClampView | null;
@@ -82,6 +88,9 @@ export interface ArgusState {
   setPretriage(v: PretriageView): void;
   addAgentAction(a: AgentActionView): void;
   setInspection(v: InspectionView): void;
+  setEnvelope(v: EnvelopeView): void;
+  addFlown(p: { lat: number; lon: number; alt_m: number }): void;
+  setHardStop(reason: string | null): void;
   setOverheads(o: OverheadView[]): void;
   setBaseline(ref: string | null): void;
   setClamp(c: ClampView | null): void;
@@ -111,6 +120,9 @@ export const useArgus = create<ArgusState>((set, get) => ({
   pretriage: null,
   agentActions: [],
   inspection: null,
+  envelope: null,
+  flownRoute: [],
+  hardStop: null,
   overheads: [],
   baselineRef: null,
   clamp: null,
@@ -153,9 +165,12 @@ export const useArgus = create<ArgusState>((set, get) => ({
   resolveIncident: (resolution) => set((st) => ({ incident: st.incident ? { ...st.incident, resolution } : null })),
   setAgentPlan: (agentPlan) => set({ agentPlan }),
   // a new dispatch starts here: the previous flight's agent trace, plan and verdicts are cleared
-  setPretriage: (pretriage) => set({ pretriage, agentActions: [], inspection: null, missionSpec: null, validation: null, agentPlan: null, incident: null, triage: null }),
+  setPretriage: (pretriage) => set({ pretriage, agentActions: [], inspection: null, missionSpec: null, validation: null, agentPlan: null, incident: null, triage: null, envelope: null, flownRoute: [], hardStop: null }),
   addAgentAction: (a) => set((st) => ({ agentActions: [...st.agentActions.slice(-39), a] })),
   setInspection: (inspection) => set({ inspection }),
+  setEnvelope: (envelope) => set({ envelope }),
+  addFlown: (p) => set((st) => ({ flownRoute: [...st.flownRoute, p] })),
+  setHardStop: (hardStop) => set({ hardStop }),
   setOverheads: (overheads) => set({ overheads }),
   setBaseline: (baselineRef) => set({ baselineRef }),
   setClamp: (clamp) => set({ clamp }),

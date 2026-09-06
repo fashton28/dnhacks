@@ -1,5 +1,5 @@
 import React from 'react';
-import { Crosshair, BrainCircuit, ShieldCheck, FileText, Send, CheckCircle2, XCircle, Eye, Camera, Aperture, Move3d, Flag, AlertTriangle } from 'lucide-react';
+import { Crosshair, BrainCircuit, ShieldCheck, FileText, Send, CheckCircle2, XCircle, Eye, Camera, Aperture, Move3d, Flag, AlertTriangle, Navigation, PauseCircle, Home, Activity, MessageSquare, OctagonX } from 'lucide-react';
 import { Panel, Badge, Button } from '@/components';
 import { renderMarkdown } from '@/lib/markdown';
 import { useArgus } from '../store';
@@ -44,6 +44,7 @@ export function DetectionsPanel({ hubBase, onDispatch }: { hubBase: string; onDi
 
 const TOOL_ICON: Record<string, React.ReactElement> = {
   look_at: <Eye size={12} />, set_camera: <Aperture size={12} />, capture: <Camera size={12} />, reposition: <Move3d size={12} />, done: <Flag size={12} />,
+  fly_to: <Navigation size={12} />, hold: <PauseCircle size={12} />, return_home: <Home size={12} />, status: <Activity size={12} />, note: <MessageSquare size={12} />, hard_stop: <OctagonX size={12} />,
 };
 
 function describeArgs(tool: string, args: Record<string, unknown>): string {
@@ -52,6 +53,9 @@ function describeArgs(tool: string, args: Record<string, unknown>): string {
     case 'set_camera': return `${String(args.mode)} · ${Number(args.zoom ?? 1).toFixed(1)}×`;
     case 'capture': return String(args.looking_for ?? '');
     case 'reposition': return `${String(args.direction ?? '')} ${String(args.distance_m ?? '')} m${args.alt_m ? ` at ${String(args.alt_m)} m` : ''}`;
+    case 'fly_to': return `${Number(args.east_m) >= 0 ? '+' : ''}${Number(args.east_m).toFixed(0)} E ${Number(args.north_m) >= 0 ? '+' : ''}${Number(args.north_m).toFixed(0)} N at ${Number(args.alt_m).toFixed(0)} m`;
+    case 'hold': return `${Number(args.seconds).toFixed(0)} s`;
+    case 'done': return String(args.threat_assessment ?? '').toUpperCase();
     default: return '';
   }
 }
@@ -62,40 +66,39 @@ export function SpecPanel(): React.ReactElement {
   const pre = useArgus((s) => s.pretriage);
   const actions = useArgus((s) => s.agentActions);
   const insp = useArgus((s) => s.inspection);
+  const env = useArgus((s) => s.envelope);
+  const hardStop = useArgus((s) => s.hardStop);
+  const mission = useArgus((s) => (s.missionSpec ? s.missions[s.missionSpec.mission_id] : undefined));
+  const inControl = !!env && !!mission && ['flying', 'paused'].includes(mission.phase);
   const route = plan ? plan.plan.waypoints.map((w, i) => `${i + 1} ${w.action} ${w.alt_m}m` + (w.duration_s ? ` ${w.duration_s}s` : '')).join(' · ') : '';
   const preTone = !pre ? 'neutral' : pre.action === 'dispatch' ? 'accent' : 'caution';
-  const status = spec ? <Badge tone="accent" mono>attempt {spec.attempt}</Badge> : pre ? <Badge tone={preTone} mono>{pre.action.replace('_', ' ').toUpperCase()}</Badge> : undefined;
+  const status = inControl ? <Badge tone="nominal" mono>AGENT IN CONTROL</Badge> : spec ? <Badge tone="accent" mono>attempt {spec.attempt}</Badge> : pre ? <Badge tone={preTone} mono>{pre.action.replace('_', ' ').toUpperCase()}</Badge> : undefined;
   return (
     <Panel title="Triage Agent" icon={<BrainCircuit size={13} />} status={status} pad scroll>
       {!spec && !pre ? <Empty title="No intent yet." hint="Dispatch a Detection. The agent states what to look at; the planner derives the route." /> : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
           {pre && (
-            <div style={{ display: 'flex', gap: 8, padding: '7px 9px', borderRadius: 6, border: `1px solid ${pre.action === 'dispatch' ? 'var(--border-strong)' : 'var(--amber-line)'}`, background: pre.action === 'dispatch' ? 'transparent' : 'var(--amber-tint)' }}>
+            <div title={pre.rationale} style={{ display: 'flex', gap: 8, padding: spec ? '5px 9px' : '7px 9px', borderRadius: 6, border: `1px solid ${pre.action === 'dispatch' ? 'var(--border-strong)' : 'var(--amber-line)'}`, background: pre.action === 'dispatch' ? 'transparent' : 'var(--amber-tint)' }}>
               {pre.action === 'dispatch' ? <Send size={13} style={{ flex: 'none', marginTop: 2, color: 'var(--accent)' }} /> : <AlertTriangle size={13} style={{ flex: 'none', marginTop: 2, color: 'var(--amber-bright)' }} />}
-              <div className="a-body" style={{ color: 'var(--text-primary)' }}>
+              <div className="a-body" style={{ color: 'var(--text-primary)', minWidth: 0 }}>
                 <b>{pre.action === 'dispatch' ? 'Dispatch' : pre.action === 'log_only' ? 'Logged, no flight' : 'Ignored'}</b>
-                {pre.zone && <span style={{ color: 'var(--text-secondary)' }}> · {pre.zone.replace(/_/g, ' ')}</span>}<br />
-                <span style={{ color: 'var(--text-secondary)' }}>{pre.rationale}</span>
+                {pre.zone && <span style={{ color: 'var(--text-secondary)' }}> · {pre.zone.replace(/_/g, ' ')}</span>}
+                {/* once a Mission exists the decision is history: one clamped line, full text on hover */}
+                <span style={{ color: 'var(--text-secondary)', display: spec ? '-webkit-box' : 'block', WebkitLineClamp: spec ? 1 : undefined, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{spec ? ' ' : ''}{pre.rationale}</span>
               </div>
             </div>
           )}
-          {spec && <>
-            <Field k="Mission" v={<span className="a-id">{spec.mission_id}</span>} />
-            <Field k="Priority" v={spec.objective} />
-            <Field k="Ceiling" v={<span className="a-num" style={{ fontSize: 12 }}>{spec.max_altitude_m}<span className="a-unit">m</span></span>} />
-            {plan && <Field k="Route" v={<span className="a-num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{route}</span>} />}
-            <Field k="Rationale" v={<span title={spec.rationale} style={{ color: 'var(--text-secondary)', display: '-webkit-box', WebkitLineClamp: actions.length ? 2 : 6, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{spec.rationale}</span>} />
-          </>}
           {actions.length > 0 && (
             <div style={{ marginTop: 2 }}>
-              <div className="a-label" style={{ marginBottom: 4 }}>On station{insp ? ` · waypoint ${insp.waypoint_index + 1}` : ''}</div>
+              <div className="a-label" style={{ marginBottom: 4 }}>{env ? 'Agent in control' : 'On station'}{env ? ` · ${actions.filter((a) => a.tool !== 'note').length} actions` : insp ? ` · waypoint ${insp.waypoint_index + 1}` : ''}</div>
+              {hardStop && <div className="a-body" style={{ color: 'var(--red-bright)', marginBottom: 4, display: 'flex', gap: 6, alignItems: 'center' }}><OctagonX size={12} /> Hard stop: {hardStop}. Returning home.</div>}
               <ol style={{ listStyle: 'none', margin: 0, padding: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
                 {actions.map((a, i) => (
                   <li key={i} style={{ display: 'grid', gridTemplateColumns: '14px 78px 1fr', gap: 8, alignItems: 'baseline', fontSize: 11 }}>
                     <span style={{ color: a.ok ? 'var(--accent)' : 'var(--red-bright)', position: 'relative', top: 2 }}>{TOOL_ICON[a.tool] ?? <Eye size={12} />}</span>
                     <span className="a-id" style={{ fontSize: 11 }}>{a.tool.replace('_', ' ')}</span>
-                    <span className="a-body" style={{ fontSize: 11, color: a.ok ? 'var(--text-secondary)' : 'var(--red-bright)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={a.result}>
-                      {describeArgs(a.tool, a.args)}{a.result && a.tool !== 'set_camera' && a.tool !== 'look_at' ? ` · ${a.result}` : ''}
+                    <span className="a-body" style={{ fontSize: 11, color: a.ok ? 'var(--text-secondary)' : 'var(--red-bright)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontStyle: a.tool === 'note' ? 'italic' : 'normal' }} title={`${String(a.args.why ?? '')} ${a.result}`.trim()}>
+                      {a.tool === 'note' ? a.result : <>{describeArgs(a.tool, a.args)}{a.args.why ? <span style={{ color: 'var(--text-tertiary, var(--text-secondary))' }}> · {String(a.args.why)}</span> : a.result && a.tool !== 'set_camera' && a.tool !== 'look_at' ? ` · ${a.result}` : ''}</>}
                     </span>
                   </li>
                 ))}
@@ -103,6 +106,17 @@ export function SpecPanel(): React.ReactElement {
               {insp && <Field k="Assessment" v={<><span className="a-id" style={{ fontSize: 11, color: insp.threat_assessment === 'none' ? 'var(--green-bright)' : 'var(--amber-bright)' }}>{insp.threat_assessment.toUpperCase()}</span> <span style={{ color: 'var(--text-secondary)' }}>{insp.summary}</span></>} />}
             </div>
           )}
+          {spec && <>
+            <Field k="Mission" v={<span className="a-id">{spec.mission_id}</span>} />
+            <Field k="Priority" v={spec.objective} />
+            {env ? (
+              <Field k="Envelope" v={<span className="a-num" style={{ fontSize: 12 }}>{env.radius_m}<span className="a-unit">m</span> <span style={{ color: 'var(--text-secondary)' }}>around the Detection ·</span> {env.ceiling_m}<span className="a-unit">m</span> <span style={{ color: 'var(--text-secondary)' }}>ceiling ·</span> {env.time_budget_s}<span className="a-unit">s</span></span>} />
+            ) : (
+              <Field k="Ceiling" v={<span className="a-num" style={{ fontSize: 12 }}>{spec.max_altitude_m}<span className="a-unit">m</span></span>} />
+            )}
+            {plan && <Field k="Route" v={<span className="a-num" style={{ fontSize: 11, color: 'var(--text-secondary)' }}>{route}</span>} />}
+            <Field k="Rationale" v={<span title={spec.rationale} style={{ color: 'var(--text-secondary)', display: '-webkit-box', WebkitLineClamp: actions.length ? 2 : 6, WebkitBoxOrient: 'vertical', overflow: 'hidden' }}>{spec.rationale}</span>} />
+          </>}
         </div>
       )}
     </Panel>

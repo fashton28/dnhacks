@@ -656,7 +656,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
     @app.get("/autonomy")
     async def autonomy_status() -> dict[str, Any]:
         a = app.state.autonomy
-        return {"llm_mode": a.mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes)}
+        return {"llm_mode": a.mode, "flight_mode": a.flight_mode, "model": getattr(a.llm, "model", None), "facility": a.facility.facility_id, "detections": len(dets()), "outcomes": list(a.outcomes)}
 
     @app.get("/drones/{drone_id}/mjpeg")
     async def drone_mjpeg(drone_id: str, fps: float = 12.0) -> StreamingResponse:

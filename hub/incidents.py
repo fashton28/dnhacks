@@ -53,7 +53,7 @@ def _observations(mission_id: str, drone_id: str, raw: list[dict[str, Any]]) -> 
             Observation(
                 mission_id=mission_id,
                 drone_id=drone_id,
-                frame_ref=o.get("frame_ref", ""),
+                frame_ref=o.get("frame_ref") or "",  # a capture that returned no frame still counts as an Observation
                 waypoint_index=int(o.get("waypoint_index", 0)),
                 captured_at=datetime.now(UTC),
                 description=o.get("caption") or o.get("description") or "",

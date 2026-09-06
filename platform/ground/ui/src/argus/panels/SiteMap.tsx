@@ -58,6 +58,8 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
   const selected = useArgus((s) => s.selected);
   const detections = useArgus((s) => s.detections);
   const agentPlan = useArgus((s) => s.agentPlan);
+  const envelope = useArgus((s) => s.envelope);
+  const flownRoute = useArgus((s) => s.flownRoute);
   const openFences = useArgus((s) => s.sceneOpenFences);
   const props = useArgus((s) => s.sceneProps);
   const mission = useArgus((s) => activeMission(s, s.selected));
@@ -98,6 +100,7 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
       map.addSource('tracks', { type: 'geojson', data: empty() });
       map.addSource('detections', { type: 'geojson', data: empty() });
       map.addSource('route', { type: 'geojson', data: empty() });
+      map.addSource('envelope', { type: 'geojson', data: empty() });
       map.addLayer({ id: 'protected-fill', type: 'fill', source: 'protected', paint: { 'fill-color': '#58a6ff', 'fill-opacity': 0.07 } });
       map.addLayer({ id: 'protected-line', type: 'line', source: 'protected', paint: { 'line-color': '#58a6ff', 'line-width': 1, 'line-opacity': 0.6 } });
       map.addLayer({ id: 'nofly-fill', type: 'fill', source: 'nofly', paint: { 'fill-color': '#ff4d6a', 'fill-opacity': 0.16 } });
@@ -106,6 +109,8 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
       map.addLayer({ id: 'fences-line', type: 'line', source: 'fences', paint: { 'line-color': ['case', ['boolean', ['get', 'open'], false], '#ff2d55', '#f0c04a'], 'line-width': ['case', ['boolean', ['get', 'open'], false], 4, 1.3], 'line-opacity': 0.95 } });
       map.addLayer({ id: 'pads-circle', type: 'circle', source: 'pads', paint: { 'circle-radius': 4.5, 'circle-color': '#0d1117', 'circle-stroke-color': '#dfe6ee', 'circle-stroke-width': 1.4 } });
       map.addLayer({ id: 'gate-circle', type: 'circle', source: 'gate', paint: { 'circle-radius': 3.5, 'circle-color': '#f0c04a', 'circle-stroke-color': '#0d1117', 'circle-stroke-width': 1 } });
+      map.addLayer({ id: 'envelope-fill', type: 'fill', source: 'envelope', paint: { 'fill-color': ['case', ['==', ['get', 'verdict'], 'accept'], '#3fb950', '#ff4d6a'], 'fill-opacity': 0.08 } });
+      map.addLayer({ id: 'envelope-line', type: 'line', source: 'envelope', paint: { 'line-color': ['case', ['==', ['get', 'verdict'], 'accept'], '#3fb950', '#ff4d6a'], 'line-width': 1.6, 'line-dasharray': [3, 2] } });
       map.addLayer({ id: 'route-line', type: 'line', source: 'route', layout: { 'line-cap': 'round', 'line-join': 'round' }, paint: { 'line-color': ['case', ['boolean', ['get', 'active'], false], '#3fb950', '#9fb0c0'], 'line-width': 2, 'line-dasharray': [2, 2] } });
       map.addLayer({ id: 'route-wp', type: 'circle', source: 'route', filter: ['==', ['geometry-type'], 'Point'], paint: { 'circle-radius': 3, 'circle-color': '#0d1117', 'circle-stroke-color': '#3fb950', 'circle-stroke-width': 1.5 } });
       map.addLayer({ id: 'det-fill', type: 'fill', source: 'detections', paint: { 'fill-color': '#f0c04a', 'fill-opacity': 0.25 } });
@@ -201,14 +206,32 @@ export function SiteMap({ hubBase, onSelect, compact = false }: { hubBase: strin
   useEffect(() => {
     if (!ready.current) return;
     const feats: any[] = [];
-    const wps = agentPlan?.plan.waypoints ?? [];
+    // agent-flown Missions draw the points actually flown; plan-based Missions draw the proposed route
+    const wps = flownRoute.length ? flownRoute : (agentPlan?.plan.waypoints ?? []);
     if (wps.length) {
-      const active = !!mission && mission.mission_id === agentPlan?.mission_id;
-      feats.push({ type: 'Feature', properties: { active }, geometry: { type: 'LineString', coordinates: wps.map((w) => [w.lon, w.lat]) } });
+      const active = flownRoute.length > 0 || (!!mission && mission.mission_id === agentPlan?.mission_id);
+      if (wps.length > 1) feats.push({ type: 'Feature', properties: { active }, geometry: { type: 'LineString', coordinates: wps.map((w) => [w.lon, w.lat]) } });
       wps.forEach((w, i) => feats.push({ type: 'Feature', properties: { i }, geometry: { type: 'Point', coordinates: [w.lon, w.lat] } }));
     }
     src('route')?.setData({ type: 'FeatureCollection', features: feats } as any);
-  }, [agentPlan, mission]);
+  }, [agentPlan, mission, flownRoute]);
+  useEffect(() => {
+    if (!ready.current) return;
+    const feats: any[] = [];
+    if (envelope && envelope.polygon.length >= 3) {
+      const ring = envelope.polygon.map((p) => [p.lon, p.lat]);
+      feats.push({ type: 'Feature', properties: { verdict: envelope.verdict }, geometry: { type: 'Polygon', coordinates: [[...ring, ring[0]]] } });
+    }
+    src('envelope')?.setData({ type: 'FeatureCollection', features: feats } as any);
+    // a new envelope is the story of the next minutes: frame it together with the Site centre so the flight stays in view
+    const map = mapRef.current, geo = geoRef.current;
+    if (map && envelope && envelope.polygon.length >= 3 && geo) {
+      const b = new maplibregl.LngLatBounds();
+      envelope.polygon.forEach((p) => b.extend([p.lon, p.lat]));
+      const c = map.getCenter(); b.extend([c.lng, c.lat]);
+      map.fitBounds(b, { padding: compact ? 24 : 40, duration: 700, maxZoom: 17.5 });
+    }
+  }, [envelope]);
 
   return (
     <Panel title="Site map" icon={<MapIcon size={13} />} variant="sunken" pad={false} style={{ minHeight: 0 }} bodyStyle={{ position: 'relative', height: '100%', minHeight: 0 }}

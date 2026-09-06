@@ -72,6 +72,16 @@ class MissionRunner:
         self._publish(m)
         return m
 
+    def attach(self, m: Mission) -> Mission:
+        """Register a Mission flown by someone else (the agent flight loop) so pause, abort and the live feed work for it."""
+        self.missions[m.mission_id] = m
+        self.resume_events[m.mission_id] = asyncio.Event()
+        self.resume_events[m.mission_id].set()
+        m.started_at = m.started_at or datetime.now(UTC)
+        self.audit.append("mission_attached", mission_id=m.mission_id, drone_id=m.drone_id, pattern=m.plan.pattern)
+        self._publish(m)
+        return m
+
     def pause(self, mission_id: str) -> Mission:
         m = self.missions[mission_id]
         if m.phase == MissionPhase.flying:

@@ -23,6 +23,7 @@ AFTER_WINDOW = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
 @pytest.fixture(autouse=True)
 def offline_llm(monkeypatch):
     monkeypatch.setenv("ARGUS_LLM_MODE", "mock")
+    monkeypatch.setenv("ARGUS_FLIGHT_MODE", "plan")  # these exercise the plan-based pipeline; agent-flown Missions have their own tests
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
 
 

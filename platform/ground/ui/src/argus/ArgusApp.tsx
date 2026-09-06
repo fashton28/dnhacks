@@ -127,7 +127,17 @@ export default function ArgusApp(): JSX.Element {
             }, 100);
             break;
           }
-          case 'mission': g.setMission(ev.mission as HubMission); break;
+          case 'mission': {
+            const m = ev.mission as HubMission;
+            const prev = g.missions[m.mission_id];
+            g.setMission(m);
+            // a Mission that just started flying takes the console with it, unless the Operator is watching another airborne Drone
+            if (m.phase === 'flying' && prev?.phase !== 'flying') {
+              const cur = g.selected ? g.fleet[g.selected] : undefined;
+              if (!cur || cur.status === 'idle' || cur.drone_id === m.drone_id) { hub.setVehicle(m.drone_id); g.select(m.drone_id); }
+            }
+            break;
+          }
           case 'detection': g.addDetection((ev.detection ?? ev) as HubDetection); break;
           case 'mission_spec': {
             const spec = ev.spec as { objective: string; rationale: string; max_altitude_m: number; standoff_m: number; attempt?: number };
@@ -152,9 +162,23 @@ export default function ArgusApp(): JSX.Element {
             const result = String(ev.result ?? ev.detail ?? '');
             const ok = ev.ok !== false && !/^(refused|error)/i.test(result);
             g.addAgentAction({ ts: Date.now(), mission_id: (ev.mission_id as string | null) ?? null, tool: String(ev.tool ?? ev.action ?? '?'), args: (ev.args as Record<string, unknown>) ?? {}, result, ok });
+            if (ev.tool === 'fly_to' && ok && g.envelope) {
+              // the agent's fly_to is relative to the Detection; place it on the map from the envelope centre
+              const a = ev.args as { east_m: number; north_m: number; alt_m: number };
+              const lat = g.envelope.center.lat + a.north_m / 111320, lon = g.envelope.center.lon + a.east_m / (111320 * Math.cos((g.envelope.center.lat * Math.PI) / 180));
+              g.addFlown({ lat, lon, alt_m: a.alt_m });
+            }
             if (!ok) log('warning', `Agent ${String(ev.tool ?? ev.action)}: ${result}`);
             break;
           }
+          case 'envelope': {
+            g.setEnvelope({ mission_id: String(ev.mission_id), attempt: Number(ev.attempt ?? 1), verdict: ev.verdict as 'accept' | 'reject', center: ev.center as { lat: number; lon: number }, radius_m: Number(ev.radius_m), ceiling_m: Number(ev.ceiling_m), standoff_m: Number(ev.standoff_m), time_budget_s: Number(ev.time_budget_s), objective: String(ev.objective), rationale: String(ev.rationale ?? ''), polygon: (ev.polygon as { lat: number; lon: number }[]) ?? [] });
+            log(ev.verdict === 'accept' ? 'info' : 'warning', `Envelope ${String(ev.verdict).toUpperCase()}: ${Number(ev.radius_m)} m around the Detection, ceiling ${Number(ev.ceiling_m)} m, ${Number(ev.time_budget_s)} s`);
+            break;
+          }
+          case 'envelope_repaired': log('warning', `Envelope shrunk after the Safety Validator refused it (${(ev.rules as string[] ?? []).join(', ').replace(/_/g, ' ')}): now ${Number(ev.radius_m)} m, ceiling ${Number(ev.ceiling_m)} m`); break;
+          case 'agent_note': g.addAgentAction({ ts: Date.now(), mission_id: (ev.mission_id as string | null) ?? null, tool: 'note', args: {}, result: String(ev.text ?? ''), ok: true }); break;
+          case 'hard_stop': g.setHardStop(String(ev.reason)); log('critical', `Hard stop: ${String(ev.reason)}. The Drone is returning home.`); break;
           case 'inspection': g.setInspection({ mission_id: String(ev.mission_id), waypoint_index: Number(ev.waypoint_index), summary: String(ev.summary ?? ''), threat_assessment: String(ev.threat_assessment ?? 'none'), actions: Number(ev.actions ?? 0) }); break;
           case 'triage': g.setTriage({ decision: String(ev.decision), confidence: Number(ev.confidence), rationale: String(ev.rationale ?? ''), mission_id: String(ev.mission_id) }); break;
           case 'incident': g.setIncident({ title: String(ev.title), severity: String(ev.severity), body_markdown: String(ev.body_markdown), recommended_action: String(ev.recommended_action), mission_id: String(ev.mission_id), ts: Date.now() }); break;

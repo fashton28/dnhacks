@@ -87,6 +87,9 @@ Camera gimbal pitch is a Drone command: `POST /drones/{id}/command {type: look_a
 
 LLM layer endpoints: `GET /site/context` (the Zones and maintenance windows the Triage Agent reads), `POST /detections/{id}/dispatch` (Triage decision first, then plan, verify, fly, inspect, report), and `POST /redteam/{case}` with `bad_plan`, `prompt_injection`, `outside_geofence` or `over_endurance`.
 The live feed carries `pretriage`, `agent_action` and `inspection` events for the dashboard's Triage Agent panel and the Console log.
+Flights are agent-flown by default (`ARGUS_FLIGHT_MODE=agent`): the agent declares an Envelope, the Safety Validator checks it, then the agent flies with tools and every `fly_to` is re-validated live.
+`ARGUS_FLIGHT_MODE=plan` selects the earlier plan-based pipeline. `ARGUS_AGENT_STEPS` (default 14) caps the tool calls per flight.
+The Hub reads `.env` at startup, so `ANTHROPIC_API_KEY=...` in that gitignored file is enough; nothing has to be exported.
 Without `ANTHROPIC_API_KEY` everything runs in mock mode with deterministic rules; export the key before `make hub` to switch the Triage decision, planner, Inspection and vision to Claude.
 
 ## How the simulation is wired

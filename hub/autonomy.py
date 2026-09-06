@@ -30,6 +30,7 @@ from contracts.models import (
     Waypoint,
 )
 from contracts.site import latlon_to_enu
+from hub.agent_flight import AgentFlight
 from hub.incidents import from_agent_outcome
 from hub.inspection import Inspector
 from hub.safety import validate
@@ -41,10 +42,13 @@ FACILITY = ROOT / "sim" / "site" / "facility_meridian.json"
 if str(AGENT_DIR) not in sys.path:
     sys.path.insert(0, str(AGENT_DIR))
 
+from agent.anomaly import for_llm
 from agent.events import EventLog
 from agent.facility import Facility
 from agent.llm import LLM
 from agent.orchestrator import Orchestrator
+
+from agent import triage as triage_mod
 
 
 class LiveEventLog(EventLog):
@@ -77,11 +81,15 @@ class LiveEventLog(EventLog):
             out.append({"type": "triage", "mission_id": mission_id, **{k: payload.get(k) for k in ("decision", "confidence", "rationale")}})
         elif type_ == "incident_report":
             out.append({"type": "incident", "mission_id": mission_id, **{k: payload.get(k) for k in ("title", "severity", "body_markdown", "recommended_action")}})
-        elif type_ in ("agent_action", "inspection", "observation"):
+        elif type_ in ("agent_action", "inspection", "observation", "agent_note", "hard_stop", "envelope_repaired"):
             out.append({"type": type_, "mission_id": mission_id, **payload})
         for o in out:
             self._loop.call_soon_threadsafe(self._publish, o)
         return ev
+
+    def publish_raw(self, event: dict[str, Any]) -> None:
+        """Publish a Console-shaped event as is, from any thread."""
+        self._loop.call_soon_threadsafe(self._publish, event)
 
 
 class HubExecutor:
@@ -247,6 +255,10 @@ class Autonomy:
         live_vision = bool(os.environ.get("ANTHROPIC_API_KEY")) and os.environ.get("ARGUS_VISION", "claude") == "claude" and not getattr(self.llm, "mock", True)
         describe = describe_with_claude if live_vision else describe_from_scene
         self.knowledge = SiteKnowledge.load()
+        # "agent": the Triage Agent flies the Mission with tools inside a validated envelope (default);
+        # "plan": the agent proposes a FlightPlan that the Mission runner flies (the earlier pipeline, kept as fallback)
+        self.flight_mode = os.environ.get("ARGUS_FLIGHT_MODE", "agent")
+        self.live_vision = live_vision
         self.executor = HubExecutor(hub_app, loop, self.events, describe, live=live_vision)
         self.orchestrator = Orchestrator(self.facility, self.llm, self.executor, self.events, report_dir=runs_dir / "reports")
         self._seed_mission_counter(runs_dir)
@@ -309,12 +321,55 @@ class Autonomy:
                 return TriageDecision(detection_id=d.id, action=TriageAction(b.input["action"]), rationale=b.input["rationale"])
         raise RuntimeError("no triage decision returned")
 
+    def _agent_dispatch(self, d: Detection, anomaly: dict[str, Any], site_prose: str, red_team: str | None) -> dict[str, Any]:
+        """Agent-flown Mission: envelope, validator, flight under agent control, triage, report. Runs in a worker thread."""
+        with self._lock:
+            mission_id = self.orchestrator._next_mission_id()
+            self.events.emit("anomaly_detected", mission_id, **for_llm(anomaly))
+            lat = sum(p.lat for p in d.polygon) / len(d.polygon)
+            lon = sum(p.lon for p in d.polygon) / len(d.polygon)
+            live = not getattr(self.llm, "mock", True)
+            flight = AgentFlight(self.app, self.loop, self.executor.describe, self.events.emit, self.events.publish_raw, live)
+            res = flight.fly(mission_id, d.id, anomaly, (lat, lon), site_prose, red_team)
+            env = res.envelope.as_dict() if res.envelope else None
+            verdict = {"approved": res.flown or (res.envelope_validation or {}).get("verdict") == "accept", "attempts": res.envelope_attempts,
+                       "violations": [{"code": v["rule"], "message": v["detail"]} for v in (res.envelope_validation or {}).get("violations", [])]}
+            plan = {"mission_id": mission_id, "priority": res.envelope.objective if res.envelope else "inspect", "reasoning": res.envelope.rationale if res.envelope else "",
+                    "waypoints": res.waypoints, "envelope": env, "flight_time_s": res.envelope.time_budget_s if res.envelope else 0, "battery_needed_pct": 0}
+            if not res.flown:
+                self.events.emit("plan_abandoned", mission_id, attempts=res.envelope_attempts, last_violations=verdict["violations"], reason=res.error)
+                triage = triage_mod.unflyable_report(anomaly, res.envelope_attempts, verdict["violations"], res.error or "")
+                self.orchestrator._publish(mission_id, triage)
+                self.executor.last_drone_id = res.drone_id
+                return {"anomaly_id": anomaly["anomaly_id"], "mission_id": mission_id, "flown": False, "attempts": res.envelope_attempts, "plan": plan, "verdict": verdict,
+                        "result": None, "triage": triage, "drone_id": res.drone_id, "envelope": env}
+            self.events.emit("mission_started", mission_id, waypoint_count=len(res.waypoints), agent_flown=True)
+            st = self.app.state.registry.drones[res.drone_id].state if res.drone_id else None
+            result = {"mission_id": mission_id, "status": res.status, "observations": res.observations,
+                      "inspections": [{"waypoint_index": 0, "summary": res.summary, "threat_assessment": res.threat_assessment, "actions": res.actions, "assessed_by": res.assessed_by}],
+                      "agent_summary": res.summary, "threat_assessment": res.threat_assessment, "hard_stop": res.hard_stop,
+                      "telemetry": {"drone_id": res.drone_id, "battery_end_pct": st.battery_pct if st else None, "steps": len(res.actions), "error": res.error, "hard_stop": res.hard_stop}}
+            self.events.emit("mission_completed", mission_id, status=res.status, observation_count=len(res.observations), telemetry=result["telemetry"])
+            self.events.emit("inspection", mission_id, waypoint_index=0, summary=res.summary, threat_assessment=res.threat_assessment, actions=len(res.actions))
+            triage = triage_mod.assess(self.llm, anomaly, plan, result)
+            self.events.emit("triage_decision", mission_id, decision=triage["decision"], confidence=triage["confidence"], rationale=triage["rationale"],
+                             event_type=triage.get("event_type"), assessed_by=triage.get("assessed_by"))
+            self.orchestrator._publish(mission_id, triage)
+            self.executor.last_drone_id = res.drone_id
+            return {"anomaly_id": anomaly["anomaly_id"], "mission_id": mission_id, "flown": True, "attempts": res.envelope_attempts, "plan": plan, "verdict": verdict,
+                    "result": result, "triage": triage, "drone_id": res.drone_id, "envelope": env}
+
     def _store_incident(self, detection_id: str, outcome: dict[str, Any]) -> None:
         # The agent's report is a markdown blob on the event stream and a file on disk.
         # Store it as a contract IncidentReport too, so it survives a page reload and
         # carries the evidence frames its verdict rests on. Declined dispatches are keyed
         # by the Detection since they never had a Mission.
-        report = from_agent_outcome(outcome)
+        try:
+            report = from_agent_outcome(outcome)
+        except Exception as e:  # noqa: BLE001
+            # the report store must never turn a flown Mission into a failed dispatch
+            self.app.state.audit.append("incident_store_failed", detection_id=detection_id, error=repr(e)[:200])
+            return
         self.app.state.incidents.add(report)
         self.app.state.audit.append("incident_report", mission_id=report.mission_id, detection_id=detection_id,
                                     verdict=report.verdict.value, evidence=len(report.evidence_refs))
@@ -344,6 +399,13 @@ class Autonomy:
         anomaly = detection_to_anomaly(d, site_prose)
         self.executor.current_anomaly = anomaly
         self.executor.current_site_prose = site_prose
+        if self.flight_mode == "agent":
+            outcome = await asyncio.to_thread(self._agent_dispatch, d, anomaly, site_prose, red_team)
+            outcome["pretriage"] = decision.model_dump(mode="json")
+            self.outcomes[detection_id] = outcome
+            self._store_incident(detection_id, outcome)
+            self.app.state.registry.publish({"type": "dispatch_outcome", "detection_id": detection_id, **{k: outcome[k] for k in ("mission_id", "flown", "attempts", "triage", "drone_id")}})
+            return outcome
 
         def run():
             with self._lock:

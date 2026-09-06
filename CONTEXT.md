@@ -33,6 +33,21 @@ The Triage Agent's first output for a Detection, made before any plan is request
 A log-only or ignore decision ends the Detection in an Incident Report without a flight.
 _Avoid_: pre-triage (implementation name for the same step), screening
 
+**Envelope**:
+What the Triage Agent declares before takeoff and flies inside for the whole Mission: a radius around the Detection, an altitude ceiling, a time budget, an objective.
+The Hub expresses it as a MissionSpec and the Safety Validator checks its polygon against the Site limits before any motor spins.
+A refused Envelope is shrunk deterministically and re-checked; the agent sees the rule that refused it.
+_Avoid_: bounding box, area of operations
+
+**Agent-flown Mission**:
+A Mission in which the Triage Agent is in control of the Drone for the whole flight through tools (fly to, hold, look at, set camera, capture, return home, done) inside its Envelope.
+Every fly-to passes the Safety Validator in real time; hard stops (step budget, time budget, battery reserve, Operator abort) end the flight and return the Drone home and are code, not prompt.
+The earlier plan-based Mission, where the agent proposes a FlightPlan that the Hub flies, remains as the fallback mode.
+
+**Hard stop**:
+A condition that ends an Agent-flown Mission regardless of what the agent wants: step budget, time budget, battery reserve, or Operator abort.
+The Drone returns home and the reason is published and audited.
+
 **Inspection**:
 What the Triage Agent does while a Drone holds at an on-station waypoint: a bounded sequence of Agent Actions (aim the camera, switch vision mode, zoom, capture, small repositions) ending in a summary and a threat assessment.
 The approved FlightPlan is not changed by an Inspection; every reposition is checked by the Safety Validator and bounded to a small radius around the approved waypoint.
