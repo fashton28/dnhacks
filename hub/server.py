@@ -274,7 +274,7 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         await ws.accept()
         q = reg().subscribe()
         try:
-            await ws.send_json({"type": "snapshot", "site": SITE_NAME, "drones": [s.model_dump(mode="json") for s in reg().states()],
+            await ws.send_json({"type": "snapshot", "site": SITE_NAME, "trust_events": getattr(reg(), "trust_events", []), "drones": [s.model_dump(mode="json") for s in reg().states()],
                                 "missions": [m.model_dump(mode="json") for m in runner().missions.values()],
                                 "scene": reg().scene.model_dump(mode="json"), "camera": app.state.camera_settings})
             while True:
@@ -599,7 +599,8 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
         way of deciding what changed. Requires GEMINI_API_KEY.
         """
         from widearea.detect import footprint_from_meta
-        from widearea.vision import VisionError, detect as vision_detect
+        from widearea.vision import VisionError
+        from widearea.vision import detect as vision_detect
 
         ev = settings.evidence_dir
         if ev is None:

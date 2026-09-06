@@ -51,7 +51,20 @@ class Registry:
     def unsubscribe(self, q: asyncio.Queue[dict[str, Any]]) -> None:
         self.live.discard(q)
 
+    # Events a freshly opened Console needs to rebuild the trust column for a dispatch already under way.
+    # A new pretriage starts a new story; everything after it is kept (capped) and replayed in the snapshot.
+    TRUST_TYPES = ("pretriage", "mission_spec", "validation", "envelope", "envelope_repaired", "agent_action", "agent_note",
+                   "hard_stop", "inspection", "triage", "incident", "dispatch_outcome")
+
     def publish(self, event: dict[str, Any]) -> None:
+        t = event.get("type")
+        if t in self.TRUST_TYPES:
+            if t == "pretriage":
+                self.trust_events = []
+            if not hasattr(self, "trust_events"):
+                self.trust_events = []
+            self.trust_events.append(event)
+            del self.trust_events[:-300]
         for q in list(self.live):
             if q.full():
                 try:
