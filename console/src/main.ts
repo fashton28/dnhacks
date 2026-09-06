@@ -149,13 +149,27 @@ function renderDroneView(s: DroneState): void {
   if (g) g.visible = true;
 }
 
+/** Thermal frames carry the radiometric map: a grayscale PNG of the per-pixel temperature before the palette
+ *  (byte 0 = -10 C, 255 = 700 C, linear; see ThermalPass.readTemperature). The Hub thresholds it into Sightings. */
+const tempCanvas = document.createElement("canvas");
+function temperaturePngB64(): string | null {
+  const t = vision.readTemperature();
+  if (!t) return null;
+  tempCanvas.width = t.width; tempCanvas.height = t.height;
+  const ctx = tempCanvas.getContext("2d")!;
+  const img = ctx.createImageData(t.width, t.height);
+  for (let i = 0, n = t.width * t.height; i < n; i++) { const v = t.data[i]; img.data[i * 4] = v; img.data[i * 4 + 1] = v; img.data[i * 4 + 2] = v; img.data[i * 4 + 3] = 255; }
+  ctx.putImageData(img, 0, 0);
+  return tempCanvas.toDataURL("image/png").split(",")[1];
+}
 function frameMessage(s: DroneState, cmdId: string | null) {
   renderDroneView(s);
   const jpeg = droneCanvas.toDataURL("image/jpeg", 0.72).split(",")[1];
+  const temp = temperaturePngB64();
   // the Drone view canvas is also the live camera on screen: put the selected Drone back if we just drew another one
   if (selected && selected !== s.drone_id && drones.has(selected)) renderDroneView(drones.get(selected)!);
   return { type: "frame", drone_id: s.drone_id, jpeg_b64: jpeg, width: droneCanvas.width, height: droneCanvas.height, lat: s.lat, lon: s.lon, alt: s.alt,
-           heading_deg: s.heading_deg, gimbal_pitch_deg: s.gimbal_pitch_deg, ts: new Date().toISOString(), cmd_id: cmdId };
+           heading_deg: s.heading_deg, gimbal_pitch_deg: s.gimbal_pitch_deg, ts: new Date().toISOString(), cmd_id: cmdId, temp_png_b64: temp };
 }
 /** Streaming variant: encodes off the main thread with toBlob and sends when ready; never stalls the render loop. */
 let streamBusy = false;

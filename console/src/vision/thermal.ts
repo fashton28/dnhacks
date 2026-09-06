@@ -59,6 +59,17 @@ const POST_FRAG = `
     gl_FragColor = vec4(c, 1.0);
   }`;
 
+const KNEE_T = 0.93, KNEE_C = 80.0, MIN_C = -10.0, MAX_C = 700.0;
+/** Scene temperature t (0..1) to degrees C through the knee described on ThermalPass.readTemperature. */
+export function temperatureC(t: number): number {
+  t = Math.max(0, Math.min(1, t));
+  return t <= KNEE_T ? MIN_C + (KNEE_C - MIN_C) * (t / KNEE_T) : KNEE_C + (MAX_C - KNEE_C) * ((t - KNEE_T) / (1 - KNEE_T));
+}
+/** Degrees C to the calibrated byte: 0 = -10 C, 255 = 700 C, linear. */
+export function temperatureByte(t: number): number {
+  return Math.round(Math.max(0, Math.min(255, (temperatureC(t) - MIN_C) / (MAX_C - MIN_C) * 255)));
+}
+
 export class ThermalPass {
   palette: Palette = "ironbow";
   private target: THREE.WebGLRenderTarget;
@@ -124,6 +135,26 @@ export class ThermalPass {
   private swapOut(): void {
     for (const s of this.saved) { (s.o as THREE.Mesh).material = s.m; s.o.visible = s.visible; }
     this.saved.length = 0;
+  }
+
+  /** The per-pixel temperature of the last thermal render, before the palette, optics and noise, as an 8-bit grayscale map.
+   *
+   * Calibration of the returned bytes (and of the PNG the Renderer attaches to thermal Frames): byte 0 = -10 C, byte 255 = 700 C,
+   * linear, so C = -10 + byte * 710 / 255. The scene's relative temperatures (classify.ts, 0 cold .. 1 saturated) are apparent
+   * values tuned for the picture, so they map to degrees through a knee: 0 .. 0.93 spans -10 .. 80 C (ambient, buildings, warm
+   * machinery, running transformers) and 0.93 .. 1.0 spans 80 .. 700 C (people, flames, hot plume gas). 80 C is the hot-spot
+   * threshold the Hub uses. Rows are top-down (image order), one byte per pixel.
+   */
+  readTemperature(): { width: number; height: number; data: Uint8Array } {
+    const w = this.target.width, h = this.target.height;
+    const rgba = new Uint8Array(w * h * 4);
+    this.renderer.readRenderTargetPixels(this.target, 0, 0, w, h, rgba);
+    const data = new Uint8Array(w * h);
+    for (let y = 0; y < h; y++) {
+      const src = (h - 1 - y) * w;  // WebGL reads bottom-up; flip to image order
+      for (let x = 0; x < w; x++) data[y * w + x] = temperatureByte(rgba[(src + x) * 4] / 255);
+    }
+    return { width: w, height: h, data };
   }
 
   render(scene: THREE.Scene, camera: THREE.Camera, out: THREE.WebGLRenderTarget | null, time: number): void {

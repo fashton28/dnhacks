@@ -47,6 +47,11 @@ export class VisionModes {
     this.renderer.setRenderTarget(null);
   }
 
+  /** Thermal mode only: the calibrated per-pixel temperature map of the last render (see ThermalPass.readTemperature). */
+  readTemperature(): { width: number; height: number; data: Uint8Array } | null {
+    return this._mode === "thermal" && this.thermal ? this.thermal.readTemperature() : null;
+  }
+
   /** Whether the RGB post shader (grain, vignette) should run after this mode. */
   get usesRgbPost(): boolean { return this._mode === "rgb"; }
 }
