@@ -394,7 +394,8 @@ class Autonomy:
             outcome = {"anomaly_id": d.id, "mission_id": None, "flown": False, "attempts": 0, "plan": None, "verdict": None, "result": None, "triage": triage, "drone_id": None, "pretriage": decision.model_dump(mode="json")}
             self.outcomes[detection_id] = outcome
             self._store_incident(detection_id, {**outcome, "mission_id": f"triage-{d.id}"})
-            self.app.state.registry.publish({"type": "dispatch_outcome", "detection_id": detection_id, **{k: outcome[k] for k in ("mission_id", "flown", "attempts", "triage", "drone_id")}})
+            # the triage and incident events above are queued onto the loop; queue the outcome the same way so it lands after them
+            self.events.publish_raw({"type": "dispatch_outcome", "detection_id": detection_id, **{k: outcome[k] for k in ("mission_id", "flown", "attempts", "triage", "drone_id")}})
             return outcome
         anomaly = detection_to_anomaly(d, site_prose)
         self.executor.current_anomaly = anomaly
