@@ -527,6 +527,10 @@ def create_app(settings: HubSettings | None = None) -> FastAPI:
             scene.props.append(SceneProp(id=f"{sc.id}-crate", kind="crate", x=float(p.get("x", 30)), y=float(p.get("y", -20)), yaw_deg=float(p.get("heading_deg", 0))))
         elif sc.kind == "unattended_object_benign":  # the same crate, in the service yard by the maintenance shed
             scene.props.append(SceneProp(id=f"{sc.id}-crate", kind="crate", x=float(p.get("x", -48)), y=float(p.get("y", -62)), yaw_deg=float(p.get("heading_deg", 20))))
+        elif sc.kind == "transformer_fire":  # transformer bay 2 in the switchyard on fire: flames, dark smoke, scorched ground
+            scene.props.append(SceneProp(id=f"{sc.id}-fire", kind="fire", x=float(p.get("x", 75)), y=float(p.get("y", 82)), yaw_deg=0.0))
+        elif sc.kind == "steam_release":  # relief vent on the auxiliary building roof lifts: a white column that looks like smoke from above
+            scene.props.append(SceneProp(id=f"{sc.id}-steam", kind="steam", x=float(p.get("x", 60)), y=float(p.get("y", -40)), yaw_deg=0.0, z=float(p.get("z", 6.9))))
         elif sc.kind == "authorized_activity":  # marked maintenance vehicle in the service yard during a declared window
             scene.props.append(SceneProp(id=f"{sc.id}-vehicle", kind="vehicle", x=float(p.get("x", -52)), y=float(p.get("y", -75)), yaw_deg=float(p.get("heading_deg", 0))))
         scene.scenario_ids.append(sc.id)

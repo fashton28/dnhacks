@@ -184,18 +184,30 @@ def describe_from_scene(frame: Path | None, wp: dict[str, Any], scene, index: in
     """Offline observation: what the Scenario engine placed near this waypoint (stands in for the vision model)."""
     x, y = latlon_to_enu(wp["lat"], wp["lon"])
     seen, dets = [], []
+    thermal = wp.get("camera_mode") == "thermal"
+    thermal_max: float | None = 38.0 if thermal else None  # warm switchgear and sunlit roofs read high 30s
     for p in scene.props:
         d = ((p.x - x) ** 2 + (p.y - y) ** 2) ** 0.5
         if d < 60:
-            label = {"vehicle": "vehicle", "crate": "unattended_object", "person": "person"}.get(p.kind, p.kind)
+            label = {"vehicle": "vehicle", "crate": "unattended_object", "person": "person", "fire": "fire", "steam": "steam_plume"}.get(p.kind, p.kind)
             conf = round(max(0.3, min(0.95, 1.0 - d / 80)), 2)
             dets.append({"label": label, "confidence": conf})
-            seen.append(f"a {p.kind} about {d:.0f} m from the camera")
+            if p.kind == "fire":
+                dets.append({"label": "smoke", "confidence": conf})
+                seen.append(f"flames and a dark smoke column at a transformer bay about {d:.0f} m from the camera" + (", saturating the thermal sensor" if thermal else ""))
+                if thermal:
+                    thermal_max = 640.0
+            elif p.kind == "steam":
+                seen.append(f"a white plume rising from a roof vent about {d:.0f} m from the camera" + (", reading cool in thermal: water vapour" if thermal else ""))
+                if thermal:
+                    thermal_max = max(thermal_max or 0.0, 46.0)
+            else:
+                seen.append(f"a {p.kind} about {d:.0f} m from the camera")
     if scene.open_fences:
         dets.append({"label": "fence_damage", "confidence": 0.7})
         seen.append(f"an opening in fence section {scene.open_fences[0]}")
     caption = ("Frame shows " + "; ".join(seen) + ".") if seen else "Frame shows lawn, fences and buildings with nothing unusual."
-    return {"detections": dets, "caption": caption, "thermal_max_c": None, "rf_anomaly_db": None,
+    return {"detections": dets, "caption": caption, "thermal_max_c": thermal_max, "rf_anomaly_db": None,
             "assessed_by": "scene-truth stub (no vision model credentials)", "frame_available": frame is not None}
 
 

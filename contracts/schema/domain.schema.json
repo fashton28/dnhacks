@@ -11,6 +11,8 @@
           "object",
           "structure",
           "ground_disturbance",
+          "smoke_plume",
+          "thermal_anomaly",
           "unknown"
         ],
         "title": "ChangeType",
@@ -1050,7 +1052,9 @@
           "unattended_object_benign",
           "authorized_activity",
           "perimeter_opening",
-          "fence_breach"
+          "fence_breach",
+          "transformer_fire",
+          "steam_release"
         ],
         "title": "ScenarioKind",
         "type": "string"

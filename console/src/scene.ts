@@ -398,6 +398,13 @@ export class SiteScene {
   update(elapsedSeconds: number, cameraPosition?: THREE.Vector3): void {
     this.animateDrones(elapsedSeconds, cameraPosition);
     for (const a of this.animated) a.update(elapsedSeconds);
+    for (const g of this.props.children) {
+      if (!g.userData.fire) continue;
+      for (const f of g.children) {
+        if (f.name === "flame") { const t = elapsedSeconds * 9 + f.userData.seed; f.scale.y = 0.75 + 0.35 * Math.sin(t) * Math.sin(t * 0.37 + 1); f.scale.x = f.scale.z = 0.9 + 0.15 * Math.sin(t * 1.7); f.position.y = (f.userData.h * f.scale.y) / 2 + 0.2; }
+        else if (f.name === "fireglow") (f as THREE.PointLight).intensity = 34 + 12 * Math.sin(elapsedSeconds * 11) * Math.sin(elapsedSeconds * 4.3);
+      }
+    }
   }
 
   /** Render the World view through a bloom pipeline (skipped on low quality). */
@@ -605,6 +612,32 @@ export class SiteScene {
         const w = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.42, 0.3, 20), mat.tyre); w.rotation.z = Math.PI / 2; w.position.set(dx, 0.42, dz); g.add(w);
       }
       o = g;
+    } else if (p.kind === "fire") {
+      // A transformer bay on fire: scorched ground, a licking flame core (emissive, animated in animateProps), dark smoke column.
+      const g = new THREE.Group(); g.name = "fire";
+      const scorch = new THREE.Mesh(new THREE.CircleGeometry(4.2, 28), new THREE.MeshStandardMaterial({ color: 0x0b0a09, roughness: 1 }));
+      scorch.rotation.x = -Math.PI / 2; scorch.position.y = 0.03; scorch.receiveShadow = true; g.add(scorch);
+      const flameMat = new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.9, toneMapped: false, depthWrite: false });
+      const coreMat = new THREE.MeshBasicMaterial({ color: 0xffe08a, transparent: true, opacity: 0.95, toneMapped: false, depthWrite: false });
+      for (let i = 0; i < 7; i++) {
+        const h = 1.6 + Math.random() * 1.8;
+        const f = new THREE.Mesh(new THREE.ConeGeometry(0.45 + Math.random() * 0.35, h, 7), i % 3 === 0 ? coreMat : flameMat);
+        f.position.set((Math.random() - 0.5) * 3.2, h / 2 + 0.2, (Math.random() - 0.5) * 2.2); f.name = "flame"; f.userData.h = h; f.userData.seed = Math.random() * 6.28;
+        g.add(f);
+      }
+      const glow = new THREE.PointLight(0xff8c2a, 40, 30, 1.6); glow.position.set(0, 2.2, 0); glow.name = "fireglow"; g.add(glow);
+      const smoke = new Plume(0, 0, 3.0, 2.2, this.quality === "high" ? 220 : 90, { color: 0x2a2a2c, heat: 1.0, vigour: 1.35, opacity: 0.62 });
+      smoke.points.name = "smoke"; g.add(smoke.points); this.animated.push(smoke);
+      g.userData.fire = true;
+      o = g;
+    } else if (p.kind === "steam") {
+      // A relief vent lifting: a stub of pipe and a cool white steam column, from above indistinguishable from smoke.
+      const g = new THREE.Group(); g.name = "steam";
+      const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.35, 0.35, 1.6, 14), new THREE.MeshStandardMaterial({ color: 0x9aa4ad, metalness: 0.6, roughness: 0.5 }));
+      pipe.position.y = 0.8; g.add(pipe);
+      const steam = new Plume(0, 0, 1.6, 1.4, this.quality === "high" ? 160 : 60, { color: 0xf4f8fb, heat: 0.35, vigour: 0.8, opacity: 0.6 });
+      steam.points.name = "steam"; g.add(steam.points); this.animated.push(steam);
+      o = g;
     } else if (p.kind === "person") {
       const g = new THREE.Group();
       const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.22, 0.9, 4, 8), mat.person); body.position.y = 0.9; g.add(body);
@@ -618,8 +651,8 @@ export class SiteScene {
       crate.position.y = -box.min.y * crate.scale.y;
       o = crate;
     }
-    o.traverse((m) => { (m as THREE.Mesh).castShadow = true; });
-    o.position.add(enuToThree(p.x, p.y, 0));
+    o.traverse((m) => { if ((m as THREE.Mesh).isMesh && !(m as THREE.Mesh).material?.hasOwnProperty("transparent")) (m as THREE.Mesh).castShadow = true; });
+    o.position.add(enuToThree(p.x, p.y, p.z ?? 0));
     o.rotation.y = headingToYaw(p.yaw_deg);
     o.name = p.id;
     return o;

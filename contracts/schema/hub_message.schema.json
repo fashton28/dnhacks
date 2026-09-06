@@ -283,7 +283,7 @@
           "type": "string"
         },
         "kind": {
-          "description": "vehicle | crate | person",
+          "description": "vehicle | crate | person | fire | steam",
           "title": "Kind",
           "type": "string"
         },
@@ -298,6 +298,12 @@
         "yaw_deg": {
           "default": 0.0,
           "title": "Yaw Deg",
+          "type": "number"
+        },
+        "z": {
+          "default": 0.0,
+          "description": "base height above ground, metres (a vent on a roof)",
+          "title": "Z",
           "type": "number"
         }
       },

@@ -198,7 +198,7 @@
      "lon": -98.3995583
     }
    ],
-   "normally_present": "High-voltage equipment, nobody on foot except escorted technicians during a declared window."
+   "normally_present": "High-voltage equipment running warm (transformers about 60 C in thermal), nobody on foot except escorted technicians during a declared window. Never smoke, never flame."
   },
   {
    "zone_id": "buffer",
@@ -257,5 +257,5 @@
    "ends_at": "2026-09-06T18:00:00-05:00"
   }
  ],
- "notes": "Fictional Site for the ARGUS simulation. Security posture: any unannounced vehicle at the outer fence, any object left inside the protected area, or any fence opening is reportable. Declared maintenance activity in the service yard is not."
+ "notes": "Fictional Site for the ARGUS simulation. Security posture: any unannounced vehicle at the outer fence, any object left inside the protected area, or any fence opening is reportable. Declared maintenance activity in the service yard is not. Operational posture: smoke or heat at any transformer or in the switchyard is a fire until a Drone proves otherwise; dispatch immediately, hold at least 40 m from the source and upwind, confirm with the thermal camera, and escalate. Brief white plumes from the auxiliary building roof relief vents can occur without notice; they are cool water vapour, so confirm with the thermal camera and log them as an unplanned relief lift for maintenance rather than escalating."
 }

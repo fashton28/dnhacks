@@ -33,8 +33,10 @@ export function thermalOf(o: THREE.Object3D): Thermal {
 
 function classify(o: THREE.Object3D): Thermal {
   if ((o as THREE.Sprite).isSprite) return { t: 0, hidden: true };
-  if ((o as THREE.Points).isPoints) return { t: 1.0 };                       // steam plumes
+  if ((o as THREE.Points).isPoints) return { t: (o.userData.heat as number | undefined) ?? 1.0 };  // plumes: fire smoke 1.0, vent steam 0.35, tower steam 1.0
+  if (o.name === "flame") return { t: 1.0 };                                  // fire core saturates the sensor
   const names = ancestorNames(o);
+  if (names.includes("fire") && (o as THREE.Mesh).geometry?.type === "CircleGeometry") return { t: 0.86 };  // scorched, still-hot ground
   const mesh = o as THREE.Mesh;
   const geo = mesh.geometry as THREE.BufferGeometry | undefined;
   const gtype = geo?.type ?? "";

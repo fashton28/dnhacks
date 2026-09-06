@@ -199,6 +199,13 @@ function puffTexture(): THREE.CanvasTexture {
   return new THREE.CanvasTexture(c);
 }
 
+export interface PlumeOptions {
+  /** puff colour: white for steam, dark grey for smoke */ color?: THREE.ColorRepresentation;
+  /** apparent temperature in the thermal camera, 0 cold .. 1 saturated; steam 0.35, fire smoke 1.0 */ heat?: number;
+  /** rise and drift multiplier: a fire column climbs faster than a vent */ vigour?: number;
+  /** puff opacity */ opacity?: number;
+}
+
 export class Plume {
   points: THREE.Points;
   private ages: Float32Array;
@@ -206,24 +213,27 @@ export class Plume {
   private n: number;
   private origin: THREE.Vector3;
   private radius: number;
-  constructor(x: number, y: number, top: number, radius: number, count = 140) {
-    this.n = count; this.origin = new THREE.Vector3(x, top, -y); this.radius = radius;
+  private vigour: number;
+  constructor(x: number, y: number, top: number, radius: number, count = 140, opts: PlumeOptions = {}) {
+    this.n = count; this.origin = new THREE.Vector3(x, top, -y); this.radius = radius; this.vigour = opts.vigour ?? 1.0;
+    const col = new THREE.Color(opts.color ?? 0xf7fafd), opacity = opts.opacity ?? 0.55;
     const pos = new Float32Array(count * 3); this.ages = new Float32Array(count); this.seeds = new Float32Array(count);
     for (let i = 0; i < count; i++) { this.ages[i] = Math.random(); this.seeds[i] = Math.random(); }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
     geo.setAttribute("aAge", new THREE.BufferAttribute(this.ages, 1));
     const mat = new THREE.ShaderMaterial({
-      uniforms: { map: { value: puffTexture() }, size: { value: 900.0 } },
+      uniforms: { map: { value: puffTexture() }, size: { value: 900.0 }, color: { value: col }, opacity: { value: opacity } },
       transparent: true, depthWrite: false,
       vertexShader: `attribute float aAge; varying float vAge; uniform float size;
         void main(){ vAge = aAge; vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
           gl_PointSize = size * (0.35 + vAge * 1.4) / -mv.z; }`,
-      fragmentShader: `uniform sampler2D map; varying float vAge;
-        void main(){ vec4 t = texture2D(map, gl_PointCoord); float a = t.a * (1.0 - smoothstep(0.55, 1.0, vAge)) * smoothstep(0.0, 0.08, vAge) * 0.55;
-          gl_FragColor = vec4(vec3(0.97, 0.98, 1.0), a); }`,
+      fragmentShader: `uniform sampler2D map; uniform vec3 color; uniform float opacity; varying float vAge;
+        void main(){ vec4 t = texture2D(map, gl_PointCoord); float a = t.a * (1.0 - smoothstep(0.55, 1.0, vAge)) * smoothstep(0.0, 0.08, vAge) * opacity;
+          gl_FragColor = vec4(color, a); }`,
     });
     this.points = new THREE.Points(geo, mat);
+    this.points.userData.heat = opts.heat ?? 1.0;  // read by the thermal camera
     this.points.frustumCulled = false;
     this.update(0);
   }
@@ -232,8 +242,8 @@ export class Plume {
     for (let i = 0; i < this.n; i++) {
       const age = ((t * 0.09 + this.ages[i]) % 1);  // 0..1 over ~11 s
       const s = this.seeds[i];
-      const rise = age * 95;
-      const drift = age * age * 70;                 // wind to the east
+      const rise = age * 95 * this.vigour;
+      const drift = age * age * 70 * this.vigour;   // wind to the east
       const spread = this.radius * (0.35 + age * 1.6);
       const ang = s * Math.PI * 2 + age * 0.8;
       pos.setXYZ(i, this.origin.x + Math.cos(ang) * spread * (0.4 + s * 0.6) + drift, this.origin.y + rise + Math.sin(s * 40 + t) * 1.5, this.origin.z + Math.sin(ang) * spread * (0.4 + s * 0.6));

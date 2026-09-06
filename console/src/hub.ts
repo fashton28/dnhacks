@@ -7,7 +7,10 @@ export type DroneState = {
   roll_deg?: number;
   pitch_deg?: number; armed: boolean; mode: string; message: string; ts: string;
 };
-export type SceneProp = { id: string; kind: string; x: number; y: number; yaw_deg: number };
+export type SceneProp = { id: string; kind: string; x: number; y: number; yaw_deg: number
+  /** base height above ground in metres (a vent on a roof); absent on older Hubs */
+  z?: number;
+};
 export type SceneState = { props: SceneProp[]; open_fences: string[]; scenario_ids: string[] };
 
 const params = new URLSearchParams(location.search);

@@ -46,6 +46,8 @@ class ChangeType(StrEnum):
     object = "object"
     structure = "structure"
     ground_disturbance = "ground_disturbance"
+    smoke_plume = "smoke_plume"          # a rising column seen from above: fire smoke or steam, the Drone tells which
+    thermal_anomaly = "thermal_anomaly"  # a hot spot without a visible change
     unknown = "unknown"
 
 
@@ -251,10 +253,11 @@ class SceneProp(Strict):
     """One object a Scenario placed on the Site, drawn by every Renderer."""
 
     id: str
-    kind: str = Field(description="vehicle | crate | person")
+    kind: str = Field(description="vehicle | crate | person | fire | steam")
     x: float
     y: float
     yaw_deg: float = 0.0
+    z: float = Field(default=0.0, description="base height above ground, metres (a vent on a roof)")
 
 
 class SceneState(Strict):
@@ -292,6 +295,9 @@ class ScenarioKind(StrEnum):
     authorized_activity = "authorized_activity"
     perimeter_opening = "perimeter_opening"
     fence_breach = "fence_breach"
+    # operational anomalies (CONTEXT.md, Scenarios 6 and 7)
+    transformer_fire = "transformer_fire"
+    steam_release = "steam_release"
 
 
 class Scenario(Strict):

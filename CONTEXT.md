@@ -162,6 +162,14 @@ In the set because it is the only Scenario where the correct action is to do not
 A named fence section is translated open. A thin change, and from directly above a fence is only a few pixels wide, so the opening must be paired with visible ground disturbance or it falls under the minimum area. Triage dispatches; the Incident Report escalates.
 In the set because it is the hardest change to make legible from overhead. Build it last.
 
+**6. `transformer_fire`**
+A transformer bay in the switchyard catches fire: flames, a dark smoke column, scorched ground. From above the overhead pass sees a large new column and shadow. Triage dispatches at once; the Drone holds a standoff, confirms with the thermal camera (the bay saturates the sensor) and the Incident Report escalates to fire response and de-energizing the bay.
+In the set because it is the operational anomaly a nuclear site actually plans for, and because the thermal camera is what turns a grey column into a decision.
+
+**7. `steam_release`**
+A relief vent on the auxiliary building roof lifts without notice: a white column that from above is indistinguishable from Scenario 6. Triage dispatches; the thermal camera reads the plume cool, water vapour, structure intact; the Incident Report logs an unplanned relief lift for maintenance and does not escalate.
+In the set because it produces the same Detection as Scenario 6 with the opposite outcome, and the only thing separating them is a sensor choice the agent makes on station. Run 6 and 7 back to back in the demo.
+
 ### Build order
 
 1, then 4, then 3, then 2, then 5. Scenario 1 unblocks the pipeline. Without 4 the eval numbers mean nothing. Without 3 the pitch loses its strongest moment.

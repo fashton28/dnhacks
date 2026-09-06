@@ -173,7 +173,7 @@ def site_context(fleet: int) -> dict:
         {"zone_id": "service_yard", "name": "Service yard (maintenance shed)", "zone_class": "service_yard", "ring": ring(yard),
          "normally_present": "Contractor pickups and vans, pallets, crates and spare parts staged around the maintenance shed during a declared maintenance window; empty and tidy outside of one."},
         {"zone_id": "switchyard", "name": "Switchyard", "zone_class": "protected_area", "ring": ring([(x0 - 8, y0 - 8), (x1 + 8, y0 - 8), (x1 + 8, y1 + 20), (x0 - 8, y1 + 20)]),
-         "normally_present": "High-voltage equipment, nobody on foot except escorted technicians during a declared window."},
+         "normally_present": "High-voltage equipment running warm (transformers about 60 C in thermal), nobody on foot except escorted technicians during a declared window. Never smoke, never flame."},
         {"zone_id": "buffer", "name": "Buffer strip (between the fences)", "zone_class": "open_ground", "ring": ring(square(OUTER)),
          "normally_present": "Mown grass, the access road, light poles. Nothing parked, nothing stored, fences intact."},
         {"zone_id": "perimeter_approach", "name": "Approach outside the outer fence", "zone_class": "open_ground", "ring": ring(square(GEOFENCE)),
@@ -188,7 +188,7 @@ def site_context(fleet: int) -> dict:
             {"zone_id": "service_yard", "description": "Contractor maintenance on the auxiliary cooling pumps; two marked utility vehicles and staged parts expected in the service yard",
              "starts_at": "2026-09-05T08:00:00-05:00", "ends_at": "2026-09-06T18:00:00-05:00"},
         ],
-        "notes": "Fictional Site for the ARGUS simulation. Security posture: any unannounced vehicle at the outer fence, any object left inside the protected area, or any fence opening is reportable. Declared maintenance activity in the service yard is not.",
+        "notes": "Fictional Site for the ARGUS simulation. Security posture: any unannounced vehicle at the outer fence, any object left inside the protected area, or any fence opening is reportable. Declared maintenance activity in the service yard is not. Operational posture: smoke or heat at any transformer or in the switchyard is a fire until a Drone proves otherwise; dispatch immediately, hold at least 40 m from the source and upwind, confirm with the thermal camera, and escalate. Brief white plumes from the auxiliary building roof relief vents can occur without notice; they are cool water vapour, so confirm with the thermal camera and log them as an unplanned relief lift for maintenance rather than escalating.",
     }
 
 

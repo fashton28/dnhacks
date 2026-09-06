@@ -220,7 +220,7 @@ export function createOverview(el: HTMLElement, opts: OverviewOptions): Overview
     map.addLayer({ id: "gate-circle", type: "circle", source: "gate", paint: { "circle-radius": 4, "circle-color": "#f0c04a", "circle-stroke-color": "#0d1117", "circle-stroke-width": 1 } });
     map.addLayer({ id: "props-circle", type: "circle", source: "props", paint: {
       "circle-radius": 7,
-      "circle-color": ["match", ["get", "kind"], "vehicle", "#ff2d55", "crate", "#d29922", "person", "#bc8cff", "#e6edf3"],
+      "circle-color": ["match", ["get", "kind"], "vehicle", "#ff2d55", "crate", "#d29922", "person", "#bc8cff", "fire", "#ff5a1f", "steam", "#9fd3ff", "#e6edf3"],
       "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.5, "circle-opacity": 0.95,
     } });
     map.addLayer({ id: "props-label", type: "symbol", source: "props", layout: { "text-field": ["get", "label"], "text-size": 10, "text-offset": [0, 1.3], "text-anchor": "top", "text-font": ["Open Sans Semibold"] }, paint: { "text-color": "#ffd7dd", "text-halo-color": "#0b0e12", "text-halo-width": 1.2 } });
@@ -338,7 +338,7 @@ export function createOverview(el: HTMLElement, opts: OverviewOptions): Overview
       (map.getSource("fences") as maplibregl.GeoJSONSource).setData(fences as any);
       const props = {
         type: "FeatureCollection",
-        features: state.props.map((p) => ({ type: "Feature", properties: { id: p.id, kind: p.kind, label: p.kind === "vehicle" ? "intruder vehicle" : p.kind }, geometry: { type: "Point", coordinates: lonLat(anchor, p.x, p.y) } })),
+        features: state.props.map((p) => ({ type: "Feature", properties: { id: p.id, kind: p.kind, label: p.kind === "vehicle" ? "intruder vehicle" : p.kind === "fire" ? "fire" : p.kind === "steam" ? "steam release" : p.kind }, geometry: { type: "Point", coordinates: lonLat(anchor, p.x, p.y) } })),
       };
       (map.getSource("props") as maplibregl.GeoJSONSource).setData(props as any);
     });

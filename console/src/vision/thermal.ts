@@ -7,10 +7,10 @@ export type Palette = "ironbow" | "whitehot";
 const PLUME_VERT = `attribute float aAge; varying float vAge; uniform float size;
   void main(){ vAge = aAge; vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
     gl_PointSize = size * (0.6 + vAge * 2.2) / -mv.z; }`;
-const PLUME_FRAG = `varying float vAge;
+const PLUME_FRAG = `varying float vAge; uniform float heat;
   void main(){ float d = length(gl_PointCoord - 0.5); if (d > 0.5) discard;
     float a = exp(-d * d * 14.0) * (1.0 - smoothstep(0.45, 1.0, vAge)) * smoothstep(0.0, 0.06, vAge);
-    float t = mix(0.5, 1.0, pow(1.0 - vAge, 1.5));   // fresh steam is hottest, cooling as it drifts
+    float t = heat * mix(0.5, 1.0, pow(1.0 - vAge, 1.5));   // fresh gas is hottest, cooling as it drifts; heat scales the whole column
     gl_FragColor = vec4(vec3(t), a * 0.9); }`;
 
 const POST_FRAG = `
@@ -63,7 +63,13 @@ export class ThermalPass {
   palette: Palette = "ironbow";
   private target: THREE.WebGLRenderTarget;
   private mats = new Map<string, THREE.Material>();
-  private plumeMat = new THREE.ShaderMaterial({ uniforms: { size: { value: 2600.0 } }, vertexShader: PLUME_VERT, fragmentShader: PLUME_FRAG, transparent: true, depthWrite: false });
+  private plumeMats = new Map<number, THREE.ShaderMaterial>();
+  private plumeMat(heat: number): THREE.ShaderMaterial {
+    const key = Math.round(heat * 100) / 100;
+    let m = this.plumeMats.get(key);
+    if (!m) { m = new THREE.ShaderMaterial({ uniforms: { size: { value: 2600.0 }, heat: { value: key } }, vertexShader: PLUME_VERT, fragmentShader: PLUME_FRAG, transparent: true, depthWrite: false }); this.plumeMats.set(key, m); }
+    return m;
+  }
   private saved: { o: THREE.Object3D; m: THREE.Material | THREE.Material[]; visible: boolean }[] = [];
   private post: THREE.ShaderMaterial;
   private quad: THREE.Mesh;
@@ -108,7 +114,7 @@ export class ThermalPass {
       const cls = thermalOf(o);
       this.saved.push({ o, m: mesh.material, visible: o.visible });
       if (cls.hidden) { o.visible = false; return; }
-      if ((o as THREE.Points).isPoints) { mesh.material = this.plumeMat; return; }
+      if ((o as THREE.Points).isPoints) { mesh.material = this.plumeMat(cls.t); return; }
       const src = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material;
       const tm = this.material(cls.t, src);
       mesh.material = Array.isArray(mesh.material) ? mesh.material.map(() => tm) : tm;
